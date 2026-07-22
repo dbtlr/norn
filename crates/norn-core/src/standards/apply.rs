@@ -13,8 +13,7 @@ use thiserror::Error;
 
 use crate::standards::op::{ApplyBatch, ApplyOp};
 use crate::standards::repair::warnings::PlanWarning;
-use crate::standards::repair::{SkippedSummary, REPAIR_PLAN_SCHEMA_VERSION};
-use crate::standards::summary::Summary;
+use crate::standards::repair::REPAIR_PLAN_SCHEMA_VERSION;
 
 #[derive(Debug, Error)]
 pub enum ApplyError {
@@ -225,8 +224,8 @@ impl ApplyError {
 
     /// A per-variant HINT that this failure *class* is typically raised at a
     /// pre-write validation site. **It is NOT the refused-vs-failed gate** — that
-    /// gate is the runtime write-state fact threaded through the applier
-    /// (`apply_repair_plan_with_context`'s `wrote_any`), because a single variant
+    /// gate is the runtime write-state fact tracked by the applier
+    /// (the pass tracker's `wrote_any`), because a single variant
     /// is structurally ambiguous: `stale-document-hash` / `unknown-path` are
     /// raised from BOTH the pre-write Phase-A1 content CAS AND the Phase-B delete
     /// pass (which runs AFTER Phase A2 has already written other ops in a mixed
@@ -339,6 +338,16 @@ pub enum PlanStructureError {
 
     #[error("edit op decode for {path}: {message}")]
     EditPayloadDecode { path: Utf8PathBuf, message: String },
+
+    // ── requires DAG (NRN-406, ADR 0024) ──────────────────────────────────────
+    // A `requires` edge referencing an op id no operation carries, or a cycle in
+    // the declared ordering, is a malformed authored plan — refused whole before
+    // any write.
+    #[error("operation '{op}' requires unknown operation id: {requires}")]
+    RequiresUnknownOp { op: String, requires: String },
+
+    #[error("MigrationPlan `requires` edges form a cycle involving operation id: {op}")]
+    RequiresCycle { op: String },
 }
 
 impl PlanStructureError {
@@ -461,121 +470,10 @@ pub struct CascadeRecord {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct RepairApplyWarning {
+pub struct PlanApplyWarning {
     pub path: Utf8PathBuf,
     #[serde(flatten)]
     pub warning: PlanWarning,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RepairApplyReport {
-    pub schema_version: u32,
-    pub dry_run: bool,
-    pub changed_files: Vec<Utf8PathBuf>,
-    pub applied_changes: usize,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub moved_files: Vec<MoveResult>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub deleted_documents: Vec<DeleteResult>,
-    /// Documents created by `create_document` ops (Pass 1e).
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub created_documents: Vec<CreateDocumentResult>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub rewritten_links: Vec<LinkRewriteResult>,
-    /// Per-change backlink cascades (move/delete). Internal; not serialized —
-    /// the applier folds these into per-op `CascadeSummary` in the ApplyReport.
-    #[serde(skip)]
-    pub cascades: Vec<CascadeRecord>,
-    /// Paths whose body was wholly replaced by a `replace_body` change (Pass 1d).
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub replaced_bodies: Vec<Utf8PathBuf>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub warnings: Vec<RepairApplyWarning>,
-    pub plan_context: RepairApplyPlanContext,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verification: Option<RepairApplyVerification>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RepairApplyPlanContext {
-    pub skipped: SkippedSummary,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RepairApplyVerification {
-    pub remaining_findings: usize,
-    pub summary: Summary,
-}
-
-impl RepairApplyReport {
-    pub fn new(plan: &ApplyBatch, dry_run: bool) -> Self {
-        Self {
-            schema_version: plan.schema_version,
-            dry_run,
-            changed_files: Vec::new(),
-            applied_changes: plan.changes.len(),
-            moved_files: Vec::new(),
-            deleted_documents: Vec::new(),
-            created_documents: Vec::new(),
-            rewritten_links: Vec::new(),
-            cascades: Vec::new(),
-            replaced_bodies: Vec::new(),
-            warnings: Vec::new(),
-            plan_context: RepairApplyPlanContext {
-                skipped: plan.summary.skipped.clone(),
-            },
-            verification: None,
-        }
-    }
-
-    /// Every vault-relative path this apply TOUCHED on disk, de-duplicated — the
-    /// changed-file set an MCP warm mutation feeds to its cache increment commit
-    /// (NRN-252 / NRN-158). Supersets `changed_files`: a move touches both its
-    /// source and destination, a delete removes a path, a create adds one, and a
-    /// backlink cascade rewrites other files' bodies — all of which change (or
-    /// vacate) cache rows that a plain `changed_files` scan would miss.
-    ///
-    /// Disk is truth downstream: the increment commit stats each path (present ⇒
-    /// upsert, gone ⇒ drop), so over-including a path that ended up unchanged is
-    /// harmless. Only completeness matters here — a missed path would leave the
-    /// next read's `detect` seeing it as changed and paying the rebuild NRN-158
-    /// exists to avoid.
-    pub fn touched_paths(&self) -> Vec<Utf8PathBuf> {
-        let mut out: Vec<Utf8PathBuf> = Vec::new();
-        // First-occurrence-order dedup via a HashSet insert-check (the
-        // `dedup_preserve_order` house shape), not an O(n²) `out.iter().any`.
-        let mut seen: std::collections::HashSet<Utf8PathBuf> = std::collections::HashSet::new();
-        let mut push = |p: &Utf8Path| {
-            if seen.insert(p.to_path_buf()) {
-                out.push(p.to_path_buf());
-            }
-        };
-        for p in &self.changed_files {
-            push(p);
-        }
-        for m in &self.moved_files {
-            push(&m.from);
-            push(&m.to);
-        }
-        for d in &self.deleted_documents {
-            push(&d.path);
-        }
-        for c in &self.created_documents {
-            push(&c.path);
-        }
-        for p in &self.replaced_bodies {
-            push(p);
-        }
-        for r in &self.rewritten_links {
-            push(&r.file);
-        }
-        for cascade in &self.cascades {
-            for r in &cascade.rewritten {
-                push(&r.file);
-            }
-        }
-        out
-    }
 }
 
 pub fn validate_plan_for_apply(cwd: &Utf8PathBuf, plan: &ApplyBatch) -> Result<(), ApplyError> {

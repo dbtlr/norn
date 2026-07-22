@@ -1,11 +1,23 @@
-//! The repair-specific apply orchestrator.
+//! The one apply engine's ordered passes (ADR 0024).
 //!
-//! `apply_repair_plan` runs a `ApplyBatch`'s changes in ordered passes —
-//! document creation, moves, deletes, link rewrites, file edits — over the
-//! low-level primitives in `standards::apply`, collecting per-op results and
-//! skip reasons. The `repair` and `new` commands drive it; the general `apply`
-//! command uses `applier.rs` instead. Containment and mutation-lock checks live
-//! in the primitives it calls, not here.
+//! [`run_apply_passes`] runs an [`ApplyBatch`]'s ops over the low-level
+//! primitives in `standards::apply`, in the fixed kind order
+//! content → delete → create → move → cascade → retry. Each named pass records
+//! every op's outcome (`applied` / `failed` / `not_run` / `skipped`) into an
+//! [`OpTracker`] AS IT HAPPENS — the report is assembled from those recorded
+//! statuses, never reconstructed from the telemetry event log. There is one
+//! applier for every mutation verb and for repair; this module is where its
+//! ops actually touch disk. Containment and mutation-lock checks live in the
+//! primitives it calls, and the plan-level barriers run once at the top.
+//!
+//! # Partial apply is the semantics (ADR 0024)
+//!
+//! A per-op failure no longer aborts the plan: the failed op records `failed`
+//! with its coded error, ops that depend on it (a `requires` edge, or a later op
+//! on the same already-failed path) record `not_run`, and every INDEPENDENT op
+//! still runs. A plan-level barrier (schema, vault-root, vacate, duplicate-field,
+//! containment) still refuses the whole plan before the first write — that alone
+//! is the byte-identical `refused` class, surfaced as an `Err` from this fn.
 
 use std::fs;
 use std::time::Duration;
@@ -16,14 +28,17 @@ use crate::domain::GraphIndex;
 use crate::standards::apply::{
     apply_file_changes, apply_link_rewrites, apply_rewrite_link, apply_strip_bom, changes_by_path,
     validate_plan_for_apply, ApplyError, CascadeRecord, CreateDocumentResult, DeleteResult,
-    LinkAttempt, LinkFailResult, LinkRewriteResult, LinkSkipResult, MoveResult, RepairApplyWarning,
+    LinkAttempt, LinkFailResult, LinkRewriteResult, LinkSkipResult, MoveResult, PlanApplyWarning,
 };
 use crate::standards::{ApplyBatch, ApplyOp};
+use crate::telemetry::EventSink;
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
+use norn_wire::OpStatus;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-/// Context passed to `apply_repair_plan` for flags that only affect specific
-/// orchestrator passes (currently, `create_document` Pass 1e).
+/// Context passed to the apply passes for flags that only affect specific
+/// passes (currently, `create_document`).
 #[derive(Debug, Default, Clone)]
 pub struct CreateApplyContext {
     /// When true and a `create_document` change's parent directory is missing,
@@ -49,27 +64,214 @@ pub struct CreateApplyContext {
     /// the delegate fails closed rather than allocate a path that barrier never
     /// validated.
     ///
-    /// Per-caller reachability of the Pass-1e seq branch (authoritative copy):
-    ///   - MigrationPlan applier (`applier.rs`): sets `true` — pre-resolves via
+    /// Per-caller reachability of the create-pass seq branch (authoritative copy):
+    ///   - MigrationPlan applier (`executor.rs`): sets `true` — pre-resolves via
     ///     `resolve_create_paths` under the owner-set barrier and rewrites
     ///     `change.path` before delegating, so the branch is unreachable there.
-    ///   - `new` (CLI `new/mod.rs`, MCP `mcp/tools/new.rs`): `false` — passes
-    ///     the `{{seq}}` template unresolved; the branch is load-bearing.
-    ///   - set / edit (CLI `lib.rs`, MCP `set.rs`/`edit.rs`): `false` (default)
-    ///     — they emit no `create_document` ops and never reach the branch.
+    ///   - `new` (verb): `false` — passes the `{{seq}}` template unresolved; the
+    ///     branch is load-bearing.
+    ///   - set / edit: `false` (default) — they emit no `create_document` ops and
+    ///     never reach the branch.
     pub creates_preresolved: bool,
 }
 
-pub use crate::standards::apply::RepairApplyReport;
+/// Per-op outcome, recorded by the passes AS each op runs (ADR 0024 "true per-op
+/// tracking") rather than reconstructed from the event log afterward. Keyed by
+/// `change_id`; an op never recorded reads back as `not_run` (the correct default
+/// for an op a barrier or an upstream failure kept from running).
+#[derive(Default, Debug)]
+pub(crate) struct OpTracker {
+    status: HashMap<String, OpStatus>,
+    /// change_id -> the rich error for a `failed` op, so the report envelope and
+    /// the CLI clean-refusal re-raise carry the same coded fault the primitive
+    /// raised. Only the first op of a multi-op file failure holds the error; its
+    /// siblings record `failed` with no error (matching the old report, where a
+    /// non-offender failed op carried none).
+    errors: HashMap<String, anyhow::Error>,
+    /// change_ids of failures in record order; the first is exactly where the old
+    /// abort-on-first-failure applier would have stopped — the representative
+    /// error for a clean refusal.
+    failure_order: Vec<String>,
+    /// Paths that had a `failed` op; a later op on the same path records `not_run`
+    /// ("same file later in pass order" propagation, ADR 0024).
+    failed_paths: BTreeSet<Utf8PathBuf>,
+    /// Runtime write-state: flipped `true` the instant the first filesystem write
+    /// lands. THE refused-vs-partial gate — a variant flag cannot be, since the
+    /// same variant is raised from both pre- and post-write sites.
+    wrote_any: bool,
+}
+
+impl OpTracker {
+    pub(crate) fn applied(&mut self, id: &str) {
+        self.status.insert(id.to_string(), OpStatus::Applied);
+    }
+    /// Record `skipped` unless the op already reached a terminal state.
+    pub(crate) fn skipped(&mut self, id: &str) {
+        self.status
+            .entry(id.to_string())
+            .or_insert(OpStatus::Skipped);
+    }
+    fn not_run(&mut self, id: &str) {
+        self.status.insert(id.to_string(), OpStatus::NotRun);
+    }
+    /// Record `failed` for the op, keeping the rich error as the representative
+    /// (first) failure and marking the path failed so dependents propagate.
+    fn failed(&mut self, id: &str, path: &Utf8Path, err: impl Into<anyhow::Error>) {
+        self.status.insert(id.to_string(), OpStatus::Failed);
+        if !self.errors.contains_key(id) {
+            self.failure_order.push(id.to_string());
+        }
+        self.errors.insert(id.to_string(), err.into());
+        self.failed_paths.insert(path.to_path_buf());
+    }
+    /// Record `failed` for a sibling op of an already-recorded file failure — no
+    /// error attached (the representative sibling holds it), matching the old
+    /// report where only the offending op carried the coded error.
+    fn failed_secondary(&mut self, id: &str, path: &Utf8Path) {
+        self.status.insert(id.to_string(), OpStatus::Failed);
+        self.failed_paths.insert(path.to_path_buf());
+    }
+    fn mark_wrote(&mut self) {
+        self.wrote_any = true;
+    }
+    pub(crate) fn status(&self, id: &str) -> OpStatus {
+        self.status.get(id).cloned().unwrap_or(OpStatus::NotRun)
+    }
+    pub(crate) fn error(&self, id: &str) -> Option<&anyhow::Error> {
+        self.errors.get(id)
+    }
+    pub(crate) fn failed_count(&self) -> usize {
+        self.status
+            .values()
+            .filter(|s| **s == OpStatus::Failed)
+            .count()
+    }
+    pub(crate) fn wrote_any(&self) -> bool {
+        self.wrote_any
+    }
+    /// The representative failure (first recorded) — the fault a clean refusal
+    /// re-raises for the CLI and stamps on its offending op.
+    pub(crate) fn first_failure(&self) -> Option<&anyhow::Error> {
+        self.failure_order
+            .first()
+            .and_then(|id| self.errors.get(id))
+    }
+    /// Take ownership of the representative failure so the CLI clean-refusal path
+    /// can re-raise the original rich error faithfully.
+    pub(crate) fn take_first_failure(&mut self) -> Option<anyhow::Error> {
+        let id = self.failure_order.first().cloned()?;
+        self.errors.remove(&id)
+    }
+    fn path_failed(&self, path: &Utf8Path) -> bool {
+        self.failed_paths.contains(path)
+    }
+}
+
+/// The declared `requires` DAG (ADR 0024), projected onto interior change ids.
+/// `requires` constrains outcome propagation WITHIN the fixed kind-ordered
+/// passes: an op whose required op did not fully apply records `not_run`. It does
+/// not reorder passes — so a requirement on a LATER-pass op can never be
+/// satisfied at evaluation time (the required op is still unrecorded, which
+/// reads as `not_run`) and conservatively blocks the dependent. Fail-safe by
+/// design: a forward requirement yields a `not_run` dependent, never a write
+/// ordered against the author's declared dependency. A plan declaring no
+/// `requires` yields an empty map and behaves exactly as before.
+#[derive(Default)]
+pub(crate) struct DependencyMap {
+    change_requires: HashMap<String, Vec<String>>,
+    op_changes: HashMap<String, Vec<String>>,
+}
+
+impl DependencyMap {
+    pub(crate) fn new(
+        change_requires: HashMap<String, Vec<String>>,
+        op_changes: HashMap<String, Vec<String>>,
+    ) -> Self {
+        Self {
+            change_requires,
+            op_changes,
+        }
+    }
+
+    /// True when a required op has any expansion that `failed` or was left
+    /// `not_run` — so this change must record `not_run` without running.
+    fn blocked(&self, change_id: &str, tracker: &OpTracker) -> bool {
+        let Some(reqs) = self.change_requires.get(change_id) else {
+            return false;
+        };
+        reqs.iter().any(|op_id| {
+            self.op_changes.get(op_id).is_some_and(|cids| {
+                cids.iter()
+                    .any(|c| matches!(tracker.status(c), OpStatus::Failed | OpStatus::NotRun))
+            })
+        })
+    }
+}
+
+/// The accumulated per-op results the report assembler consumes — the direct
+/// successor to the deleted `RepairApplyReport`, minus its report-shaped fields
+/// (schema/dry_run/plan_context/verification) and plus the [`OpTracker`]. The
+/// lists mirror the former report's so the assembler folds each op's cascade,
+/// created path, and touched-file set from them (never from events).
+#[derive(Default, Debug)]
+pub(crate) struct ApplyOutcomes {
+    pub changed_files: Vec<Utf8PathBuf>,
+    pub moved_files: Vec<MoveResult>,
+    pub deleted_documents: Vec<DeleteResult>,
+    pub created_documents: Vec<CreateDocumentResult>,
+    pub rewritten_links: Vec<LinkRewriteResult>,
+    /// Per-change backlink cascades (move/delete), keyed by source path. Folded
+    /// into each op's `CascadeSummary` by the assembler; never serialized.
+    pub cascades: Vec<CascadeRecord>,
+    pub replaced_bodies: Vec<Utf8PathBuf>,
+    pub warnings: Vec<PlanApplyWarning>,
+    pub tracker: OpTracker,
+}
+
+impl ApplyOutcomes {
+    /// Every vault-relative path this apply TOUCHED on disk, de-duplicated — the
+    /// changed-file set an MCP warm mutation feeds to its cache increment commit
+    /// (NRN-252 / NRN-158). Supersets `changed_files`: a move touches source and
+    /// destination, a delete removes a path, a create adds one, and a backlink
+    /// cascade rewrites other files' bodies.
+    pub(crate) fn touched_paths(&self) -> Vec<Utf8PathBuf> {
+        let mut out: Vec<Utf8PathBuf> = Vec::new();
+        let mut seen: std::collections::HashSet<Utf8PathBuf> = std::collections::HashSet::new();
+        let mut push = |p: &Utf8Path| {
+            if seen.insert(p.to_path_buf()) {
+                out.push(p.to_path_buf());
+            }
+        };
+        for p in &self.changed_files {
+            push(p);
+        }
+        for m in &self.moved_files {
+            push(&m.from);
+            push(&m.to);
+        }
+        for d in &self.deleted_documents {
+            push(&d.path);
+        }
+        for c in &self.created_documents {
+            push(&c.path);
+        }
+        for p in &self.replaced_bodies {
+            push(p);
+        }
+        for r in &self.rewritten_links {
+            push(&r.file);
+        }
+        for cascade in &self.cascades {
+            for r in &cascade.rewritten {
+                push(&r.file);
+            }
+        }
+        out
+    }
+}
 
 /// Pre-stamp an `op_planned` span per planned change so the applier's per-op
-/// `action` events thread under the right span. Returns the `change_id → span`
-/// map [`apply_repair_plan_with_context`] expects. Shared by the CLI and MCP
-/// set / new / edit paths so span construction stays identical across surfaces.
-///
-/// Unused until the frontmatter mutation verbs (`set` / `new` / `edit`) land —
-/// the plan applier builds its own spans inline. Kept live rather than deferring
-/// this helper's port along with those verbs.
+/// `action` events thread under the right span. Shared by the verb paths.
 #[allow(dead_code)]
 pub(crate) fn build_op_spans(
     sink: &mut crate::telemetry::EventSink,
@@ -84,14 +286,12 @@ pub(crate) fn build_op_spans(
 }
 
 /// Refuse a plan whose target is not tracked in the index. The whole-document
-/// hash CAS itself now happens against the file's ACTUAL bytes inside the
-/// transaction engine (`transaction::fingerprint_cas`), not against the
-/// GraphIndex snapshot — the index can be stale relative to the file, so the
-/// file-bytes CAS strictly catches more staleness. This retains only the
+/// hash CAS itself happens against the file's ACTUAL bytes inside the transaction
+/// engine, not against the GraphIndex snapshot. This retains only the
 /// index-membership half of the old `check_hash`: a plan targeting a path the
-/// index never saw is an `unknown-path` refusal.
+/// index never saw is an `unknown-path` failure.
 fn ensure_known_path(
-    current_hashes: &std::collections::BTreeMap<Utf8PathBuf, String>,
+    current_hashes: &BTreeMap<Utf8PathBuf, String>,
     change: &ApplyOp,
 ) -> Result<()> {
     if !current_hashes.contains_key(&change.path) {
@@ -104,15 +304,6 @@ fn ensure_known_path(
 
 /// The plan `document_hash` for one path, taken from its first content op.
 /// Empty string when operator-originated (no CAS).
-///
-/// `changes_by_path`'s ConflictingHashes check only covers FRONTMATTER ops
-/// (set/add/remove) — strip_bom, rewrite_link, replace_body, and the section
-/// edit ops are skipped by it. So a divergent same-path hash is guaranteed
-/// impossible only across frontmatter ops; a hand-authored plan mixing content
-/// classes with different hashes on one path would CAS against whichever op is
-/// first here. That is acceptable: any wrong hash refuses as stale, and
-/// verb-synthesized plans (the only ones with real hashes) always carry one
-/// uniform hash per path.
 fn content_plan_hash<'a>(ops: &ContentOps<'a>) -> &'a str {
     ops.strip_bom
         .iter()
@@ -128,15 +319,13 @@ fn content_plan_hash<'a>(ops: &ContentOps<'a>) -> &'a str {
 /// Whether every content op for a file is declarative (frontmatter set/add/
 /// remove, strip_bom) — the auto-retry-on-drift class. A single content-anchored
 /// op (rewrite_link, replace_body, or a section/heading edit) makes the whole
-/// file content-anchored: re-landing on drifted bytes could destroy an external
-/// edit, so it refuses on drift instead.
+/// file content-anchored: it refuses on drift instead of retrying.
 fn is_declarative_only(ops: &ContentOps<'_>) -> bool {
     ops.rewrite_links.is_empty() && ops.replace_bodies.is_empty() && ops.edit_ops.is_empty()
 }
 
-/// Clone the per-file op buckets (cheap: the vectors hold `&ApplyOp`) so
-/// the transaction engine can re-run composition on a retry round without
-/// consuming the originals.
+/// Clone the per-file op buckets (cheap: the vectors hold `&ApplyOp`) so the
+/// transaction engine can re-run composition on a retry round.
 fn clone_ops<'a>(ops: &ContentOps<'a>) -> ContentOps<'a> {
     ContentOps {
         strip_bom: ops.strip_bom.clone(),
@@ -154,14 +343,9 @@ fn count_planned_links(change: &ApplyOp) -> usize {
 }
 
 /// Re-attempt every failed backlink rewrite across all cascades, up to
-/// `backoff.len()` rounds, sleeping `backoff[round]` BEFORE each round so a
-/// transient condition affecting several files clears in one wait. Recovered
-/// links move from `failed` to `rewritten`; survivors stay `failed` with
-/// their latest reason. Returns the recovered `LinkRewriteResult`s so the
-/// caller can extend the flat `rewritten_links` list.
-///
-/// Zero happy-path cost: if no cascade has a failure, returns immediately
-/// without sleeping or invoking `attempt`.
+/// `backoff.len()` rounds, sleeping `backoff[round]` BEFORE each round. Recovered
+/// links move from `failed` to `rewritten`; survivors stay `failed`. Returns the
+/// recovered `LinkRewriteResult`s. Zero happy-path cost.
 fn retry_failed_cascades<F>(
     cascades: &mut [CascadeRecord],
     backoff: &[Duration],
@@ -214,37 +398,7 @@ where
     promoted
 }
 
-/// Thin wrapper over [`apply_repair_plan_with_context`] that forwards a discard
-/// sink + empty span map. Production mutators (set/new/applier path) now open a
-/// real sink and call the `_with_context` form directly; this remains as a
-/// convenience for unit tests that don't exercise the event stream.
-#[cfg(test)]
-pub fn apply_repair_plan(
-    cwd: &Utf8PathBuf,
-    index: &GraphIndex,
-    plan: &ApplyBatch,
-    dry_run: bool,
-) -> Result<RepairApplyReport> {
-    let mut sink = crate::telemetry::EventSink::discard(
-        crate::telemetry::IdGen::new(),
-        crate::telemetry::Clock::System,
-    );
-    let spans = std::collections::HashMap::new();
-    apply_repair_plan_with_context(
-        cwd,
-        index,
-        plan,
-        dry_run,
-        &CreateApplyContext::default(),
-        &mut sink,
-        &spans,
-        None,
-    )
-}
-
 /// Emit an action event for a change if its span is known; no-op otherwise.
-/// Status is always `applied`; callers pass any extra attributes (e.g. the
-/// move destination).
 fn emit_op_action(
     sink: &mut crate::telemetry::EventSink,
     spans: &std::collections::HashMap<String, String>,
@@ -271,23 +425,14 @@ fn emit_op_action(
     }
 }
 
-/// Whether `op` is a content-mutating op — one handled by Phase A rather than a
-/// lifecycle op (create/delete/move). Delegates to [`content_class`] so there is
-/// one definition of the content-op vocabulary.
+/// Whether `op` is a content-mutating op (Phase A) rather than a lifecycle op.
 fn is_content_op(op: &str) -> bool {
     content_class(op).is_some()
 }
 
 /// Reject a plan that edits a document AFTER an earlier `delete_document` or
-/// `move_document` (its SOURCE) of the same path in plan order. Phase A (content)
-/// always runs before Phase B (delete/move), so a plan authored as "delete/move
-/// X, then edit X" would be silently reordered into edit-then-vacate — masking an
-/// incoherent intent (a document cannot be edited after it has been removed or
-/// moved away). The reverse order (edit X, then delete/move X) is the legitimate
-/// edit-then-vacate and stays valid. `create_document` at a vacated path is
-/// coherent (delete-then-recreate) and is not a content op, so it is not guarded.
+/// `move_document` of the same path in plan order (NRN-139). A plan-level barrier.
 fn reject_content_op_after_vacate(plan: &ApplyBatch) -> Result<()> {
-    // path -> (operation, change_id) of the earlier delete/move that vacated it.
     let mut vacated: std::collections::BTreeMap<&Utf8Path, (&str, &str)> =
         std::collections::BTreeMap::new();
     for change in &plan.changes {
@@ -308,13 +453,7 @@ fn reject_content_op_after_vacate(plan: &ApplyBatch) -> Result<()> {
 }
 
 /// (NRN-142) Post-serialization gate for `create_document`: the freshly
-/// serialized document must re-parse through the same read pipeline
-/// (`extract_frontmatter`) to a top-level mapping before it is written. YAML
-/// null over an empty/whitespace-only block counts as the empty mapping (the
-/// `---\n---\n` a fieldless create emits), mirroring the apply-path
-/// normalization. Everything else — a parse diagnostic, or a non-mapping
-/// frontmatter value — refuses the create with the document named, before any
-/// byte reaches disk.
+/// serialized document must re-parse to a top-level mapping before it is written.
 fn verify_created_document(resolved_path: &Utf8Path, contents: &str) -> Result<()> {
     let mut diagnostics = Vec::new();
     let (frontmatter, frontmatter_range, _, _) =
@@ -332,7 +471,7 @@ fn verify_created_document(resolved_path: &Utf8Path, contents: &str) -> Result<(
     let is_mapping = match (&frontmatter, &frontmatter_range) {
         (Some(serde_json::Value::Object(_)), Some(_)) => true,
         (Some(serde_json::Value::Null), Some(range)) => contents[range.clone()].trim().is_empty(),
-        (None, None) => true, // no frontmatter block at all: nothing to corrupt
+        (None, None) => true,
         _ => false,
     };
     if !is_mapping {
@@ -343,18 +482,14 @@ fn verify_created_document(resolved_path: &Utf8Path, contents: &str) -> Result<(
     Ok(())
 }
 
-/// Record `path` in `report.changed_files` if not already present (the list is
-/// de-duplicated).
-fn record_changed_file(report: &mut RepairApplyReport, path: &Utf8Path) {
-    if !report.changed_files.iter().any(|p| p.as_path() == path) {
-        report.changed_files.push(path.to_path_buf());
+/// Record `path` in `outcomes.changed_files` if not already present.
+fn record_changed_file(outcomes: &mut ApplyOutcomes, path: &Utf8Path) {
+    if !outcomes.changed_files.iter().any(|p| p.as_path() == path) {
+        outcomes.changed_files.push(path.to_path_buf());
     }
 }
 
-/// The content-mutating ops for one document, bucketed by class. A document
-/// touched by more than one class (canonically: a frontmatter `set` plus an
-/// `append_to_section`) composes into ONE read + ONE write — see
-/// [`compose_content_ops`].
+/// The content-mutating ops for one document, bucketed by class.
 #[derive(Default)]
 struct ContentOps<'a> {
     strip_bom: Vec<&'a ApplyOp>,
@@ -364,12 +499,22 @@ struct ContentOps<'a> {
     edit_ops: Vec<&'a ApplyOp>,
 }
 
-/// The region class a content op mutates. Ordered as the composition chain runs:
-/// strip_bom → frontmatter → rewrite_link → replace_body → section-edits.
-/// `strip_bom` (NRN-385) runs first: it only ever removes the document's
-/// leading 3 bytes, an offset every other class's edits sit past, so its
-/// position in the chain is really about intent (document-level normalization
-/// before content edits) rather than a correctness requirement.
+impl<'a> ContentOps<'a> {
+    /// Every change bucketed for this file, in composition-chain order — used to
+    /// record the whole file's ops when its transaction fails.
+    fn changes(&self) -> Vec<&'a ApplyOp> {
+        self.strip_bom
+            .iter()
+            .chain(self.frontmatter.iter())
+            .chain(self.rewrite_links.iter())
+            .chain(self.replace_bodies.iter())
+            .chain(self.edit_ops.iter())
+            .copied()
+            .collect()
+    }
+}
+
+/// The region class a content op mutates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContentClass {
     StripBom,
@@ -379,9 +524,7 @@ enum ContentClass {
     EditOps,
 }
 
-/// Classify a plan op into its content region, or `None` for a lifecycle op
-/// (create/delete/move). The single source of truth for the content-op
-/// vocabulary — shared by the Phase A bucketing dispatch and the vacate guard.
+/// Classify a plan op into its content region, or `None` for a lifecycle op.
 fn content_class(op: &str) -> Option<ContentClass> {
     Some(match op {
         "strip_bom" => ContentClass::StripBom,
@@ -398,12 +541,7 @@ fn content_class(op: &str) -> Option<ContentClass> {
     })
 }
 
-/// One transform invocation within a composed file: the planned changes it
-/// covers and whether it altered the content it was handed. Frontmatter and edit
-/// ops each run as ONE grouped transform (so `changes` may hold several); link
-/// rewrites and body replacements run per-change. `changed` drives no-op
-/// suppression — a byte-identical transform emits no action and adds no
-/// `changed_files` entry.
+/// One transform invocation within a composed file.
 #[derive(Debug)]
 struct ComposedUnit<'a> {
     changes: Vec<&'a ApplyOp>,
@@ -411,9 +549,7 @@ struct ComposedUnit<'a> {
     changed: bool,
 }
 
-/// The composed result for one document: the fully-transformed content plus the
-/// per-transform record. `content == original` exactly when the whole
-/// composition was a no-op (no unit changed).
+/// The composed result for one document.
 #[derive(Debug)]
 struct ComposedFile<'a> {
     content: String,
@@ -421,12 +557,8 @@ struct ComposedFile<'a> {
 }
 
 /// Chain every content-mutating op for one document into a single composed
-/// string. Classes apply in the fixed region order frontmatter → rewrite_link →
-/// replace_body → section-edits against the *evolving* content (each transform
-/// re-splits the frontmatter boundary from the string it is handed, so chaining
-/// — not byte-range merging against the original — is what keeps downstream
-/// offsets correct). Any transform failure propagates so the caller can abort the
-/// whole content phase before writing anything (NRN-139: no half-mutated file).
+/// string. Any transform failure propagates so the caller can record the failure
+/// before writing anything (NRN-139: no half-mutated file).
 fn compose_content_ops<'a>(
     path: &Utf8Path,
     ops: ContentOps<'a>,
@@ -442,8 +574,6 @@ fn compose_content_ops<'a>(
     let mut content = original.to_string();
     let mut units: Vec<ComposedUnit<'a>> = Vec::new();
 
-    // strip_bom: at most one meaningful change per doc (idempotent if more —
-    // see `apply_strip_bom`), so a per-change loop composes safely either way.
     for &change in &strip_bom {
         let updated = apply_strip_bom(&content, change)?;
         let changed = updated != content;
@@ -455,7 +585,6 @@ fn compose_content_ops<'a>(
         content = updated;
     }
 
-    // Frontmatter: one grouped transform over all set/remove/add changes.
     if !frontmatter.is_empty() {
         let updated = apply_file_changes(&content, &frontmatter)?;
         let changed = updated != content;
@@ -467,17 +596,7 @@ fn compose_content_ops<'a>(
         content = updated;
     }
 
-    // rewrite_link: per-change whole-file scans (matches the prior per-pass
-    // granularity so each rewrite's changed/no-op status is tracked independently).
     if !rewrite_links.is_empty() {
-        // NRN-141: rewrite_link rewrites `[[...]]` anywhere in the file,
-        // frontmatter values included, without the frontmatter editor's own
-        // post-image gate — a target carrying YAML-structural bytes can break
-        // the block. The degradation baseline is the state ENTERING the rewrite
-        // stage (post-frontmatter-ops), so frontmatter created by ops earlier
-        // in this same plan is protected too; the check only runs when link
-        // rewrites are actually composed (the other classes splice onto the
-        // verbatim frontmatter prefix and cannot degrade it).
         let rewrite_baseline = content.clone();
         for &change in &rewrite_links {
             let updated = apply_rewrite_link(&content, change)?;
@@ -498,7 +617,6 @@ fn compose_content_ops<'a>(
         }
     }
 
-    // replace_body: per-change whole-body rewrites.
     for &change in &replace_bodies {
         let updated = crate::standards::apply::apply_replace_body(&content, change)?;
         let changed = updated != content;
@@ -510,8 +628,6 @@ fn compose_content_ops<'a>(
         content = updated;
     }
 
-    // Section/body edit ops: one grouped transform running the shared
-    // `edit::transform` engine in plan order against the evolving body.
     if !edit_ops.is_empty() {
         let decoded: Vec<crate::edit::ops::EditOp> = edit_ops
             .iter()
@@ -546,62 +662,53 @@ fn compose_content_ops<'a>(
     Ok(ComposedFile { content, units })
 }
 
-/// Like `apply_repair_plan` but with additional context for `create_document`
-/// operations (e.g., the `-p` / `--parents` flag) and a telemetry sink + a
-/// `change_id -> op span id` map for emitting per-action events.
+/// The immutable per-run environment threaded through every pass.
+struct PassEnv<'a> {
+    cwd: &'a Utf8PathBuf,
+    dry_run: bool,
+    ctx: &'a CreateApplyContext,
+    spans: &'a HashMap<String, String>,
+    deps: &'a DependencyMap,
+    current_hashes: &'a BTreeMap<Utf8PathBuf, String>,
+}
+
+/// True (and records `not_run`) when this op is blocked by a failed requirement
+/// or a failed op on the same path — the ADR 0024 outcome-propagation gate.
+fn gate_blocked(env: &PassEnv, outcomes: &mut ApplyOutcomes, change: &ApplyOp) -> bool {
+    if outcomes.tracker.path_failed(&change.path)
+        || env.deps.blocked(&change.change_id, &outcomes.tracker)
+    {
+        outcomes.tracker.not_run(&change.change_id);
+        true
+    } else {
+        false
+    }
+}
+
+/// Run an [`ApplyBatch`]'s ops in the fixed kind-ordered passes, recording each
+/// op's outcome into the returned [`ApplyOutcomes`]'s tracker.
 ///
-/// `wrote_any` (NRN-150/183) is the runtime write-state fact: it is flipped to
-/// `true` the instant the FIRST filesystem write of this apply lands (an
-/// `atomic_write`, a `rename`, a `remove`, a `create_dir_all`, or a backlink
-/// rewrite). It persists across the `Err` boundary — the caller reads it to
-/// decide whether a failure is a byte-identical **refusal** (nothing written
-/// yet) or a partial **failure** (disk already mutated). This is the correct
-/// gate; the per-variant `ApplyError::is_precondition()` flag structurally
-/// cannot be, because the SAME variant (e.g. `stale-document-hash` /
-/// `unknown-path`) is raised from both a pre-write site (Phase A1 content CAS)
-/// and a post-write-possible site (the Phase B delete pass, after Phase A2 has
-/// already written other ops). Pass `None` when the caller does not need the
-/// fact (single-op set/new/edit paths, tests).
+/// Returns `Err` ONLY for a plan-level barrier (schema, vault-root, vacate,
+/// duplicate-field, containment) — the byte-identical whole-plan refusal, raised
+/// before the first write. Per-op failures are recorded in the tracker; the
+/// return is `Ok` even when some ops failed (partial apply is the semantics).
 #[allow(clippy::too_many_arguments)]
-pub fn apply_repair_plan_with_context(
+pub(crate) fn run_apply_passes(
     cwd: &Utf8PathBuf,
     index: &GraphIndex,
     plan: &ApplyBatch,
     dry_run: bool,
     ctx: &CreateApplyContext,
-    sink: &mut crate::telemetry::EventSink,
-    spans: &std::collections::HashMap<String, String>,
-    mut wrote_any: Option<&mut bool>,
-) -> Result<RepairApplyReport> {
-    use crate::telemetry::event;
-    use crate::telemetry::Severity;
-    // Flip the runtime write-state fact the moment a write lands. Reborrows the
-    // `Option<&mut bool>` each call, so it can be marked at every write site.
-    macro_rules! mark_wrote {
-        () => {
-            if let Some(w) = wrote_any.as_deref_mut() {
-                *w = true;
-            }
-        };
-    }
+    sink: &mut EventSink,
+    spans: &HashMap<String, String>,
+    deps: &DependencyMap,
+) -> Result<ApplyOutcomes> {
+    // ── Plan-level barriers (byte-identical whole-plan refusal, pre-write) ──────
     validate_plan_for_apply(cwd, plan)?;
-    // Guard incoherent plans BEFORE any write: a content op cannot target a path
-    // that an earlier delete/move in the same plan already vacated (NRN-139).
     reject_content_op_after_vacate(plan)?;
-
-    // `changes_by_path` validates the frontmatter changes (rejecting conflicting
-    // field edits / divergent hashes / unsupported ops) and skips the
-    // orchestrator-pass ops. We call it purely as that validation gate — Phase A
-    // below re-buckets the content ops itself so all four content classes compose
-    // into ONE read + ONE write per document.
     changes_by_path(plan)?;
 
-    // NRN-145 containment gate: every mutation op target must resolve inside the
-    // vault root. Refuse absolute paths, `..` traversal, and directories
-    // symlinked out of the vault BEFORE any write — the vault is self-contained.
-    // The vault root is canonicalized ONCE here (not per op, never on a read
-    // path); each op target's parent is then contained against it. Runs on
-    // dry-run too, so a preview refuses exactly where the real apply would.
+    // NRN-145 containment gate: every op target must resolve inside the vault.
     let canonical_root = cwd
         .as_std_path()
         .canonicalize()
@@ -623,33 +730,64 @@ pub fn apply_repair_plan_with_context(
         }
     }
 
-    let mut report = RepairApplyReport::new(plan, dry_run);
-
-    let current_hashes: std::collections::BTreeMap<Utf8PathBuf, String> = index
+    let current_hashes: BTreeMap<Utf8PathBuf, String> = index
         .documents
         .iter()
         .map(|d| (d.path.clone(), d.hash.clone()))
         .collect();
+    let env = PassEnv {
+        cwd,
+        dry_run,
+        ctx,
+        spans,
+        deps,
+        current_hashes: &current_hashes,
+    };
 
-    // ── Phase A: content composition (NRN-139) ────────────────────────────────
-    // Every content-mutating class (frontmatter set/remove/add, rewrite_link,
-    // replace_body, and the section/body edit ops) is FILE-MAJOR: a document
-    // touched by more than one class is read once, transformed by chaining the
-    // classes in the fixed region order frontmatter → rewrite_link →
-    // replace_body → section-edits, and written once. This closes the latent
-    // half-mutation window where a frontmatter write in one pass could land
-    // before a later pass's failing edit aborted the plan.
-    //
-    // A1 (compute) runs every transform under whole-doc CAS BEFORE any write. A
-    // hash drift or a failing transform (missing heading, non-unique str_replace,
-    // etc.) aborts the whole content phase here, before the first byte is written.
+    let mut outcomes = ApplyOutcomes::default();
+    // Paths the content pass actually rewrote, so the delete pass can SKIP its
+    // file-bytes CAS for a path we ourselves just wrote (edit-then-delete).
+    let mut phase_a_wrote: BTreeSet<Utf8PathBuf> = BTreeSet::new();
 
-    // Bucket content ops per document, recording first-appearance path order for
-    // determinism. Lifecycle ops (create/delete/move) classify as `None` and are
-    // handled by the Phase B passes.
+    content_pass(&env, plan, &mut outcomes, sink, &mut phase_a_wrote);
+    delete_pass(&env, plan, &mut outcomes, sink, &phase_a_wrote);
+    create_pass(&env, plan, &mut outcomes, sink);
+    move_pass(&env, plan, &mut outcomes, sink);
+    cascade_pass(&env, plan, &mut outcomes);
+    retry_pass(&env, plan, &mut outcomes, sink);
+
+    // Move warnings ride the move ops, recorded once here.
+    outcomes.warnings = plan
+        .changes
+        .iter()
+        .filter(|c| c.operation == "move_document")
+        .flat_map(|c| {
+            c.warnings.iter().map(|w| PlanApplyWarning {
+                path: c.path.clone(),
+                warning: w.clone(),
+            })
+        })
+        .collect();
+
+    Ok(outcomes)
+}
+
+/// content_pass — INVARIANT: each file is one atomic transaction (fingerprint →
+/// shadow-compose → verify → swap). Its content ops compose into ONE read + ONE
+/// write; a compose or CAS failure records `failed` for that file's ops and the
+/// pass moves on to the next (independent) file. Runs first so rewrite_link
+/// content settles before the delete/move cascades read it.
+fn content_pass(
+    env: &PassEnv,
+    plan: &ApplyBatch,
+    outcomes: &mut ApplyOutcomes,
+    sink: &mut EventSink,
+    phase_a_wrote: &mut BTreeSet<Utf8PathBuf>,
+) {
+    use crate::telemetry::Severity;
+
     let mut content_order: Vec<Utf8PathBuf> = Vec::new();
-    let mut content_ops: std::collections::BTreeMap<Utf8PathBuf, ContentOps> =
-        std::collections::BTreeMap::new();
+    let mut content_ops: BTreeMap<Utf8PathBuf, ContentOps> = BTreeMap::new();
     for change in &plan.changes {
         let Some(class) = content_class(&change.operation) else {
             continue;
@@ -667,43 +805,38 @@ pub fn apply_repair_plan_with_context(
         }
     }
 
-    // Per-file transactions (NRN-406 step 3): each file runs its OWN complete
-    // transaction — fingerprint (file-bytes CAS) → shadow (compose) → verify →
-    // swap — to completion before the next file starts. This replaces the old
-    // compute-all-then-write-all split: it shrinks the drift window (a file is
-    // read and written back-to-back rather than read early and written late) and
-    // makes the per-file unit real. Op ordering within the plan is otherwise
-    // unchanged; a transform or CAS failure still aborts the remaining plan (a
-    // partial write of earlier files is a truthful partial-apply, gated by
-    // `wrote_any`).
-    //
-    // `phase_a_wrote` records the paths this phase actually rewrote, so the later
-    // delete pass can SKIP its file-bytes CAS for a path we ourselves just wrote:
-    // its bytes no longer match the plan's pre-apply hash BY DESIGN (a legitimate
-    // edit-then-delete of the same path). The old index-based check tolerated
-    // this because it compared against the pre-apply index snapshot; the
-    // file-bytes CAS must too.
-    let mut phase_a_wrote: std::collections::BTreeSet<Utf8PathBuf> =
-        std::collections::BTreeSet::new();
-
     for path in &content_order {
         let ops = content_ops
             .remove(path)
             .expect("content_order paths are keys of content_ops");
-        // A plan targeting a path the index never saw is unknown-path, exactly as
-        // the old per-op hash check refused before comparing hashes.
-        if !current_hashes.contains_key(path) {
-            return Err(anyhow::anyhow!(ApplyError::UnknownPath {
-                path: path.clone()
-            }));
+        let file_changes = ops.changes();
+
+        // Requires-DAG / same-path gate: if any of this file's ops is blocked by a
+        // failed requirement, the whole file is not_run (it composes as one unit).
+        if file_changes.iter().any(|c| {
+            env.deps.blocked(&c.change_id, &outcomes.tracker)
+                || outcomes.tracker.path_failed(&c.path)
+        }) {
+            for c in &file_changes {
+                outcomes.tracker.not_run(&c.change_id);
+            }
+            continue;
+        }
+
+        // A plan targeting a path the index never saw is unknown-path.
+        if !env.current_hashes.contains_key(path) {
+            record_file_failure(
+                outcomes,
+                &file_changes,
+                path,
+                anyhow::anyhow!(ApplyError::UnknownPath { path: path.clone() }),
+            );
+            continue;
         }
         let plan_hash = content_plan_hash(&ops);
         let declarative_only = is_declarative_only(&ops);
-        let absolute_path = cwd.join(path);
+        let absolute_path = env.cwd.join(path);
 
-        // The shadow: compose all of this file's transforms over the content it is
-        // handed. Called once per attempt, so it clones the ref-buckets rather
-        // than consuming them (a retry round re-composes against fresh content).
         let compose = |content: &str| -> Result<Composition<ComposedFile>> {
             let file = compose_content_ops(path, clone_ops(&ops), content)?;
             let changed = file.units.iter().any(|u| u.changed);
@@ -714,35 +847,30 @@ pub fn apply_repair_plan_with_context(
             })
         };
 
-        // Dry-run still fingerprints (a preview must refuse exactly where the real
-        // apply would) and composes for the forecast, but never swaps/writes.
-        // Apply runs the full transaction: the engine does the swap re-read, drift
-        // handling, and the atomic write.
-        let (file, wrote) = if dry_run {
-            let original = transaction::fingerprint_cas(&absolute_path, path, plan_hash)?;
-            let composition = compose(&original)?;
-            (composition.payload, false)
+        let composed = if env.dry_run {
+            transaction::fingerprint_cas(&absolute_path, path, plan_hash)
+                .and_then(|original| compose(&original).map(|c| (c.payload, false)))
         } else {
             let policy = if declarative_only {
                 DriftPolicy::RetryDeclarative { max_attempts: 3 }
             } else {
                 DriftPolicy::RefuseContentAnchored
             };
-            let committed = transaction::run_content_transaction(
-                &absolute_path,
-                path,
-                plan_hash,
-                policy,
-                compose,
-            )?;
-            (committed.payload, committed.wrote)
+            transaction::run_content_transaction(&absolute_path, path, plan_hash, policy, compose)
+                .map(|committed| (committed.payload, committed.wrote))
+        };
+
+        let (file, wrote) = match composed {
+            Ok(pair) => pair,
+            Err(e) => {
+                record_file_failure(outcomes, &file_changes, path, e);
+                continue;
+            }
         };
 
         let overall_changed = file.units.iter().any(|u| u.changed);
-
-        // changed_files: present once iff the composed file actually changed.
         if overall_changed {
-            record_changed_file(&mut report, path);
+            record_changed_file(outcomes, path);
         }
 
         // Per-class report forecasts, preserving the prior per-pass shapes.
@@ -750,33 +878,28 @@ pub fn apply_repair_plan_with_context(
             match unit.class {
                 ContentClass::RewriteLink => {
                     let change = unit.changes[0];
-                    // Dry-run forecasts every rewrite (with from/to) regardless of
-                    // whether it would change the file; apply records only the
-                    // rewrites that actually landed.
-                    if dry_run || unit.changed {
+                    if env.dry_run || unit.changed {
                         if let (Some(from), Some(to)) = (
                             change.expected_old_value.as_ref().and_then(|v| v.as_str()),
                             change.new_value.as_ref().and_then(|v| v.as_str()),
                         ) {
-                            report.rewritten_links.push(LinkRewriteResult {
+                            outcomes.rewritten_links.push(LinkRewriteResult {
                                 file: change.path.clone(),
                                 from: from.to_string(),
                                 to: to.to_string(),
                             });
-                            if dry_run {
-                                record_changed_file(&mut report, &change.path);
+                            if env.dry_run {
+                                record_changed_file(outcomes, &change.path);
                             }
                         }
                     }
                 }
                 ContentClass::ReplaceBody => {
                     let change = unit.changes[0];
-                    // replace_body is always recorded in replaced_bodies (both
-                    // modes); dry-run additionally forces changed_files.
-                    if dry_run {
-                        record_changed_file(&mut report, &change.path);
+                    if env.dry_run {
+                        record_changed_file(outcomes, &change.path);
                     }
-                    report.replaced_bodies.push(change.path.clone());
+                    outcomes.replaced_bodies.push(change.path.clone());
                 }
                 ContentClass::StripBom | ContentClass::Frontmatter | ContentClass::EditOps => {}
             }
@@ -784,56 +907,83 @@ pub fn apply_repair_plan_with_context(
 
         if wrote {
             phase_a_wrote.insert(path.clone());
-            mark_wrote!();
-            // One action per contributing change_id: a unit that was a
-            // byte-identical no-op emits nothing.
-            for unit in &file.units {
-                if !unit.changed {
-                    continue;
-                }
-                for change in unit.changes.iter().copied() {
-                    emit_op_action(sink, spans, change, Severity::Info, Vec::new());
+            outcomes.tracker.mark_wrote();
+        }
+        // Per-op status: a change whose unit changed AND the file wrote is
+        // `applied` (its action event fires); any other content op is `skipped`
+        // (byte-identical no-op, or a dry-run preview the executor renders as
+        // not_run).
+        for unit in &file.units {
+            for change in unit.changes.iter().copied() {
+                if wrote && unit.changed {
+                    emit_op_action(sink, env.spans, change, Severity::Info, Vec::new());
+                    outcomes.tracker.applied(&change.change_id);
+                } else {
+                    outcomes.tracker.skipped(&change.change_id);
                 }
             }
         }
     }
+}
 
-    // ── Phase B: lifecycle post-passes ────────────────────────────────────────
-    // create_document, delete_document (+ --rewrite-to cascade), and
-    // move_document (+ backlink rewrites + retry) run AFTER the content phase.
-    // They are whole-file ops with cross-FILE cascades that must resolve from the
-    // now-settled content state.
+/// Record a per-file content failure: the first bucketed op holds the coded
+/// error (the representative fault a clean refusal re-raises), its siblings
+/// record `failed` with none — matching the old report, where a content-file
+/// failure marked one offending op and the rest were untouched.
+fn record_file_failure(
+    outcomes: &mut ApplyOutcomes,
+    file_changes: &[&ApplyOp],
+    path: &Utf8Path,
+    err: anyhow::Error,
+) {
+    let mut iter = file_changes.iter();
+    if let Some(first) = iter.next() {
+        outcomes.tracker.failed(&first.change_id, path, err);
+    }
+    for c in iter {
+        outcomes.tracker.failed_secondary(&c.change_id, path);
+    }
+}
 
-    // Delete pass: sequenced after the content phase (so rewrite_link content is
-    // settled and --rewrite-to redirects backlinks before the target disappears)
-    // and before move_document (so delete-then-move on the same path is
-    // impossible).
+/// delete_pass — INVARIANT: each `delete_document` redirects its backlinks
+/// (`--rewrite-to`) and removes its file, after the content phase (so redirects
+/// see settled bodies) and before creates/moves. A per-op failure records
+/// `failed`; independent deletes still run.
+fn delete_pass(
+    env: &PassEnv,
+    plan: &ApplyBatch,
+    outcomes: &mut ApplyOutcomes,
+    sink: &mut EventSink,
+    phase_a_wrote: &BTreeSet<Utf8PathBuf>,
+) {
+    use crate::telemetry::Severity;
     for change in plan
         .changes
         .iter()
         .filter(|c| c.operation == "delete_document")
     {
-        // Refuse a delete of a path the index never saw, then fingerprint the
-        // file itself against the plan's document_hash (NRN-406): the file-bytes
-        // CAS catches an external modification the pre-apply index snapshot would
-        // miss. Skip the CAS when Phase A already rewrote this path in THIS plan
-        // (edit-then-delete): its bytes intentionally no longer match the
-        // pre-apply hash. A missing/unreadable file falls through to
-        // `apply_delete`'s precise `delete-source-missing` refusal.
-        ensure_known_path(&current_hashes, change)?;
+        if gate_blocked(env, outcomes, change) {
+            continue;
+        }
+        if let Err(e) = ensure_known_path(env.current_hashes, change) {
+            outcomes.tracker.failed(&change.change_id, &change.path, e);
+            continue;
+        }
         if !phase_a_wrote.contains(&change.path) {
-            transaction::fingerprint_delete(
-                &cwd.join(&change.path),
+            if let Err(e) = transaction::fingerprint_delete(
+                &env.cwd.join(&change.path),
                 &change.path,
                 &change.document_hash,
-            )?;
+            ) {
+                outcomes.tracker.failed(&change.change_id, &change.path, e);
+                continue;
+            }
         }
 
-        // Apply link rewrites if link_risk is attached (--rewrite-to case). This
-        // runs BEFORE the delete so links can be rewritten in source docs.
+        // Redirect backlinks (--rewrite-to), BEFORE the delete.
         if change.link_risk.is_some() {
             let planned = count_planned_links(change);
-            if dry_run {
+            if env.dry_run {
                 let mut rewritten: Vec<LinkRewriteResult> = Vec::new();
                 if let Some(risk) = &change.link_risk {
                     for affected in risk
@@ -849,8 +999,8 @@ pub fn apply_repair_plan_with_context(
                         });
                     }
                 }
-                report.rewritten_links.extend(rewritten.clone());
-                report.cascades.push(CascadeRecord {
+                outcomes.rewritten_links.extend(rewritten.clone());
+                outcomes.cascades.push(CascadeRecord {
                     source_path: change.path.clone(),
                     planned,
                     rewritten,
@@ -858,239 +1008,266 @@ pub fn apply_repair_plan_with_context(
                     failed: Vec::new(),
                 });
             } else {
-                let outcome = apply_link_rewrites(cwd, change)?;
-                if !outcome.rewritten.is_empty() {
-                    mark_wrote!();
+                match apply_link_rewrites(env.cwd, change) {
+                    Ok(outcome) => {
+                        if !outcome.rewritten.is_empty() {
+                            outcomes.tracker.mark_wrote();
+                        }
+                        outcomes.rewritten_links.extend(outcome.rewritten.clone());
+                        outcomes.cascades.push(CascadeRecord {
+                            source_path: change.path.clone(),
+                            planned,
+                            rewritten: outcome.rewritten,
+                            skipped: outcome.skipped,
+                            failed: outcome.failed,
+                        });
+                    }
+                    Err(e) => {
+                        outcomes.tracker.failed(&change.change_id, &change.path, e);
+                        continue;
+                    }
                 }
-                report.rewritten_links.extend(outcome.rewritten.clone());
-                report.cascades.push(CascadeRecord {
-                    source_path: change.path.clone(),
-                    planned,
-                    rewritten: outcome.rewritten,
-                    skipped: outcome.skipped,
-                    failed: outcome.failed,
-                });
             }
         }
 
-        // The actual file removal.
-        if !dry_run {
-            let result = apply_delete(cwd, change)?;
-            mark_wrote!();
-            report.deleted_documents.push(result);
-            emit_op_action(sink, spans, change, Severity::Info, Vec::new());
-        } else {
-            report.deleted_documents.push(DeleteResult {
+        if env.dry_run {
+            outcomes.deleted_documents.push(DeleteResult {
                 path: change.path.clone(),
             });
+        } else {
+            match apply_delete(env.cwd, change) {
+                Ok(result) => {
+                    outcomes.tracker.mark_wrote();
+                    outcomes.deleted_documents.push(result);
+                    emit_op_action(sink, env.spans, change, Severity::Info, Vec::new());
+                    outcomes.tracker.applied(&change.change_id);
+                }
+                Err(e) => {
+                    outcomes.tracker.failed(&change.change_id, &change.path, e);
+                    continue;
+                }
+            }
         }
     }
+}
 
-    // Pass 1e: create_document operations. Sequenced after all mutation passes
-    // (set/remove frontmatter, rewrite_link, delete, replace_body) and before
-    // move_document, so we never move a document that was just created and then
-    // immediately renamed.
-    //
-    // NRN-101: `{{seq}}` ids allocated earlier in THIS plan but not yet on disk
-    // (dry-run never writes; apply writes just-in-time) are tracked here so a
-    // later seq-create in the same plan doesn't re-predict an id already claimed
-    // by an earlier one. Without this, a dry-run of a multi-create plan reports
-    // duplicate ids while apply produces distinct ones.
+/// create_pass — INVARIANT: each `create_document` resolves its `{{seq}}` id,
+/// re-checks `files.ignore`, gates the serialized document, and materializes it
+/// (atomic-exclusive unless `--force`), after deletes and before moves. A per-op
+/// failure records `failed`; independent creates still run.
+fn create_pass(
+    env: &PassEnv,
+    plan: &ApplyBatch,
+    outcomes: &mut ApplyOutcomes,
+    sink: &mut EventSink,
+) {
     let mut allocated_this_plan: Vec<Utf8PathBuf> = Vec::new();
     for change in plan
         .changes
         .iter()
         .filter(|c| c.operation == "create_document")
     {
-        // create_document has no document_hash precondition (the file doesn't
-        // exist yet). Skip the hash-check used by other passes.
-
-        // NRN-101: resolve an incremental `{{seq}}` token to the next id via
-        // filesystem max+1 (`seq_alloc::resolve_seq_create`, shared with the
-        // MigrationPlan applier's pre-resolution barrier). This runs under the
-        // mutation lock the caller holds around apply, so two concurrent creates
-        // serialize — the second observes the first's file and gets a distinct
-        // sequential id. No new lock is introduced: the NRN-87 warm daemon will
-        // own this same boundary and can swap the impl behind it untouched.
-        let resolved_path = if crate::seq_alloc::has_seq(&change.path) {
-            // NRN-265: per-caller reachability of this branch is documented on
-            // `CreateApplyContext::creates_preresolved`. Allocation semantics
-            // live in the shared `resolve_seq_create`; under the pre-resolved
-            // declaration a surviving `{{seq}}` token means the applier's
-            // pre-resolution step (and with it the NRN-264 owner-set barrier,
-            // which validated the RESOLVED paths) was skipped — fail closed
-            // rather than allocate a path that barrier never saw. Earlier
-            // passes of a mixed plan may already have written; that surfaces
-            // as a truthful partial-apply report, but this create writes
-            // nothing.
-            if ctx.creates_preresolved {
-                return Err(anyhow::anyhow!(
-                    "create_document: `{{{{seq}}}}` reached the apply delegate at {} after the caller declared creates pre-resolved — the pre-resolution barrier did not run",
-                    change.path
-                ));
-            }
-            let resolved =
-                crate::seq_alloc::resolve_seq_create(cwd, &change.path, &allocated_this_plan)?;
-            allocated_this_plan.push(resolved.clone());
-            resolved
-        } else {
-            change.path.clone()
-        };
-
-        // NRN-138: re-check `files.ignore` against the RESOLVED path. For a
-        // literal (non-`{{seq}}`) path this repeats `synth::build_plan`'s
-        // NRN-131 guard (a no-op — that guard already refused an ignored path
-        // before a plan reached the applier); for a `{{seq}}`-templated path
-        // this is the first check the resolved filename ever sees, since
-        // `{{seq}}` only becomes concrete here. Must run BEFORE any write.
-        if crate::graph::is_ignored(&resolved_path, &ctx.ignore) {
-            return Err(ApplyError::CreateIgnoredPath {
-                path: resolved_path.clone(),
-            }
-            .into());
-        }
-
-        let nv = change.new_value.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(ApplyError::MissingNewValue {
-                path: resolved_path.clone(),
-            })
-        })?;
-        let fm_obj = nv
-            .get("frontmatter")
-            .and_then(|v| v.as_object())
-            .ok_or_else(|| anyhow::Error::from(ApplyError::CreateFrontmatterMalformed))?;
-        let body = nv.get("body").and_then(|v| v.as_str()).unwrap_or("");
-
-        let full = cwd.join(&resolved_path);
-
-        // Pre-flight (defense in depth — preflight/synth should have caught these).
-        if full.as_std_path().exists() && !change.force {
-            return Err(ApplyError::CreateDestinationExists {
-                path: resolved_path.clone(),
-            }
-            .into());
-        }
-        let parent_to_create = match full.parent() {
-            Some(parent) if !parent.as_std_path().exists() => {
-                if !ctx.parents {
-                    return Err(ApplyError::CreateParentMissing {
-                        path: resolved_path.clone(),
-                    }
-                    .into());
-                }
-                Some(parent.to_path_buf())
-            }
-            _ => None,
-        };
-
-        // Serialize the document.
-        let fm_btree: std::collections::BTreeMap<String, serde_json::Value> =
-            fm_obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let contents = norn_frontmatter::frontmatter::serialize_new_document(&fm_btree, body)
-            .map_err(|e| {
-                anyhow::Error::from(ApplyError::CreateSerializeFailed {
-                    message: e.to_string(),
-                })
-            })?;
-
-        // NRN-142 create-path gate: this is the one frontmatter-write path with
-        // no post-image verification, so re-parse the fresh document through the
-        // same read pipeline before writing. A serializer output that fails to
-        // parse (e.g. a field name past libyaml's 1024-byte simple-key limit,
-        // where render_key's terminal fallback is unverified) or that is not a
-        // top-level mapping is refused unwritten — a refusal is recoverable, a
-        // written document whose frontmatter can never be read back is not. An
-        // empty frontmatter block reads back as YAML null; that is the empty
-        // mapping, not a refusal. Runs on dry-run too, so a plan preview refuses
-        // exactly where the real apply would; and it runs BEFORE parent-dir
-        // creation, so a refusal leaves no empty directory behind.
-        verify_created_document(&resolved_path, &contents)?;
-
-        if dry_run {
-            report.created_documents.push(CreateDocumentResult {
-                path: resolved_path.clone(),
-            });
-            if !report.changed_files.contains(&resolved_path) {
-                report.changed_files.push(resolved_path.clone());
-            }
+        if gate_blocked(env, outcomes, change) {
             continue;
         }
-
-        if let Some(parent) = parent_to_create {
-            fs::create_dir_all(parent.as_std_path()).with_context(|| {
-                format!("create_document: create parent dirs for {}", resolved_path)
-            })?;
-            mark_wrote!();
-        }
-
-        // Materialize the document (NRN-160): unless `--force`, this must NOT
-        // clobber a file that appeared between the exists-precheck above and now
-        // (the create TOCTOU window). `create_document_file` uses an
-        // atomic-exclusive `hard_link` for the no-force case; an `AlreadyExists`
-        // there is the same "destination already exists" refusal the precheck
-        // gives for the common no-race case. `--force` keeps overwrite semantics.
-        fsops::create_document_file(&full, &contents, change.force).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                anyhow::Error::from(ApplyError::CreateDestinationExists {
-                    path: resolved_path.clone(),
-                })
-            } else {
-                anyhow::Error::new(e).context(format!("create_document: write {resolved_path}"))
+        match create_one(env, change, &mut allocated_this_plan, outcomes, sink) {
+            Ok(()) => {}
+            Err(e) => {
+                outcomes.tracker.failed(&change.change_id, &change.path, e);
             }
-        })?;
-        mark_wrote!();
-
-        report.created_documents.push(CreateDocumentResult {
-            path: resolved_path.clone(),
-        });
-        if !report.changed_files.contains(&resolved_path) {
-            report.changed_files.push(resolved_path.clone());
         }
-        // Audit the action against the resolved path, not the `{{seq}}` template
-        // (NRN-101). Same change_id, so it still hangs off the op_planned span.
-        let resolved_change = ApplyOp {
+    }
+}
+
+/// Apply a single `create_document`, returning `Err` on any per-op fault (the
+/// caller records it). Kept as its own fn so the `?`-chained fault sites stay
+/// readable; the create pass converts the `Err` into a tracked `failed`.
+fn create_one(
+    env: &PassEnv,
+    change: &ApplyOp,
+    allocated_this_plan: &mut Vec<Utf8PathBuf>,
+    outcomes: &mut ApplyOutcomes,
+    sink: &mut EventSink,
+) -> Result<()> {
+    use crate::telemetry::Severity;
+    let resolved_path = if crate::seq_alloc::has_seq(&change.path) {
+        if env.ctx.creates_preresolved {
+            return Err(anyhow::anyhow!(
+                "create_document: `{{{{seq}}}}` reached the apply delegate at {} after the caller declared creates pre-resolved — the pre-resolution barrier did not run",
+                change.path
+            ));
+        }
+        let resolved =
+            crate::seq_alloc::resolve_seq_create(env.cwd, &change.path, allocated_this_plan)?;
+        allocated_this_plan.push(resolved.clone());
+        resolved
+    } else {
+        change.path.clone()
+    };
+
+    if crate::graph::is_ignored(&resolved_path, &env.ctx.ignore) {
+        return Err(ApplyError::CreateIgnoredPath {
             path: resolved_path.clone(),
-            ..change.clone()
-        };
-        emit_op_action(sink, spans, &resolved_change, Severity::Info, Vec::new());
+        }
+        .into());
     }
 
-    // Collect move_document changes for passes 2 and 3.
-    let move_changes: Vec<&ApplyOp> = plan
+    let nv = change.new_value.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(ApplyError::MissingNewValue {
+            path: resolved_path.clone(),
+        })
+    })?;
+    let fm_obj = nv
+        .get("frontmatter")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| anyhow::Error::from(ApplyError::CreateFrontmatterMalformed))?;
+    let body = nv.get("body").and_then(|v| v.as_str()).unwrap_or("");
+
+    let full = env.cwd.join(&resolved_path);
+
+    if full.as_std_path().exists() && !change.force {
+        return Err(ApplyError::CreateDestinationExists {
+            path: resolved_path.clone(),
+        }
+        .into());
+    }
+    let parent_to_create = match full.parent() {
+        Some(parent) if !parent.as_std_path().exists() => {
+            if !env.ctx.parents {
+                return Err(ApplyError::CreateParentMissing {
+                    path: resolved_path.clone(),
+                }
+                .into());
+            }
+            Some(parent.to_path_buf())
+        }
+        _ => None,
+    };
+
+    let fm_btree: BTreeMap<String, serde_json::Value> =
+        fm_obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let contents =
+        norn_frontmatter::frontmatter::serialize_new_document(&fm_btree, body).map_err(|e| {
+            anyhow::Error::from(ApplyError::CreateSerializeFailed {
+                message: e.to_string(),
+            })
+        })?;
+
+    verify_created_document(&resolved_path, &contents)?;
+
+    if env.dry_run {
+        outcomes.created_documents.push(CreateDocumentResult {
+            path: resolved_path.clone(),
+        });
+        if !outcomes.changed_files.contains(&resolved_path) {
+            outcomes.changed_files.push(resolved_path.clone());
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = parent_to_create {
+        fs::create_dir_all(parent.as_std_path()).with_context(|| {
+            format!("create_document: create parent dirs for {}", resolved_path)
+        })?;
+        outcomes.tracker.mark_wrote();
+    }
+
+    fsops::create_document_file(&full, &contents, change.force).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            anyhow::Error::from(ApplyError::CreateDestinationExists {
+                path: resolved_path.clone(),
+            })
+        } else {
+            anyhow::Error::new(e).context(format!("create_document: write {resolved_path}"))
+        }
+    })?;
+    outcomes.tracker.mark_wrote();
+
+    outcomes.created_documents.push(CreateDocumentResult {
+        path: resolved_path.clone(),
+    });
+    if !outcomes.changed_files.contains(&resolved_path) {
+        outcomes.changed_files.push(resolved_path.clone());
+    }
+    let resolved_change = ApplyOp {
+        path: resolved_path.clone(),
+        ..change.clone()
+    };
+    emit_op_action(
+        sink,
+        env.spans,
+        &resolved_change,
+        Severity::Info,
+        Vec::new(),
+    );
+    outcomes.tracker.applied(&change.change_id);
+    Ok(())
+}
+
+/// move_pass — INVARIANT: each `move_document` renames its file, after creates.
+/// Backlink rewrites are the separate cascade pass. A per-op failure records
+/// `failed`; independent moves still run.
+fn move_pass(env: &PassEnv, plan: &ApplyBatch, outcomes: &mut ApplyOutcomes, sink: &mut EventSink) {
+    use crate::telemetry::event;
+    use crate::telemetry::Severity;
+    for change in plan
         .changes
         .iter()
         .filter(|c| c.operation == "move_document")
-        .collect();
-
-    // Pass 2: filesystem moves.
-    let mut moves: Vec<MoveResult> = Vec::new();
-    for change in &move_changes {
-        if dry_run {
+    {
+        if gate_blocked(env, outcomes, change) {
+            continue;
+        }
+        if env.dry_run {
             if let Some(destination) = change.destination.as_ref() {
-                moves.push(MoveResult {
+                outcomes.moved_files.push(MoveResult {
                     from: change.path.clone(),
                     to: destination.clone(),
                 });
             }
         } else {
-            moves.push(apply_move(cwd, change)?);
-            mark_wrote!();
-            let extra = change
-                .destination
-                .as_ref()
-                .map(|dst| vec![(event::ATTR_TARGET_TO, dst.to_string())])
-                .unwrap_or_default();
-            emit_op_action(sink, spans, change, Severity::Info, extra);
+            match apply_move(env.cwd, change) {
+                Ok(mv) => {
+                    outcomes.moved_files.push(mv);
+                    outcomes.tracker.mark_wrote();
+                    let extra = change
+                        .destination
+                        .as_ref()
+                        .map(|dst| vec![(event::ATTR_TARGET_TO, dst.to_string())])
+                        .unwrap_or_default();
+                    emit_op_action(sink, env.spans, change, Severity::Info, extra);
+                    outcomes.tracker.applied(&change.change_id);
+                }
+                Err(e) => {
+                    outcomes.tracker.failed(&change.change_id, &change.path, e);
+                    continue;
+                }
+            }
         }
     }
+}
 
-    // Pass 3: link rewrites (only after every move succeeded).
-    let mut rewrites: Vec<LinkRewriteResult> = Vec::new();
-    for change in &move_changes {
+/// cascade_pass — INVARIANT: a `move_document`'s backlink rewrites are DERIVED
+/// here from the settled content state (ADR 0024), only for a move that applied.
+/// A move that `failed`/`not_run` gets no cascade (its derived backlink ops are
+/// not_run too).
+fn cascade_pass(env: &PassEnv, plan: &ApplyBatch, outcomes: &mut ApplyOutcomes) {
+    for change in plan
+        .changes
+        .iter()
+        .filter(|c| c.operation == "move_document")
+    {
+        // A move that did not apply keeps its backlinks untouched.
+        if !env.dry_run
+            && !matches!(
+                outcomes.tracker.status(&change.change_id),
+                OpStatus::Applied
+            )
+        {
+            continue;
+        }
         let planned = count_planned_links(change);
-        if dry_run {
-            // Dry-run forecast: every planned link is reported as a would-be
-            // rewrite (applied == planned, skipped == 0).
+        if env.dry_run {
             let mut rewritten: Vec<LinkRewriteResult> = Vec::new();
             if let Some(risk) = &change.link_risk {
                 for affected in risk
@@ -1106,8 +1283,8 @@ pub fn apply_repair_plan_with_context(
                     });
                 }
             }
-            rewrites.extend(rewritten.clone());
-            report.cascades.push(CascadeRecord {
+            outcomes.rewritten_links.extend(rewritten.clone());
+            outcomes.cascades.push(CascadeRecord {
                 source_path: change.path.clone(),
                 planned,
                 rewritten,
@@ -1115,170 +1292,214 @@ pub fn apply_repair_plan_with_context(
                 failed: Vec::new(),
             });
         } else {
-            let outcome = apply_link_rewrites(cwd, change)?;
-            if !outcome.rewritten.is_empty() {
-                mark_wrote!();
+            match apply_link_rewrites(env.cwd, change) {
+                Ok(outcome) => {
+                    if !outcome.rewritten.is_empty() {
+                        outcomes.tracker.mark_wrote();
+                    }
+                    outcomes.rewritten_links.extend(outcome.rewritten.clone());
+                    outcomes.cascades.push(CascadeRecord {
+                        source_path: change.path.clone(),
+                        planned,
+                        rewritten: outcome.rewritten,
+                        skipped: outcome.skipped,
+                        failed: outcome.failed,
+                    });
+                }
+                Err(e) => {
+                    // The move landed but its declared cascade could not: the op
+                    // did not fully satisfy "move AND keep links consistent", so
+                    // it flips to failed (a truthful partial apply).
+                    outcomes.tracker.failed(&change.change_id, &change.path, e);
+                }
             }
-            rewrites.extend(outcome.rewritten.clone());
-            report.cascades.push(CascadeRecord {
-                source_path: change.path.clone(),
-                planned,
-                rewritten: outcome.rewritten,
-                skipped: outcome.skipped,
-                failed: outcome.failed,
-            });
+        }
+    }
+}
+
+/// retry_pass — INVARIANT: transient cascade-write failures get up to 3 backoff
+/// rounds before they are left dangling, then every cascade's FINAL settled state
+/// is emitted as `rewrite_link` action events under its structural op's span
+/// (telemetry only — the report reads cascades directly). Apply-only.
+fn retry_pass(
+    env: &PassEnv,
+    plan: &ApplyBatch,
+    outcomes: &mut ApplyOutcomes,
+    sink: &mut EventSink,
+) {
+    use crate::telemetry::event;
+    use crate::telemetry::Severity;
+    if env.dry_run {
+        return;
+    }
+    let backoff = [
+        Duration::from_millis(100),
+        Duration::from_millis(300),
+        Duration::from_millis(900),
+    ];
+    let failed_before: usize = outcomes.cascades.iter().map(|c| c.failed.len()).sum();
+    let recovered = retry_failed_cascades(&mut outcomes.cascades, &backoff, |f| {
+        let kind = if norn_frontmatter::wikilink::parse_wikilinks_in_text(&f.from)
+            .first()
+            .is_some_and(|link| link.raw == f.from)
+        {
+            crate::domain::LinkKind::Wikilink
+        } else {
+            crate::domain::LinkKind::Markdown
+        };
+        crate::standards::apply::rewrite_one_backlink(
+            env.cwd.as_path(),
+            &f.file,
+            &f.from,
+            &f.to,
+            &kind,
+        )
+    });
+    if !recovered.is_empty() {
+        outcomes.tracker.mark_wrote();
+    }
+    outcomes.rewritten_links.extend(recovered);
+
+    if failed_before > 0 {
+        sink.lifecycle(
+            event::EVENT_RETRY,
+            Severity::Warn,
+            format!("retried {failed_before} failed backlink rewrite(s) over up to 3 rounds"),
+            vec![(event::ATTR_RETRY_ROUND, "3".to_string())],
+        );
+    }
+
+    let mut cascade_span: HashMap<&camino::Utf8Path, &str> = HashMap::new();
+    for change in plan
+        .changes
+        .iter()
+        .filter(|c| c.operation == "move_document" || c.operation == "delete_document")
+    {
+        if let Some(s) = env.spans.get(&change.change_id) {
+            cascade_span.insert(change.path.as_path(), s.as_str());
         }
     }
 
-    // Cleanup-retry pass: transient FS failures get up to 3 retry rounds
-    // (100/300/900ms backoff) before they're left as dangling links.
-    if !dry_run {
-        let backoff = [
-            Duration::from_millis(100),
-            Duration::from_millis(300),
-            Duration::from_millis(900),
-        ];
-        // Coarse retry signal: count failures BEFORE the retry pass so we can
-        // emit a single `norn.retry` event capturing that the retry pass ran
-        // (and added latency). Per-round events are a future refinement.
-        let failed_before: usize = report.cascades.iter().map(|c| c.failed.len()).sum();
-        let recovered = retry_failed_cascades(&mut report.cascades, &backoff, |f| {
-            // The retried failure carries only the raw link text, not its kind.
-            // Recover the kind from the parser (authoritative): a raw the wikilink
-            // parser recognizes whole is a `[[…]]` reference (the splice path
-            // treats Wikilink/Embed identically); anything else is a Markdown
-            // destination that rewrites by literal replace.
-            let kind = if norn_frontmatter::wikilink::parse_wikilinks_in_text(&f.from)
-                .first()
-                .is_some_and(|link| link.raw == f.from)
-            {
-                crate::domain::LinkKind::Wikilink
-            } else {
-                crate::domain::LinkKind::Markdown
-            };
-            crate::standards::apply::rewrite_one_backlink(
-                cwd.as_path(),
-                &f.file,
-                &f.from,
-                &f.to,
-                &kind,
-            )
-        });
-        if !recovered.is_empty() {
-            mark_wrote!();
-        }
-        report.rewritten_links.extend(recovered);
-
-        if failed_before > 0 {
-            sink.lifecycle(
-                event::EVENT_RETRY,
-                Severity::Warn,
-                format!("retried {failed_before} failed backlink rewrite(s) over up to 3 rounds"),
-                vec![(event::ATTR_RETRY_ROUND, "3".to_string())],
+    for cascade in &outcomes.cascades {
+        let Some(span) = cascade_span.get(cascade.source_path.as_path()).copied() else {
+            continue;
+        };
+        for r in &cascade.rewritten {
+            sink.action(
+                span,
+                Severity::Info,
+                &event::action_event_name("rewrite_link"),
+                format!("rewrote {} ({} -> {})", r.file, r.from, r.to),
+                vec![
+                    (event::ATTR_OP_KIND, "rewrite_link".to_string()),
+                    (event::ATTR_TARGET, r.file.to_string()),
+                    (event::ATTR_LINK_FROM, r.from.clone()),
+                    (event::ATTR_LINK_TO, r.to.clone()),
+                    (event::ATTR_STATUS, "applied".to_string()),
+                ],
             );
         }
-
-        // Cascade rewrite_link actions emitted from FINAL settled state (after
-        // retry), so a promoted-then-clean link reports as applied, not failed.
-        // The cascade source path owns the op span (move_document /
-        // delete_document); rewrite_link actions hang off that span.
-        let mut cascade_span: std::collections::HashMap<&camino::Utf8Path, &str> =
-            std::collections::HashMap::new();
-        for change in plan
-            .changes
-            .iter()
-            .filter(|c| c.operation == "move_document" || c.operation == "delete_document")
-        {
-            if let Some(s) = spans.get(&change.change_id) {
-                cascade_span.insert(change.path.as_path(), s.as_str());
-            }
+        for s in &cascade.skipped {
+            sink.action(
+                span,
+                Severity::Warn,
+                &event::action_event_name("rewrite_link"),
+                format!(
+                    "skipped {} ({} -> {}): {}",
+                    s.file,
+                    s.from,
+                    s.to,
+                    s.reason.code()
+                ),
+                vec![
+                    (event::ATTR_OP_KIND, "rewrite_link".to_string()),
+                    (event::ATTR_TARGET, s.file.to_string()),
+                    (event::ATTR_LINK_FROM, s.from.clone()),
+                    (event::ATTR_LINK_TO, s.to.clone()),
+                    (event::ATTR_STATUS, "skipped".to_string()),
+                    (event::ATTR_REASON_CODE, s.reason.code().to_string()),
+                ],
+            );
         }
-
-        for cascade in &report.cascades {
-            let Some(span) = cascade_span.get(cascade.source_path.as_path()).copied() else {
-                continue;
-            };
-            for r in &cascade.rewritten {
-                sink.action(
-                    span,
-                    Severity::Info,
-                    &event::action_event_name("rewrite_link"),
-                    format!("rewrote {} ({} -> {})", r.file, r.from, r.to),
-                    vec![
-                        (event::ATTR_OP_KIND, "rewrite_link".to_string()),
-                        (event::ATTR_TARGET, r.file.to_string()),
-                        (event::ATTR_LINK_FROM, r.from.clone()),
-                        (event::ATTR_LINK_TO, r.to.clone()),
-                        (event::ATTR_STATUS, "applied".to_string()),
-                    ],
-                );
-            }
-            for s in &cascade.skipped {
-                sink.action(
-                    span,
-                    Severity::Warn,
-                    &event::action_event_name("rewrite_link"),
-                    format!(
-                        "skipped {} ({} -> {}): {}",
-                        s.file,
-                        s.from,
-                        s.to,
-                        s.reason.code()
-                    ),
-                    vec![
-                        (event::ATTR_OP_KIND, "rewrite_link".to_string()),
-                        (event::ATTR_TARGET, s.file.to_string()),
-                        (event::ATTR_LINK_FROM, s.from.clone()),
-                        (event::ATTR_LINK_TO, s.to.clone()),
-                        (event::ATTR_STATUS, "skipped".to_string()),
-                        (event::ATTR_REASON_CODE, s.reason.code().to_string()),
-                    ],
-                );
-            }
-            for f in &cascade.failed {
-                sink.action(
-                    span,
-                    Severity::Error,
-                    &event::action_event_name("rewrite_link"),
-                    format!(
-                        "failed {} ({} -> {}): {} {}",
-                        f.file,
-                        f.from,
-                        f.to,
-                        f.reason.code(),
-                        f.detail
-                    ),
-                    vec![
-                        (event::ATTR_OP_KIND, "rewrite_link".to_string()),
-                        (event::ATTR_TARGET, f.file.to_string()),
-                        (event::ATTR_LINK_FROM, f.from.clone()),
-                        (event::ATTR_LINK_TO, f.to.clone()),
-                        (event::ATTR_STATUS, "failed".to_string()),
-                        (event::ATTR_REASON_CODE, f.reason.code().to_string()),
-                        (event::ATTR_REASON_MESSAGE, f.detail.clone()),
-                    ],
-                );
-            }
+        for f in &cascade.failed {
+            sink.action(
+                span,
+                Severity::Error,
+                &event::action_event_name("rewrite_link"),
+                format!(
+                    "failed {} ({} -> {}): {} {}",
+                    f.file,
+                    f.from,
+                    f.to,
+                    f.reason.code(),
+                    f.detail
+                ),
+                vec![
+                    (event::ATTR_OP_KIND, "rewrite_link".to_string()),
+                    (event::ATTR_TARGET, f.file.to_string()),
+                    (event::ATTR_LINK_FROM, f.from.clone()),
+                    (event::ATTR_LINK_TO, f.to.clone()),
+                    (event::ATTR_STATUS, "failed".to_string()),
+                    (event::ATTR_REASON_CODE, f.reason.code().to_string()),
+                    (event::ATTR_REASON_MESSAGE, f.detail.clone()),
+                ],
+            );
         }
     }
+}
 
-    let warnings: Vec<RepairApplyWarning> = move_changes
-        .iter()
-        .flat_map(|c| {
-            c.warnings.iter().map(|w| RepairApplyWarning {
-                path: c.path.clone(),
-                warning: w.clone(),
-            })
-        })
-        .collect();
+// ── Test-only convenience wrappers ──────────────────────────────────────────
+// Production callers use `run_apply_passes` and read the tracker. These wrappers
+// re-derive the pre-fold `Result` shape — a per-op failure surfaces as the
+// representative `Err` — so the ported pass tests keep asserting at the same
+// (Ok success / Err failure) seam without re-plumbing every case through the
+// tracker.
 
-    report.moved_files = moves;
-    // Extend (not replace): Pass 1b may have already populated rewritten_links
-    // with rewrite_link results; Pass 3 appends move-induced backlink rewrites.
-    report.rewritten_links.extend(rewrites);
-    report.warnings = warnings;
+/// Test wrapper: run the passes with no `requires` DAG, surfacing the first
+/// recorded per-op failure as `Err` (matching the old abort-on-first behavior).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_batch_with_context(
+    cwd: &Utf8PathBuf,
+    index: &GraphIndex,
+    plan: &ApplyBatch,
+    dry_run: bool,
+    ctx: &CreateApplyContext,
+    sink: &mut crate::telemetry::EventSink,
+    spans: &std::collections::HashMap<String, String>,
+    _wrote_any: Option<&mut bool>,
+) -> Result<ApplyOutcomes> {
+    let deps = DependencyMap::default();
+    let mut outcomes = run_apply_passes(cwd, index, plan, dry_run, ctx, sink, spans, &deps)?;
+    if let Some(err) = outcomes.tracker.take_first_failure() {
+        return Err(err);
+    }
+    Ok(outcomes)
+}
 
-    Ok(report)
+/// Test wrapper over [`run_batch_with_context`] with a discard sink.
+#[cfg(test)]
+pub(crate) fn run_batch(
+    cwd: &Utf8PathBuf,
+    index: &GraphIndex,
+    plan: &ApplyBatch,
+    dry_run: bool,
+) -> Result<ApplyOutcomes> {
+    let mut sink = crate::telemetry::EventSink::discard(
+        crate::telemetry::IdGen::new(),
+        crate::telemetry::Clock::System,
+    );
+    let spans = std::collections::HashMap::new();
+    run_batch_with_context(
+        cwd,
+        index,
+        plan,
+        dry_run,
+        &CreateApplyContext::default(),
+        &mut sink,
+        &spans,
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -1469,7 +1690,7 @@ mod tests {
             make_vault_with_doc("norn-orch-remove-last-", "doc.md", doc);
         let plan = remove_field_plan(&root, "doc.md", &hash, "status", serde_json::json!("draft"));
 
-        let report = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false)
+        let report = run_batch(&root, &index, &plan, /*dry_run=*/ false)
             .expect("removing the last frontmatter field must apply");
         assert_eq!(report.changed_files.len(), 1);
         assert_eq!(
@@ -1492,7 +1713,7 @@ mod tests {
             make_vault_with_doc("norn-orch-rewrite-fmbreak-", "doc.md", doc);
         let plan = rewrite_link_plan(&root, "doc.md", &hash, "Parent", "Parent \"Two\"");
 
-        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false)
+        let err = run_batch(&root, &index, &plan, /*dry_run=*/ false)
             .expect_err("a frontmatter-breaking rewrite must be refused");
         let msg = err.to_string();
         assert!(
@@ -1516,7 +1737,7 @@ mod tests {
             make_vault_with_doc("norn-orch-rewrite-benign-", "doc.md", doc);
         let plan = rewrite_link_plan(&root, "doc.md", &hash, "Parent", "parent-two");
 
-        let report = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+        let report = run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap();
         assert_eq!(report.changed_files.len(), 1);
         let written = std::fs::read_to_string(root.join("doc.md")).unwrap();
         assert_eq!(
@@ -1571,7 +1792,7 @@ mod tests {
         );
         plan.summary.planned_changes = 2;
 
-        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false)
+        let err = run_batch(&root, &index, &plan, /*dry_run=*/ false)
             .expect_err("breaking same-plan-created frontmatter must be refused");
         let msg = err.to_string();
         assert!(
@@ -1594,7 +1815,7 @@ mod tests {
         );
         let plan = delete_plan(&root, "foo.md", &hash);
 
-        let report = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+        let report = run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap();
 
         assert_eq!(report.deleted_documents.len(), 1);
         assert_eq!(
@@ -1613,7 +1834,7 @@ mod tests {
         );
         let plan = delete_plan(&root, "foo.md", &hash);
 
-        let report = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ true).unwrap();
+        let report = run_batch(&root, &index, &plan, /*dry_run=*/ true).unwrap();
 
         // Dry run: entry is recorded but file must still exist.
         assert_eq!(report.deleted_documents.len(), 1);
@@ -1634,7 +1855,7 @@ mod tests {
         // Use an intentionally wrong hash.
         let plan = delete_plan(&root, "foo.md", "definitely-wrong-hash");
 
-        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let err = run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("stale") || msg.contains("hash"),
@@ -1700,7 +1921,7 @@ mod tests {
             }],
         };
 
-        let report = apply_repair_plan(&root, &index, &plan, false).unwrap();
+        let report = run_batch(&root, &index, &plan, false).unwrap();
         assert_eq!(report.deleted_documents.len(), 1);
         assert!(!root.join("b.md").as_std_path().exists());
         let a_content = std::fs::read_to_string(root.join("a.md")).unwrap();
@@ -1769,7 +1990,7 @@ mod tests {
         fm.insert("type".to_string(), serde_json::json!("note"));
         let plan = create_plan(&root, "foo.md", fm, "Hello\n", false);
 
-        let report = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+        let report = run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap();
 
         assert_eq!(report.created_documents.len(), 1);
         assert_eq!(
@@ -1799,7 +2020,7 @@ mod tests {
         fm.insert("type".to_string(), serde_json::json!("note"));
         let plan = create_plan(&root, "foo.md", fm, "Hello\n", false);
 
-        apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+        run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap();
 
         // A plain fresh write in the same process, for comparison against
         // whatever the ambient umask makes "default" here.
@@ -1837,7 +2058,7 @@ mod tests {
         fm.insert("k".repeat(1100), serde_json::json!("v"));
         let plan = create_plan(&root, "foo.md", fm, "body\n", false);
 
-        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let err = run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("foo.md") && msg.contains("parse"),
@@ -1859,7 +2080,7 @@ mod tests {
         fm.insert("k".repeat(1100), serde_json::json!("v"));
         let plan = create_plan(&root, "foo.md", fm, "body\n", false);
 
-        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ true).unwrap_err();
+        let err = run_batch(&root, &index, &plan, /*dry_run=*/ true).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("foo.md") && msg.contains("parse"),
@@ -1887,7 +2108,7 @@ mod tests {
         };
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
-        let err = apply_repair_plan_with_context(
+        let err = run_batch_with_context(
             &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans, None,
         )
         .unwrap_err();
@@ -1908,7 +2129,7 @@ mod tests {
         fm.insert("type".to_string(), serde_json::json!("note"));
         let plan = create_plan(&root, "foo.md", fm, "body\n", false);
 
-        apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+        run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap();
         let written = std::fs::read_to_string(root.join("foo.md").as_std_path()).unwrap();
         let mut diagnostics = Vec::new();
         let (parsed, _, _, _) =
@@ -1927,7 +2148,7 @@ mod tests {
         let (_tmp, root, index) = make_empty_vault("vault-apply-create-emptyfm-");
         let plan = create_plan(&root, "foo.md", serde_json::Map::new(), "body\n", false);
 
-        apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+        run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap();
         let written = std::fs::read_to_string(root.join("foo.md").as_std_path()).unwrap();
         assert_eq!(written, "---\n---\nbody\n");
     }
@@ -1937,7 +2158,7 @@ mod tests {
         let (_tmp, root, index) = make_empty_vault("vault-apply-create-dry-");
         let plan = create_plan(&root, "foo.md", serde_json::Map::new(), "", false);
 
-        let report = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ true).unwrap();
+        let report = run_batch(&root, &index, &plan, /*dry_run=*/ true).unwrap();
 
         assert_eq!(report.created_documents.len(), 1);
         assert!(
@@ -1952,7 +2173,7 @@ mod tests {
         std::fs::write(root.join("foo.md").as_std_path(), "existing\n").unwrap();
         let plan = create_plan(&root, "foo.md", serde_json::Map::new(), "", false);
 
-        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let err = run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("exists") || msg.contains("force"),
@@ -1971,7 +2192,7 @@ mod tests {
         fm.insert("type".to_string(), serde_json::json!("note"));
         let plan = create_plan(&root, "foo.md", fm, "new\n", true);
 
-        let report = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+        let report = run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap();
 
         assert_eq!(report.created_documents.len(), 1);
         let written = std::fs::read_to_string(root.join("foo.md").as_std_path()).unwrap();
@@ -1998,7 +2219,7 @@ mod tests {
         };
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
-        let err = apply_repair_plan_with_context(
+        let err = run_batch_with_context(
             &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans, None,
         )
         .unwrap_err();
@@ -2034,7 +2255,7 @@ mod tests {
         };
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
-        let report = apply_repair_plan_with_context(
+        let report = run_batch_with_context(
             &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans, None,
         )
         .unwrap();
@@ -2072,7 +2293,7 @@ mod tests {
         };
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
-        let err = apply_repair_plan_with_context(
+        let err = run_batch_with_context(
             &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans, None,
         )
         .unwrap_err();
@@ -2111,7 +2332,7 @@ mod tests {
         };
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
-        let report = apply_repair_plan_with_context(
+        let report = run_batch_with_context(
             &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans, None,
         )
         .unwrap();
@@ -2143,7 +2364,7 @@ mod tests {
         // exactly the shape `move::preflight_and_plan` synthesizes — src hash from
         // the index, destination `b.md`, and the full LinkRisk over the `[[a]]`
         // backlink in `d.md`. This keeps the assertion (cascade record folded from
-        // actuals) at the `apply_repair_plan_with_context` boundary intact.
+        // actuals) at the `run_batch_with_context` boundary intact.
         let src_rel = camino::Utf8PathBuf::from("a.md");
         let dst_rel = camino::Utf8PathBuf::from("b.md");
         let src_hash = index
@@ -2192,7 +2413,7 @@ mod tests {
         };
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
-        let report = apply_repair_plan_with_context(
+        let report = run_batch_with_context(
             &root,
             &index,
             &plan,
@@ -2232,7 +2453,7 @@ mod tests {
         };
         let mut sink = discard_sink();
         let spans = std::collections::HashMap::new();
-        let err = apply_repair_plan_with_context(
+        let err = run_batch_with_context(
             &root, &index, &plan, /*dry_run=*/ false, &ctx, &mut sink, &spans, None,
         )
         .unwrap_err();
@@ -2547,7 +2768,7 @@ mod tests {
             ],
         );
 
-        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let err = run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
         assert!(
             err.to_string().to_lowercase().contains("heading")
                 || err.to_string().contains("NoSuchHeading")
@@ -2586,7 +2807,7 @@ mod tests {
             ],
         );
 
-        let report = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+        let report = run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap();
         assert!(report
             .changed_files
             .contains(&camino::Utf8PathBuf::from("note.md")));
@@ -2619,7 +2840,7 @@ mod tests {
             )],
         );
 
-        apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap();
+        run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap();
 
         // Content landed via the atomic rename.
         let on_disk = std::fs::read_to_string(root.join("note.md")).unwrap();
@@ -2749,7 +2970,7 @@ mod tests {
         let mut fm = serde_json::Map::new();
         fm.insert("type".to_string(), serde_json::json!("note"));
         let plan = create_plan(&root, "../escape-traversal.md", fm, "x\n", false);
-        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let err = run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("vault"),
@@ -2778,7 +2999,7 @@ mod tests {
         let mut fm = serde_json::Map::new();
         fm.insert("type".to_string(), serde_json::json!("note"));
         let plan = create_plan(&root, abs_target.as_str(), fm, "x\n", false);
-        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let err = run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("vault"), "got: {msg}");
         assert!(
@@ -2802,7 +3023,7 @@ mod tests {
         let mut fm = serde_json::Map::new();
         fm.insert("type".to_string(), serde_json::json!("note"));
         let plan = create_plan(&root, "outlink/escape-symlink.md", fm, "x\n", false);
-        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let err = run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("vault") || msg.contains("symlink"),
@@ -2837,7 +3058,7 @@ mod tests {
             .hash
             .clone();
         let plan = move_plan(&root, "doc.md", "../escape-move.md", &hash);
-        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let err = run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("vault"), "got: {msg}");
         let outside = camino::Utf8Path::from_path(outer.path())
@@ -2944,7 +3165,7 @@ mod tests {
         };
 
         let before = std::fs::read_to_string(&outside_file).unwrap();
-        let err = apply_repair_plan(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
+        let err = run_batch(&root, &index, &plan, /*dry_run=*/ false).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("vault") || msg.contains("symlink"),
@@ -2987,7 +3208,7 @@ mod tests {
         let mut fm = serde_json::Map::new();
         fm.insert("type".to_string(), serde_json::json!("note"));
         let create = create_plan(&root, "new.md", fm, "x\n", false);
-        apply_repair_plan(&root, &index, &create, /*dry_run=*/ false)
+        run_batch(&root, &index, &create, /*dry_run=*/ false)
             .expect("in-vault create on a symlinked-root vault must succeed");
         assert!(root.join("new.md").as_std_path().exists());
 
@@ -3001,7 +3222,7 @@ mod tests {
             .hash
             .clone();
         let mv = move_plan(&root, "doc.md", "moved.md", &hash);
-        apply_repair_plan(&root, &index2, &mv, /*dry_run=*/ false)
+        run_batch(&root, &index2, &mv, /*dry_run=*/ false)
             .expect("in-vault move on a symlinked-root vault must succeed");
         assert!(root.join("moved.md").as_std_path().exists());
         assert!(!root.join("doc.md").as_std_path().exists());

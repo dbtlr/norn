@@ -529,3 +529,44 @@ old = "every one of these refusals flattens to `code: internal-error` (the bare 
 new = "each refusal carries a typed, machine-branchable code: `create-destination-exists` and `create-parent-missing` (both additionally echoing the offending vault-relative `path`), `malformed-plan` for the non-object frontmatter and the duplicate op id, and `invalid-precondition` for the empty stem selector — `internal-error` is reserved for genuine norn defects. Exit 2 and every message are unchanged"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
+
+# NRN-406 (ADR 0024, decided-better): the one-applier fold records each op's
+# outcome truly instead of reconstructing it from the telemetry event log. The
+# pinned oracle's event-reconstruction UNDER-COUNTS a two-op `{{seq}}` create:
+# it mis-marks op0 `skipped`, so the created-doc lockstep hands op0's resolved
+# path to op1 and `seq/task-2.md` never appears in the report — `applied: 1
+# skipped: 1`, both summaries reading `seq/task-1.md` — even though the vault
+# tree correctly carries BOTH files. This is the NRN-425 report-rendering defect.
+# The rewrite reports the truth: `applied: 2` with the two distinct resolved
+# paths. Post-state is UNCHANGED (both binaries land task-1 + task-2); only the
+# report (op0/op1 status + the second summary's path) diverges, now matching
+# disk. See `crates/norn-core/src/apply/passes.rs` (`OpTracker`) and
+# `crates/norn-core/src/apply/executor.rs` (`build_report_ops`).
+[[entry]]
+id = "PD-126"
+surface = "apply --yes (multi-seq-create report: true per-op status vs event reconstruction)"
+cases = ["apply-authored-sequenced-seq-creates-zoo"]
+old = "the report reconstructs per-op status from the event log and under-counts: op0 is mis-marked `skipped` and the created-doc lockstep hands its resolved path to op1, so the summary reads `applied: 1  skipped: 1` with BOTH create lines printing `create seq/task-1.md` — `seq/task-2.md` never appears — despite both files landing on disk"
+new = "the applier records each op's outcome as it happens, so the report tells the truth: `applied: 2  skipped: 0` with the two distinct resolved summaries `create seq/task-1.md` and `create seq/task-2.md` — matching the (unchanged) post-state"
+reason = "decided-better"
+decision = "docs/decisions/0024-one-applier-repair-as-planner.md"
+
+# NRN-406 (ADR 0024, decided-better): partial apply is the semantics. A per-op
+# failure no longer aborts the remaining plan — independent ops proceed, the
+# failed op records `failed`, and only its dependents record `not_run`. A
+# three-create plan whose middle op's parent dir is missing (no `--parents`)
+# fails AFTER op0 has written, so both binaries exit 1 (a truthful partial
+# failure, never a byte-identical refusal). The oracle aborts at the failure
+# (op2 `not_run`, only `nrn406-first.md` lands); the rewrite runs the independent
+# op2 (`applied`, `nrn406-third.md` also lands). The op2 status, the
+# applied/remaining counters, AND the post-state (the extra `nrn406-third.md`)
+# diverge. See `crates/norn-core/src/apply/passes.rs` (per-pass `gate_blocked` +
+# per-op recording) and ADR 0024's "partial apply is the semantics" invariant.
+[[entry]]
+id = "PD-127"
+surface = "apply --yes (independent files proceed after a per-op failure)"
+cases = ["apply-authored-independent-files-proceed-zoo"]
+old = "the applier aborts the whole plan at the first per-op failure: op0 `applied`, op1 `failed` (create-parent-missing), op2 `not_run` — `applied: 1  remaining: 1`, exit 1 — and only `nrn406-first.md` lands on disk"
+new = "the failed op is recorded and INDEPENDENT ops still run: op0 `applied`, op1 `failed`, op2 `applied` — `applied: 2  remaining: 0`, exit 1 — and both `nrn406-first.md` and `nrn406-third.md` land on disk (a truthful partial apply)"
+reason = "decided-better"
+decision = "docs/decisions/0024-one-applier-repair-as-planner.md"

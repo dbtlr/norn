@@ -100,10 +100,12 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // NRN-436 adds five `apply` cases exercising the bare-anyhow user-fault
     // families now given typed codes (create-destination-exists,
     // create-parent-missing, non-object frontmatter, empty-stem precondition,
-    // duplicate op id), taking the total to 129; self-check runs oracle vs. itself,
-    // so all 129 Match.
+    // duplicate op id), taking the total to 129.
+    // NRN-406 (ADR 0024) adds one `apply` case exercising independent-files-proceed
+    // partial apply, taking the total to 130; self-check runs oracle vs. itself,
+    // so all 130 Match.
     assert!(
-        stdout.contains("129 cases: 129 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("130 cases: 130 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -247,8 +249,13 @@ fn default_mode_gates_help_cases_exit_0() {
     // create-parent-missing / malformed-plan / invalid-precondition). The gated
     // total grows to 128 and the diverged count from 46 to 51; the match count
     // stays 77.
+    // NRN-406 (ADR 0024) flips the `apply-authored-sequenced-seq-creates-zoo` case
+    // from match to DIVERGED (PD-126: true per-op tracking fixes the NRN-425 report
+    // under-count) and adds one DIVERGING case (PD-127:
+    // apply-authored-independent-files-proceed-zoo). The gated total grows to 129,
+    // the match count drops to 76, and the diverged count grows from 51 to 53.
     assert!(
-        stdout.contains("128 cases: 77 match, 51 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("129 cases: 76 match, 53 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [

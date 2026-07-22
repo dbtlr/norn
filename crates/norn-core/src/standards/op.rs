@@ -56,7 +56,7 @@ pub struct ApplyOp {
 }
 
 /// The minimal carrier the pass orchestrator
-/// ([`apply_repair_plan_with_context`](crate::apply::repair_apply::apply_repair_plan_with_context))
+/// ([`run_apply_passes`](crate::apply::passes::run_apply_passes))
 /// consumes — the successor to the deleted `RepairPlan`. Holds the `ApplyOp`
 /// working set plus the few context fields the passes read: the schema version and
 /// vault root the pre-write validation checks, and the planner's skip summary the

@@ -2696,9 +2696,12 @@ const APPLY_CASES: &[Case] = &[
     // picks up its own apply-time-resolved id) — yet the actual vault tree
     // carries both files with the correct distinct frontmatter/body, and the
     // rewrite reproduces the identical counters and mislabeled summary text.
-    // This is a REAL report-rendering defect (both create summaries print the
-    // first op's resolved path), tracked as NRN-425; the case pins current
-    // behavior until that fix lands with its ledger entry. TRACE_NORM for the
+    // This was the NRN-425 report-rendering defect, a direct symptom of the
+    // oracle reconstructing per-op status from the event log. The one-applier
+    // fold (ADR 0024) records each op's outcome truly, so the rewrite now
+    // reports `applied: 2` with the two distinct resolved paths — a deliberate
+    // divergence ledgered under NRN-406 (PD-126), matching the (unchanged)
+    // post-state rather than the oracle's mis-count. TRACE_NORM for the
     // confirmed-apply trace id.
     Case {
         id: "apply-authored-sequenced-seq-creates-zoo",
@@ -2735,6 +2738,64 @@ const APPLY_CASES: &[Case] = &[
           "frontmatter": { "title": "Task Two", "type": "task" },
           "body": "# Task Two\n"
         },
+        "force": false
+      }
+    }
+  ]
+}
+"##,
+        ),
+    },
+    // ── NRN-406 (ADR 0024): independent files proceed ─────────────────────────
+    // A three-create plan where the middle op's parent dir is missing (no
+    // `--parents`), so it fails `create-parent-missing` AFTER the first op has
+    // already written. The oracle aborts the plan at the first failure: op0
+    // `applied`, op1 `failed`, op2 `not_run` (applied: 1, remaining: 1) — only
+    // `nrn406-first.md` lands. The one-applier fold makes partial apply the
+    // semantics: the failed op is recorded and INDEPENDENT ops still run, so op2
+    // `applied` (applied: 2, remaining: 0) and BOTH `nrn406-first.md` and
+    // `nrn406-third.md` land. Both binaries exit 1 (a write landed before the
+    // failure — a truthful partial failure, never a byte-identical refusal); the
+    // op2 status, the applied/remaining counters, AND the post-state (the extra
+    // `nrn406-third.md`) diverge. Deliberate divergence, PD-127. TRACE_NORM for
+    // the partial-apply trace id.
+    Case {
+        id: "apply-authored-independent-files-proceed-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 1,
+        requires_doc: None,
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    {
+      "kind": "create_document",
+      "fields": {
+        "path": "nrn406-first.md",
+        "new_value": { "frontmatter": { "type": "note" }, "body": "# First\n" },
+        "force": false
+      }
+    },
+    {
+      "kind": "create_document",
+      "fields": {
+        "path": "nrn406-missing/second.md",
+        "new_value": { "frontmatter": { "type": "note" }, "body": "# Second\n" },
+        "force": false
+      }
+    },
+    {
+      "kind": "create_document",
+      "fields": {
+        "path": "nrn406-third.md",
+        "new_value": { "frontmatter": { "type": "note" }, "body": "# Third\n" },
         "force": false
       }
     }
