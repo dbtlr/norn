@@ -110,7 +110,7 @@ pub fn evaluate_owner_preconditions(
                             let predicates = eq
                                 .iter()
                                 .map(|predicate| {
-                                    crate::query::filter_args::parse_field_value(
+                                    crate::query::filter_args::parse_eq_precondition(
                                         predicate,
                                         "owner_set.eq",
                                     )

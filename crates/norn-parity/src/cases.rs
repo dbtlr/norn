@@ -680,6 +680,62 @@ const READ_CASES: &[Case] = &[
         plan: None,
     },
     Case {
+        // NRN-426 (ADR 0023 amendment): a numeric-looking `--eq` value against a
+        // QUOTED stored value. The pinned oracle eagerly coerces `07030` to the
+        // integer 7030 before SQL, which never equals the stored string "07030" —
+        // zero results at exit 0, a silent miss. The rewrite dual-types the
+        // undeclared field, matching either representation (here the quoted
+        // "07030"). Ledgered decided-better (PD-124).
+        id: "read-find-eq-numeric-quoted-value-zoo",
+        argv: &["find", "--eq", "zip:07030", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // NRN-426: the corrupting direction — `--not-eq` on the same value. The
+        // oracle compares the stored string "07030" against the integer 7030,
+        // finds them unequal, and RETURNS the doc the user meant to exclude. The
+        // rewrite excludes either representation (De Morgan over the dual). The
+        // oracle wrongly returns alpha; the rewrite drops alpha and returns the
+        // rest (field-missing docs stay included). PD-124.
+        id: "read-find-not-eq-numeric-quoted-value-zoo",
+        argv: &["find", "--not-eq", "zip:07030", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // NRN-426: a value-comparison predicate on a schema-DECLARED date field
+        // (`due: date`) with a non-ISO value. The oracle coerces `someday` to a
+        // string and lexically compares — zero results at exit 0. The rewrite
+        // refuses (exit 2) naming the field, the declared type, and the value,
+        // extending the ADR 0023 strictness class to value operators. PD-124.
+        id: "read-find-declared-date-eq-refuses-zoo",
+        argv: &["find", "--eq", "due:someday", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
         id: "read-find-sort-limit-json-zoo",
         argv: &[
             "find",

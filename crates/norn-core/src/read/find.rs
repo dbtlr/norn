@@ -28,22 +28,27 @@ use norn_wire::{FindDoc, FindParams, FindReport};
 
 use crate::cache::{Cache, FindQuery, SortClause, SortDirection};
 use crate::domain::DocumentSummary;
-use crate::query::filter_args::build_document_query;
+use crate::query::filter_args::{build_document_query, PredicateFieldTypes};
 use crate::read::{connection_values, ConnectionValues};
+use crate::standards::VaultConfig;
 
 /// The find-only default limit applied when `--limit` is absent and
 /// `--no-limit` is not set (donor parity).
 const DEFAULT_LIMIT: usize = 10;
 
 /// Run a `find` request against the warm cache. See the module docs for the
-/// `Ok(Ok)` / `Ok(Err)` / `Err` contract.
+/// `Ok(Ok)` / `Ok(Err)` / `Err` contract. `config` carries the vault schema so a
+/// value-comparison predicate compiles against the field's declared type
+/// (NRN-426); `None` (no config) falls back to dual-typing.
 pub fn execute(
     cache: &Cache,
+    config: Option<&VaultConfig>,
     params: &FindParams,
     today: &str,
 ) -> Result<Result<FindReport, String>> {
     // Predicate build — a malformed predicate token is a user error.
-    let mut predicates = match build_document_query(&params.filter, today) {
+    let types = PredicateFieldTypes::from_config(config);
+    let mut predicates = match build_document_query(&params.filter, today, &types) {
         Ok(q) => q,
         Err(e) => return Ok(Err(e.to_string())),
     };
@@ -170,7 +175,7 @@ mod tests {
     fn find_all_defaults_limit_to_ten_and_returns_every_doc() {
         let (_tmp, root) = vault();
         let cache = built(&root);
-        let report = execute(&cache, &FindParams::default(), TODAY)
+        let report = execute(&cache, None, &FindParams::default(), TODAY)
             .unwrap()
             .unwrap();
         // 3 docs, under the default-10 limit → all returned, not truncated.
@@ -190,7 +195,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let report = execute(&cache, &params, TODAY).unwrap().unwrap();
+        let report = execute(&cache, None, &params, TODAY).unwrap().unwrap();
         assert_eq!(report.total, 2);
         let paths: Vec<&str> = report.documents.iter().map(|d| d.path.as_str()).collect();
         assert_eq!(paths, vec!["a.md", "c.md"]);
@@ -207,7 +212,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let report = execute(&cache, &params, TODAY).unwrap().unwrap();
+        let report = execute(&cache, None, &params, TODAY).unwrap().unwrap();
         assert_eq!(report.total, 3);
         assert_eq!(report.returned, 1);
         assert!(report.truncated);
@@ -217,7 +222,7 @@ mod tests {
     fn default_offset_starts_at_first_record_and_reports_one() {
         let (_tmp, root) = vault();
         let cache = built(&root);
-        let report = execute(&cache, &FindParams::default(), TODAY)
+        let report = execute(&cache, None, &FindParams::default(), TODAY)
             .unwrap()
             .unwrap();
         // Zero-indexed default offset 0 → first record, echoed 1-based.
@@ -238,7 +243,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let report = execute(&cache, &params, TODAY).unwrap().unwrap();
+        let report = execute(&cache, None, &params, TODAY).unwrap().unwrap();
         assert_eq!(report.documents[0].path, "b.md", "offset 1 = second record");
         assert_eq!(report.starts_at, 2, "1-based echo of offset 1");
         assert_eq!(report.total, 3);
@@ -257,7 +262,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let report = execute(&cache, &params, TODAY).unwrap().unwrap();
+        let report = execute(&cache, None, &params, TODAY).unwrap().unwrap();
         assert_eq!(report.returned, 3, "no_limit overrides the limit of 1");
         assert!(!report.truncated);
     }
@@ -273,7 +278,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let outcome = execute(&cache, &params, TODAY).unwrap();
+        let outcome = execute(&cache, None, &params, TODAY).unwrap();
         assert!(outcome.is_err(), "malformed --eq must be a user error");
     }
 
@@ -298,7 +303,7 @@ mod tests {
         cache.full_build(&root).unwrap();
 
         // Default: no connection facets loaded.
-        let plain = execute(&cache, &FindParams::default(), TODAY)
+        let plain = execute(&cache, None, &FindParams::default(), TODAY)
             .unwrap()
             .unwrap();
         assert!(plain
@@ -311,7 +316,7 @@ mod tests {
             with_connections: true,
             ..Default::default()
         };
-        let deep = execute(&cache, &params, TODAY).unwrap().unwrap();
+        let deep = execute(&cache, None, &params, TODAY).unwrap().unwrap();
         let a = deep
             .documents
             .iter()
@@ -347,7 +352,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let outcome = execute(&cache, &params, TODAY).unwrap();
+        let outcome = execute(&cache, None, &params, TODAY).unwrap();
         assert!(
             outcome.is_err(),
             "malformed --path glob must be a user error"
@@ -367,7 +372,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let outcome = execute(&cache, &params, TODAY).unwrap();
+        let outcome = execute(&cache, None, &params, TODAY).unwrap();
         assert!(
             outcome.is_err(),
             "non-ISO --before value must be a user error"
@@ -385,7 +390,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let report = execute(&cache, &params, TODAY).unwrap().unwrap();
+        let report = execute(&cache, None, &params, TODAY).unwrap().unwrap();
         assert_eq!(report.total, 3, "a valid glob still matches every doc");
     }
 
@@ -400,7 +405,128 @@ mod tests {
             },
             ..Default::default()
         };
-        let outcome = execute(&cache, &params, TODAY).unwrap();
+        let outcome = execute(&cache, None, &params, TODAY).unwrap();
         assert!(outcome.is_err());
+    }
+
+    // ── NRN-426: predicate typing (dual-type fallback + schema authority) ────
+
+    /// A vault with a quoted (string) zip, a numeric zip, and an unrelated doc.
+    fn zip_vault() -> (TempDir, Utf8PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(
+            root.join("quoted.md").as_std_path(),
+            "---\nzip: \"07030\"\n---\nquoted\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("numeric.md").as_std_path(),
+            "---\nzip: 7030\n---\nnumeric\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("other.md").as_std_path(),
+            "---\nzip: \"90210\"\n---\nother\n",
+        )
+        .unwrap();
+        (tmp, root)
+    }
+
+    fn found_paths(report: &FindReport) -> Vec<String> {
+        let mut p: Vec<String> = report.documents.iter().map(|d| d.path.clone()).collect();
+        p.sort();
+        p
+    }
+
+    #[test]
+    fn eq_numeric_token_matches_quoted_and_numeric_under_fallback() {
+        // The cured bug: `--eq zip:07030` with no schema declaration matches BOTH
+        // the stored string "07030" and the numeric 7030 (dual-type), where the
+        // old eager coercion returned zero results against the quoted value.
+        let (_tmp, root) = zip_vault();
+        let cache = built(&root);
+        let params = FindParams {
+            filter: FilterParams {
+                eq: vec!["zip:07030".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let report = execute(&cache, None, &params, TODAY).unwrap().unwrap();
+        assert_eq!(found_paths(&report), vec!["numeric.md", "quoted.md"]);
+    }
+
+    #[test]
+    fn not_eq_numeric_token_excludes_quoted_and_numeric_under_fallback() {
+        // The inverted-`--not-eq` bug: excluding `zip:07030` must drop BOTH the
+        // quoted and numeric representations, leaving only the unrelated doc.
+        let (_tmp, root) = zip_vault();
+        let cache = built(&root);
+        let params = FindParams {
+            filter: FilterParams {
+                not_eq: vec!["zip:07030".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let report = execute(&cache, None, &params, TODAY).unwrap().unwrap();
+        assert_eq!(found_paths(&report), vec!["other.md"]);
+    }
+
+    #[test]
+    fn declared_string_field_matches_only_the_quoted_value() {
+        // NRN-426 rule 1: when the schema declares `zip: string`, the predicate
+        // compiles as a string — matching only the quoted "07030", never the
+        // numeric 7030.
+        let (_tmp, root) = zip_vault();
+        let cache = built(&root);
+        let mut config = crate::standards::VaultConfig::default();
+        let mut rule = crate::standards::ValidateRule::default();
+        rule.field_types.insert(
+            "zip".to_string(),
+            crate::standards::FieldTypeSpec::Bare("string".to_string()),
+        );
+        config.validate.rules.push(rule);
+        let params = FindParams {
+            filter: FilterParams {
+                eq: vec!["zip:07030".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let report = execute(&cache, Some(&config), &params, TODAY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found_paths(&report), vec!["quoted.md"]);
+    }
+
+    #[test]
+    fn declared_date_field_refuses_non_iso_eq_value() {
+        // NRN-426 rule 3: a `--eq` on a schema-declared date field refuses a
+        // non-ISO value (ADR 0023 strictness class), rather than silently
+        // matching nothing.
+        let (_tmp, root) = zip_vault();
+        let cache = built(&root);
+        let mut config = crate::standards::VaultConfig::default();
+        let mut rule = crate::standards::ValidateRule::default();
+        rule.field_types.insert(
+            "due".to_string(),
+            crate::standards::FieldTypeSpec::Bare("date".to_string()),
+        );
+        config.validate.rules.push(rule);
+        let params = FindParams {
+            filter: FilterParams {
+                eq: vec!["due:someday".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let outcome = execute(&cache, Some(&config), &params, TODAY).unwrap();
+        let err = outcome.expect_err("declared-date --eq must refuse a non-ISO value");
+        assert!(err.contains("due") && err.contains("date") && err.contains("someday"));
     }
 }

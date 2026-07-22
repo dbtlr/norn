@@ -641,8 +641,10 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                     {
                         return Ok(Err(rej));
                     }
-                    Ok(norn_core::read::find::execute(cache, &params, &today)?
-                        .map_err(FieldRejection::from))
+                    Ok(
+                        norn_core::read::find::execute(cache, config.as_deref(), &params, &today)?
+                            .map_err(FieldRejection::from),
+                    )
                 })
             })
             .await;
@@ -662,8 +664,10 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                     {
                         return Ok(Err(rej));
                     }
-                    Ok(norn_core::read::count::execute(cache, &params, &today)?
-                        .map_err(FieldRejection::from))
+                    Ok(
+                        norn_core::read::count::execute(cache, config.as_deref(), &params, &today)?
+                            .map_err(FieldRejection::from),
+                    )
                 })
             })
             .await;

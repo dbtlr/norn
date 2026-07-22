@@ -57,11 +57,15 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // (ADR 0023) added PD-123 (decided-better query predicate input strictness:
     // a non-ISO date-operator value and a malformed `--path` glob each refuse at
     // exit 2 instead of returning a silently-wrong or silently-empty result set,
-    // two cases).
+    // two cases). NRN-426 (ADR 0023 amendment) added PD-124 (decided-better
+    // predicate value typing: a numeric-looking `--eq`/`--not-eq` value dual-types
+    // against quoted stored values instead of eager-coercing to a miss/inverted
+    // exclusion, and a value operator on a declared-date field refuses a non-ISO
+    // value, three cases).
     assert_eq!(
         ledger.entries.len(),
-        23,
-        "expected exactly PD-101..PD-123, found {}",
+        24,
+        "expected exactly PD-101..PD-124, found {}",
         ledger.entries.len()
     );
 

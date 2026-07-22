@@ -345,6 +345,7 @@ related: "[[beta]]"
 project: sample-project
 summary: A short summary of alpha, unbounded in length.
 internal: true
+zip: "07030"
 ---
 
 # Alpha

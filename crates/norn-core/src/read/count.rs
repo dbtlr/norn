@@ -17,15 +17,19 @@ use norn_wire::{CountParams, CountReport, GroupNode};
 
 use crate::cache::Cache;
 use crate::domain::DocumentSummary;
-use crate::query::filter_args::build_document_query;
+use crate::query::filter_args::{build_document_query, PredicateFieldTypes};
 use crate::read::{render_key, MISSING};
+use crate::standards::VaultConfig;
 
 /// The most `--by` fields a single count may nest (donor parity).
 const MAX_BY_FIELDS: usize = 16;
 
-/// Run a `count` request against the warm cache.
+/// Run a `count` request against the warm cache. `config` carries the vault
+/// schema so a value-comparison predicate compiles against the field's declared
+/// type (NRN-426); `None` falls back to dual-typing.
 pub fn execute(
     cache: &Cache,
+    config: Option<&VaultConfig>,
     params: &CountParams,
     today: &str,
 ) -> Result<Result<CountReport, String>> {
@@ -48,7 +52,8 @@ pub fn execute(
         )));
     }
 
-    let mut query = match build_document_query(&params.filter, today) {
+    let types = PredicateFieldTypes::from_config(config);
+    let mut query = match build_document_query(&params.filter, today, &types) {
         Ok(q) => q,
         Err(e) => return Ok(Err(e.to_string())),
     };
@@ -162,7 +167,7 @@ mod tests {
     fn bare_count_returns_total() {
         let (_tmp, root) = vault();
         let cache = built(&root);
-        let report = execute(&cache, &CountParams::default(), TODAY)
+        let report = execute(&cache, None, &CountParams::default(), TODAY)
             .unwrap()
             .unwrap();
         assert_eq!(report, CountReport::Total { total: 4 });
@@ -176,7 +181,7 @@ mod tests {
             by: vec!["type".into()],
             ..Default::default()
         };
-        let report = execute(&cache, &params, TODAY).unwrap().unwrap();
+        let report = execute(&cache, None, &params, TODAY).unwrap().unwrap();
         match report {
             CountReport::Grouped { by, total, groups } => {
                 assert_eq!(by, "type");
@@ -196,7 +201,7 @@ mod tests {
             by: vec!["status".into()],
             ..Default::default()
         };
-        let report = execute(&cache, &params, TODAY).unwrap().unwrap();
+        let report = execute(&cache, None, &params, TODAY).unwrap().unwrap();
         match report {
             CountReport::Grouped { groups, .. } => {
                 assert_eq!(groups["active"], 2);
@@ -215,7 +220,7 @@ mod tests {
             by: vec!["type".into(), "status".into()],
             ..Default::default()
         };
-        let report = execute(&cache, &params, TODAY).unwrap().unwrap();
+        let report = execute(&cache, None, &params, TODAY).unwrap().unwrap();
         match report {
             CountReport::GroupedMulti { by, total, groups } => {
                 assert_eq!(by, vec!["type", "status"]);
@@ -245,7 +250,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let report = execute(&cache, &params, TODAY).unwrap().unwrap();
+        let report = execute(&cache, None, &params, TODAY).unwrap().unwrap();
         match report {
             CountReport::Grouped { total, groups, .. } => {
                 assert_eq!(total, 2);
@@ -264,7 +269,7 @@ mod tests {
             by: vec!["type".into(), "type".into()],
             ..Default::default()
         };
-        assert!(execute(&cache, &params, TODAY).unwrap().is_err());
+        assert!(execute(&cache, None, &params, TODAY).unwrap().is_err());
     }
 
     #[test]
@@ -281,7 +286,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let outcome = execute(&cache, &params, TODAY).unwrap();
+        let outcome = execute(&cache, None, &params, TODAY).unwrap();
         assert!(
             outcome.is_err(),
             "malformed --path glob must be a user error"
@@ -301,7 +306,7 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(execute(&cache, &params, TODAY).unwrap().is_err());
+        assert!(execute(&cache, None, &params, TODAY).unwrap().is_err());
     }
 
     #[test]
@@ -315,7 +320,65 @@ mod tests {
             },
             ..Default::default()
         };
-        let report = execute(&cache, &params, TODAY).unwrap().unwrap();
+        let report = execute(&cache, None, &params, TODAY).unwrap().unwrap();
         assert_eq!(report, CountReport::Total { total: 4 });
+    }
+
+    // ── NRN-426: count shares the typed predicate path with find ────────────
+
+    #[test]
+    fn eq_numeric_token_counts_quoted_and_numeric_under_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())
+            .unwrap()
+            .join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        std::fs::write(
+            root.join("q.md").as_std_path(),
+            "---\nzip: \"07030\"\n---\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("n.md").as_std_path(), "---\nzip: 7030\n---\n").unwrap();
+        std::fs::write(
+            root.join("o.md").as_std_path(),
+            "---\nzip: \"90210\"\n---\n",
+        )
+        .unwrap();
+        let cache = built(&root);
+        let params = CountParams {
+            filter: FilterParams {
+                eq: vec!["zip:07030".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // No schema (config None) → dual-type matches the quoted AND numeric zip.
+        let report = execute(&cache, None, &params, TODAY).unwrap().unwrap();
+        assert_eq!(report, CountReport::Total { total: 2 });
+    }
+
+    #[test]
+    fn declared_date_field_refuses_non_iso_eq_value() {
+        let (_tmp, root) = vault();
+        let cache = built(&root);
+        let mut config = crate::standards::VaultConfig::default();
+        let mut rule = crate::standards::ValidateRule::default();
+        rule.field_types.insert(
+            "due".to_string(),
+            crate::standards::FieldTypeSpec::Bare("date".to_string()),
+        );
+        config.validate.rules.push(rule);
+        let params = CountParams {
+            filter: FilterParams {
+                eq: vec!["due:someday".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let outcome = execute(&cache, Some(&config), &params, TODAY).unwrap();
+        assert!(
+            outcome.is_err(),
+            "declared-date --eq must refuse a non-ISO value"
+        );
     }
 }

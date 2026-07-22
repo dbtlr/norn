@@ -60,7 +60,8 @@ pub fn execute(
     let want_data = params.data || !by.is_empty();
 
     let data = if want_data {
-        let query = match build_document_query(&params.filter, today) {
+        let types = crate::query::filter_args::PredicateFieldTypes::from_config(config);
+        let query = match build_document_query(&params.filter, today, &types) {
             Ok(mut q) => {
                 if !params.filter.links_to.is_empty() {
                     let index = cache.load_graph_index()?;
