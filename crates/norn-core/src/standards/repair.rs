@@ -219,8 +219,12 @@ fn op_fields_from_change(change: &PlannedChange) -> Value {
         fields.insert("new_value".into(), new_value.clone());
     }
     if let Some(destination) = &change.destination {
-        // move remap: `destination` → `dst` (destination is move-only).
-        fields.insert("dst".into(), Value::String(destination.to_string()));
+        // The `dst` remap belongs to move ops alone; a non-move op carrying a
+        // destination (none exists today) must keep the retired serde path's
+        // literal `destination` key rather than silently borrowing the move
+        // vocabulary.
+        let key = if is_move { "dst" } else { "destination" };
+        fields.insert(key.into(), Value::String(destination.to_string()));
     }
     if let Some(link_risk) = &change.link_risk {
         fields.insert(
