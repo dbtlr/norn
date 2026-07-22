@@ -16,10 +16,13 @@
 use std::io::{self, Write};
 
 use crate::cli::GlobalArgs;
+use crate::output::palette::{self, Palette};
 
+use super::conversation::Conversation;
 use super::output::Output;
 use super::prompt;
 use super::render;
+use super::sink::Sink;
 use super::{Diagnostic, Presenter, EXIT_OK, EXIT_OPERATIONAL, EXIT_USAGE};
 
 /// Whether the process stdout is a terminal — the one isatty read, consumed by
@@ -67,9 +70,37 @@ pub(crate) fn render_outcome(result: io::Result<i32>, err: &mut dyn Write) -> i3
     }
 }
 
+/// Build a [`Sink`] over the presenter's stdout and a [`Conversation`] over its
+/// stderr — the ready styling seam a renderer composes through — and run `f`.
+/// The single place per render where the two stream borrows are split and the
+/// resolved palette + width are threaded into the sink.
+fn render_with<O: Write, E: Write, R>(
+    presenter: &mut Presenter<O, E>,
+    palette: &Palette,
+    width: usize,
+    f: impl FnOnce(&mut Sink<'_>, &mut Conversation<'_>) -> R,
+) -> R {
+    let (out, err) = presenter.streams();
+    let mut sink = Sink::new(out, palette, width);
+    let mut conv = Conversation::new(err);
+    f(&mut sink, &mut conv)
+}
+
 /// Render a command's returned [`Output`] (or its [`Diagnostic`]) and return the
 /// process exit code. The single render seam: every read/registry verb reaches
 /// stdout through here and nowhere else.
+///
+/// This is the ONE place presentation is resolved (ADR 0021): the effective
+/// [`Format`](super::format::Format) per view, the [`Palette`] once (from
+/// `--color` + isatty), and the terminal width — a renderer receives the
+/// resolved `Format` plus a ready [`Sink`] and never re-resolves any of them.
+///
+/// The unstyled contract is STRUCTURAL here: `describe` / `count` / `vault list`
+/// (and the mutation verbs that never colorized in the donor) are handed a
+/// no-op ([`Palette::off`]) sink, so their pinned, unstyled bytes cannot acquire
+/// styling even if a future edit routes them through a record primitive. Only
+/// the styled verbs (`find` / `get` / `validate` / `repair` / `set`) receive the
+/// resolved palette.
 pub fn emit<O: Write, E: Write>(
     result: Result<Output, Diagnostic>,
     global: &GlobalArgs,
@@ -82,23 +113,82 @@ pub fn emit<O: Write, E: Write>(
             return EXIT_OPERATIONAL;
         }
     };
+    // The three isatty / palette / width reads, once, at the dispatch boundary.
+    let is_tty = is_stdout_tty();
+    let styled = palette::resolve(global.color);
+    let plain = Palette::off();
+    let width = term_width();
+
     match output {
-        Output::Find(view) => render::find::render_find(view, global, presenter),
-        Output::Get(view) => render::get::render_get(view, global, presenter),
-        Output::Count(view) => render::count::render_count(view, presenter),
-        Output::Describe(view) => render::describe::render_describe(view, presenter),
-        Output::Validate(view) => render::validate::render_validate(view, global, presenter),
-        Output::Repair(view) => render::repair::render_repair(view, global, presenter),
-        Output::VaultList(view) => render::vault::render_vault_list(view, presenter),
-        Output::Set(view) => render::set::render_set(view, global, presenter),
-        Output::New(view) => render::new::render_new(view, global, presenter),
-        Output::Edit(view) => render::edit::render_edit(view, global, presenter),
-        Output::Move(view) => render::move_doc::render_move(view, presenter),
-        Output::Delete(view) => render::delete::render_delete(view, presenter),
-        Output::RewriteWikilink(view) => {
-            render::rewrite_wikilink::render_rewrite_wikilink(view, presenter)
+        Output::Find(view) => {
+            let format = view.spec.resolve(view.explicit, is_tty);
+            render_with(presenter, &styled, width, |sink, conv| {
+                render::find::render_find(view, format, sink, conv)
+            })
         }
-        Output::Apply(view) => render::apply::render_apply(view, presenter),
+        Output::Get(view) => {
+            let format = view.spec.resolve(view.explicit, is_tty);
+            render_with(presenter, &styled, width, |sink, conv| {
+                render::get::render_get(view, format, sink, conv)
+            })
+        }
+        Output::Count(view) => {
+            let format = view.spec.resolve(view.explicit, is_tty);
+            render_with(presenter, &plain, width, |sink, conv| {
+                render::count::render_count(view, format, sink, conv)
+            })
+        }
+        Output::Describe(view) => {
+            let format = view.spec.resolve(view.explicit, is_tty);
+            render_with(presenter, &plain, width, |sink, conv| {
+                render::describe::render_describe(view, format, sink, conv)
+            })
+        }
+        Output::Validate(view) => {
+            let format = view.spec.resolve(view.explicit, is_tty);
+            render_with(presenter, &styled, width, |sink, conv| {
+                render::validate::render_validate(view, format, sink, conv)
+            })
+        }
+        Output::Repair(view) => render_with(presenter, &styled, width, |sink, conv| {
+            render::repair::render_repair(view, is_tty, sink, conv)
+        }),
+        Output::VaultList(view) => {
+            let format = view.spec.resolve(view.explicit, is_tty);
+            render_with(presenter, &plain, width, |sink, conv| {
+                render::vault::render_vault_list(view, format, sink, conv)
+            })
+        }
+        Output::Set(view) => {
+            let format = view.spec.resolve(view.explicit, is_tty);
+            render_with(presenter, &styled, width, |sink, conv| {
+                render::set::render_set(view, format, sink, conv)
+            })
+        }
+        Output::New(view) => {
+            let format = view.spec.resolve(view.explicit, is_tty);
+            render_with(presenter, &plain, width, |sink, conv| {
+                render::new::render_new(view, format, sink, conv)
+            })
+        }
+        Output::Edit(view) => {
+            let format = view.spec.resolve(view.explicit, is_tty);
+            render_with(presenter, &plain, width, |sink, conv| {
+                render::edit::render_edit(view, format, sink, conv)
+            })
+        }
+        Output::Move(view) => render_with(presenter, &plain, width, |sink, conv| {
+            render::move_doc::render_move(view, sink, conv)
+        }),
+        Output::Delete(view) => render_with(presenter, &plain, width, |sink, conv| {
+            render::delete::render_delete(view, sink, conv)
+        }),
+        Output::RewriteWikilink(view) => render_with(presenter, &plain, width, |sink, conv| {
+            render::rewrite_wikilink::render_rewrite_wikilink(view, sink, conv)
+        }),
+        Output::Apply(view) => render_with(presenter, &plain, width, |sink, conv| {
+            render::apply::render_apply(view, sink, conv)
+        }),
         Output::Line(line) => {
             let (out, err) = presenter.streams();
             let result: io::Result<i32> = (|| {

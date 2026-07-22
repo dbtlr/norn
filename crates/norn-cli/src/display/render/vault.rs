@@ -1,39 +1,38 @@
 //! `vault list` (NRN-409).
 
-use std::io::{self, Write};
+use std::io;
 
 use norn_config::RegisteredVault;
 use serde::Serialize;
 
-use crate::display::emit::{is_stdout_tty, render_outcome};
+use crate::display::conversation::Conversation;
+use crate::display::emit::render_outcome;
 use crate::display::format::Format;
 use crate::display::output::VaultListView;
-use crate::display::{Presenter, EXIT_OK};
+use crate::display::sink::Sink;
+use crate::display::EXIT_OK;
 
-pub(crate) fn render_vault_list<O: Write, E: Write>(
+pub(crate) fn render_vault_list(
     view: VaultListView,
-    presenter: &mut Presenter<O, E>,
+    format: Format,
+    sink: &mut Sink<'_>,
+    conv: &mut Conversation<'_>,
 ) -> i32 {
-    let format = view.spec.resolve(view.explicit, is_stdout_tty());
     match format {
-        Format::Json => list_json(&view.vaults, presenter),
-        _ => list_human(&view.vaults, presenter),
+        Format::Json => list_json(&view.vaults, sink, conv),
+        _ => list_human(&view.vaults, sink, conv),
     }
 }
 
-fn list_human<O: Write, E: Write>(
-    vaults: &[RegisteredVault],
-    presenter: &mut Presenter<O, E>,
-) -> i32 {
+fn list_human(vaults: &[RegisteredVault], sink: &mut Sink<'_>, conv: &mut Conversation<'_>) -> i32 {
     if vaults.is_empty() {
-        presenter.diagnostic("no vaults registered");
+        conv.diagnostic("no vaults registered");
         return EXIT_OK;
     }
-    let (out, err) = presenter.streams();
     let result: io::Result<i32> = (|| {
         for vault in vaults {
             writeln!(
-                out,
+                sink.writer(),
                 "{name}  {root}",
                 name = vault.name,
                 root = path_display(&vault.root)
@@ -44,13 +43,17 @@ fn list_human<O: Write, E: Write>(
                 ("logs", &vault.logs),
             ] {
                 if let Some(path) = path {
-                    writeln!(out, "    {label} = {path}", path = path_display(path))?;
+                    writeln!(
+                        sink.writer(),
+                        "    {label} = {path}",
+                        path = path_display(path)
+                    )?;
                 }
             }
         }
         Ok(EXIT_OK)
     })();
-    render_outcome(result, err)
+    render_outcome(result, conv.writer())
 }
 
 /// The stable machine shape: an array of objects, one per vault, absent overrides
@@ -76,22 +79,18 @@ impl From<&RegisteredVault> for VaultJson {
     }
 }
 
-fn list_json<O: Write, E: Write>(
-    vaults: &[RegisteredVault],
-    presenter: &mut Presenter<O, E>,
-) -> i32 {
+fn list_json(vaults: &[RegisteredVault], sink: &mut Sink<'_>, conv: &mut Conversation<'_>) -> i32 {
     let rows: Vec<VaultJson> = vaults.iter().map(VaultJson::from).collect();
     match serde_json::to_string_pretty(&rows) {
         Ok(text) => {
-            let (out, err) = presenter.streams();
             let result: io::Result<i32> = (|| {
-                writeln!(out, "{text}")?;
+                writeln!(sink.writer(), "{text}")?;
                 Ok(EXIT_OK)
             })();
-            render_outcome(result, err)
+            render_outcome(result, conv.writer())
         }
         Err(source) => {
-            presenter.diagnostic(&format!("failed to serialize registry as JSON: {source}"));
+            conv.diagnostic(&format!("failed to serialize registry as JSON: {source}"));
             crate::display::EXIT_OPERATIONAL
         }
     }
@@ -108,6 +107,19 @@ mod tests {
     use crate::display::format::FormatSpec;
     use crate::display::Presenter;
     use crate::display::EXIT_OPERATIONAL;
+    use crate::output::palette::Palette;
+    use std::io::Write;
+
+    /// Drive `render_vault_list` through the same resolution `emit` performs —
+    /// `vault list` is unstyled, so a no-op palette sink.
+    fn drive<O: Write, E: Write>(view: VaultListView, presenter: &mut Presenter<O, E>) -> i32 {
+        let format = view.spec.resolve(view.explicit, false);
+        let palette = Palette::off();
+        let (out, err) = presenter.streams();
+        let mut sink = Sink::new(out, &palette, 80);
+        let mut conv = Conversation::new(err);
+        render_vault_list(view, format, &mut sink, &mut conv)
+    }
 
     /// A `Write` that fails every write with a fixed [`io::ErrorKind`].
     struct FailingWriter(io::ErrorKind);
@@ -147,7 +159,7 @@ mod tests {
         let mut err = Vec::new();
         let code = {
             let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
-            render_vault_list(vault_list_view(Format::Records), &mut presenter)
+            drive(vault_list_view(Format::Records), &mut presenter)
         };
         assert_eq!(code, EXIT_OK);
         assert!(err.is_empty());
@@ -159,7 +171,7 @@ mod tests {
         let code = {
             let mut presenter =
                 Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
-            render_vault_list(vault_list_view(Format::Records), &mut presenter)
+            drive(vault_list_view(Format::Records), &mut presenter)
         };
         assert_eq!(code, EXIT_OPERATIONAL);
         assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
@@ -170,7 +182,7 @@ mod tests {
         let mut err = Vec::new();
         let code = {
             let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
-            render_vault_list(vault_list_view(Format::Json), &mut presenter)
+            drive(vault_list_view(Format::Json), &mut presenter)
         };
         assert_eq!(code, EXIT_OK);
         assert!(err.is_empty());
@@ -182,7 +194,7 @@ mod tests {
         let code = {
             let mut presenter =
                 Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
-            render_vault_list(vault_list_view(Format::Json), &mut presenter)
+            drive(vault_list_view(Format::Json), &mut presenter)
         };
         assert_eq!(code, EXIT_OPERATIONAL);
         assert!(String::from_utf8(err).unwrap().starts_with("norn: "));

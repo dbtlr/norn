@@ -4,25 +4,23 @@ use std::io::{self, Write};
 
 use serde_json::Value;
 
-use crate::cli::GlobalArgs;
-use crate::display::emit::{is_stdout_tty, render_outcome, term_width};
+use crate::display::conversation::Conversation;
+use crate::display::emit::render_outcome;
 use crate::display::fix_hints::fix_hint_for;
 use crate::display::format::Format;
 use crate::display::output::ValidateView;
-use crate::display::{Presenter, EXIT_OK, EXIT_OPERATIONAL};
+use crate::display::sink::Sink;
+use crate::display::{EXIT_OK, EXIT_OPERATIONAL};
 use crate::output::glyphs::{self, Glyph};
-use crate::output::palette::{self, Palette};
+use crate::output::palette::Palette;
 use crate::output::primitives;
 
-pub(crate) fn render_validate<O: Write, E: Write>(
+pub(crate) fn render_validate(
     view: ValidateView,
-    global: &GlobalArgs,
-    presenter: &mut Presenter<O, E>,
+    format: Format,
+    sink: &mut Sink<'_>,
+    conv: &mut Conversation<'_>,
 ) -> i32 {
-    let format = view.spec.resolve(view.explicit, is_stdout_tty());
-    let palette = palette::resolve(global.color);
-    let width = term_width();
-
     // The findings arrive as the typed flat contract (ADR 0022). Serialize each
     // to a `Value` for the json / records / paths projections that read fields
     // by name; jsonl serializes each finding directly, one per line.
@@ -33,7 +31,6 @@ pub(crate) fn render_validate<O: Write, E: Write>(
         .map(|f| serde_json::to_value(f).unwrap_or(Value::Null))
         .collect();
 
-    let (out, err) = presenter.streams();
     let result: io::Result<i32> = (|| {
         match format {
             Format::Json => {
@@ -42,25 +39,25 @@ pub(crate) fn render_validate<O: Write, E: Write>(
                     // `--summary` was set — the case that reaches here); emit it
                     // with exactly one trailing newline.
                     let body = view.report.summary_json.as_deref().unwrap_or("{}");
-                    writeln!(out, "{}", body.trim_end_matches('\n'))?;
+                    writeln!(sink.writer(), "{}", body.trim_end_matches('\n'))?;
                 } else {
                     let payload = serde_json::json!({
                         "total": findings.len(),
                         "findings": findings,
                     });
-                    writeln!(out, "{}", serde_json::to_string_pretty(&payload)?)?;
+                    writeln!(sink.writer(), "{}", serde_json::to_string_pretty(&payload)?)?;
                 }
             }
             Format::Jsonl => {
                 for finding in &view.report.findings {
-                    writeln!(out, "{}", serde_json::to_string(finding)?)?;
+                    writeln!(sink.writer(), "{}", serde_json::to_string(finding)?)?;
                 }
             }
             Format::Paths => {
                 let paths: std::collections::BTreeSet<&str> =
                     findings.iter().filter_map(|f| f["path"].as_str()).collect();
                 for path in paths {
-                    writeln!(out, "{path}")?;
+                    writeln!(sink.writer(), "{path}")?;
                 }
             }
             Format::Records => {
@@ -68,22 +65,22 @@ pub(crate) fn render_validate<O: Write, E: Write>(
                 if view.summary {
                     render_validate_summary(
                         &mut buf,
-                        &palette,
+                        sink.palette(),
                         &findings,
                         view.report.rules_count,
                         view.report.total_docs,
-                        width,
+                        sink.width(),
                     )?;
                 } else {
                     render_validate_full(
                         &mut buf,
-                        &palette,
+                        sink.palette(),
                         &findings,
                         view.report.rules_count,
                         view.report.total_docs,
                     )?;
                 }
-                out.write_all(&buf)?;
+                sink.writer().write_all(&buf)?;
             }
             Format::Markdown => unreachable!("validate has no markdown format"),
         }
@@ -94,7 +91,7 @@ pub(crate) fn render_validate<O: Write, E: Write>(
         })
     })();
 
-    render_outcome(result, err)
+    render_outcome(result, conv.writer())
 }
 
 /// Count warning / error findings by their serialized `severity` field.

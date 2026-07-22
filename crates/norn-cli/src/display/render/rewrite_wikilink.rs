@@ -14,23 +14,22 @@ use norn_wire::{ApplyOutcome, ApplyReport};
 use crate::display::conversation::Conversation;
 use crate::display::emit::render_outcome;
 use crate::display::output::RewriteWikilinkView;
-use crate::display::Presenter;
+use crate::display::sink::Sink;
 
 use super::shared::{apply_report_exit, emit_cascade_failure_warnings, render_apply_refusal};
 
-pub(crate) fn render_rewrite_wikilink<O: Write, E: Write>(
+pub(crate) fn render_rewrite_wikilink(
     view: RewriteWikilinkView,
-    presenter: &mut Presenter<O, E>,
+    sink: &mut Sink<'_>,
+    conv: &mut Conversation<'_>,
 ) -> i32 {
     let report = &view.report;
-    let (out, err) = presenter.streams();
-    let mut conv = Conversation::new(err);
 
     if report.outcome == ApplyOutcome::Refused {
         // `--out` is a write-to-file projection of the report; a refusal never
         // reaches it (the donor refuses before rendering), so the envelope path
         // is unconditional here.
-        return render_apply_refusal(report, view.json, out, &mut conv);
+        return render_apply_refusal(report, view.json, sink.writer(), conv);
     }
 
     emit_cascade_failure_warnings(report, conv.writer());
@@ -48,16 +47,16 @@ pub(crate) fn render_rewrite_wikilink<O: Write, E: Write>(
 
     if view.json {
         let result: io::Result<i32> = (|| {
-            writeln!(out, "{}", serde_json::to_string_pretty(report)?)?;
+            writeln!(sink.writer(), "{}", serde_json::to_string_pretty(report)?)?;
             Ok(exit)
         })();
         return render_outcome(result, conv.writer());
     }
 
     let result: io::Result<i32> = (|| {
-        render_rewrite_records(out, report, &view.old, &view.new)?;
+        render_rewrite_records(sink.writer(), report, &view.old, &view.new)?;
         if !report.dry_run {
-            writeln!(out, "trace: {}", report.trace_id)?;
+            writeln!(sink.writer(), "trace: {}", report.trace_id)?;
         }
         Ok(exit)
     })();

@@ -15,17 +15,16 @@ use norn_wire::{ApplyOutcome, ApplyReport};
 use crate::display::conversation::Conversation;
 use crate::display::emit::render_outcome;
 use crate::display::output::ApplyMutationView;
-use crate::display::Presenter;
+use crate::display::sink::Sink;
 
 use super::shared::{apply_report_exit, emit_cascade_failure_warnings, render_apply_refusal};
 
-pub(crate) fn render_apply<O: Write, E: Write>(
+pub(crate) fn render_apply(
     view: ApplyMutationView,
-    presenter: &mut Presenter<O, E>,
+    sink: &mut Sink<'_>,
+    conv: &mut Conversation<'_>,
 ) -> i32 {
     let report = &view.report;
-    let (out, err) = presenter.streams();
-    let mut conv = Conversation::new(err);
 
     if report.outcome == ApplyOutcome::Refused {
         // Envelope-only refusal (schema mismatch, expansion, a bad create path):
@@ -37,7 +36,7 @@ pub(crate) fn render_apply<O: Write, E: Write>(
         // exactly as the donor's routed `emit` does — `emit_refusal` would drop
         // the preconditions.
         if !report.preconditions.iter().any(|p| p.error.is_some()) {
-            return render_apply_refusal(report, view.json, out, &mut conv);
+            return render_apply_refusal(report, view.json, sink.writer(), conv);
         }
     }
 
@@ -56,14 +55,14 @@ pub(crate) fn render_apply<O: Write, E: Write>(
 
     if view.json {
         let result: io::Result<i32> = (|| {
-            writeln!(out, "{}", serde_json::to_string_pretty(report)?)?;
+            writeln!(sink.writer(), "{}", serde_json::to_string_pretty(report)?)?;
             Ok(exit)
         })();
         return render_outcome(result, conv.writer());
     }
 
     let result: io::Result<i32> = (|| {
-        render_apply_records(out, report)?;
+        render_apply_records(sink.writer(), report)?;
         // TTY `trace:` footer on any CONFIRMED (non-dry-run) apply call — records
         // only; json carries it as a field regardless. Empirically confirmed
         // against the pinned oracle: unlike the envelope-only refusal above (which
@@ -73,7 +72,7 @@ pub(crate) fn render_apply<O: Write, E: Write>(
         // footer on every one of those outcomes, including Refused; only an actual
         // forecast (`dry_run == true`) omits it.
         if !report.dry_run {
-            writeln!(out, "trace: {}", report.trace_id)?;
+            writeln!(sink.writer(), "trace: {}", report.trace_id)?;
         }
         Ok(exit)
     })();

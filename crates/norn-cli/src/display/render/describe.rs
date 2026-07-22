@@ -5,31 +5,33 @@ use std::io::{self, Write};
 
 use norn_wire::DescribeReport;
 
-use crate::display::emit::{is_stdout_tty, render_outcome};
+use crate::display::conversation::Conversation;
+use crate::display::emit::render_outcome;
 use crate::display::format::Format;
 use crate::display::output::DescribeView;
-use crate::display::{Presenter, EXIT_OK};
+use crate::display::sink::Sink;
+use crate::display::EXIT_OK;
 
-pub(crate) fn render_describe<O: Write, E: Write>(
+pub(crate) fn render_describe(
     view: DescribeView,
-    presenter: &mut Presenter<O, E>,
+    format: Format,
+    sink: &mut Sink<'_>,
+    conv: &mut Conversation<'_>,
 ) -> i32 {
-    let format = view.spec.resolve(view.explicit, is_stdout_tty());
     let text = match format {
         Format::Json => describe_json(&view.report),
         _ => describe_text(&view.report),
     };
-    let (out, err) = presenter.streams();
     let result: io::Result<i32> = (|| {
         if text.ends_with('\n') {
-            write!(out, "{text}")?;
+            write!(sink.writer(), "{text}")?;
         } else {
-            writeln!(out, "{text}")?;
+            writeln!(sink.writer(), "{text}")?;
         }
-        warn_unknown_by_describe(&view.report, &view.by, err)?;
+        warn_unknown_by_describe(&view.report, &view.by, conv.writer())?;
         Ok(EXIT_OK)
     })();
-    render_outcome(result, err)
+    render_outcome(result, conv.writer())
 }
 
 /// `describe`'s counterpart to `warn_unknown_by_count` (NRN-374). Unlike
@@ -133,8 +135,20 @@ mod tests {
     use crate::display::format::FormatSpec;
     use crate::display::Presenter;
     use crate::display::EXIT_OPERATIONAL;
+    use crate::output::palette::Palette;
     use norn_wire::{DataSummary, DateBounds, FieldDistribution, SkippedField, ValueCount};
     use serde_json::json;
+
+    /// Drive `render_describe` through the same resolution `emit` performs —
+    /// describe is unstyled, so a no-op palette sink.
+    fn drive<O: Write, E: Write>(view: DescribeView, presenter: &mut Presenter<O, E>) -> i32 {
+        let format = view.spec.resolve(view.explicit, false);
+        let palette = Palette::off();
+        let (out, err) = presenter.streams();
+        let mut sink = Sink::new(out, &palette, 80);
+        let mut conv = Conversation::new(err);
+        render_describe(view, format, &mut sink, &mut conv)
+    }
 
     /// A `Write` that fails every write with a fixed [`io::ErrorKind`].
     struct FailingWriter(io::ErrorKind);
@@ -230,7 +244,7 @@ mod tests {
         let mut err = Vec::new();
         let code = {
             let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
-            render_describe(describe_view(), &mut presenter)
+            drive(describe_view(), &mut presenter)
         };
         assert_eq!(code, EXIT_OK);
         assert!(err.is_empty());
@@ -242,7 +256,7 @@ mod tests {
         let code = {
             let mut presenter =
                 Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
-            render_describe(describe_view(), &mut presenter)
+            drive(describe_view(), &mut presenter)
         };
         assert_eq!(code, EXIT_OPERATIONAL);
         assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
@@ -304,7 +318,7 @@ mod tests {
         let mut err = Vec::new();
         let code = {
             let mut presenter = Presenter::new(&mut out, &mut err);
-            render_describe(view, &mut presenter)
+            drive(view, &mut presenter)
         };
         assert_eq!(code, EXIT_OK);
         assert!(!out.is_empty());

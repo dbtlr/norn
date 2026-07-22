@@ -5,15 +5,12 @@ use std::io::{self, Write};
 use norn_wire::{FindDoc, FindReport};
 use serde_json::Value;
 
-use crate::cli::GlobalArgs;
 use crate::display::conversation::Conversation;
-use crate::display::emit::{is_stdout_tty, render_outcome, term_width};
+use crate::display::emit::render_outcome;
 use crate::display::format::Format;
 use crate::display::output::FindView;
-use crate::display::sink::Sink;
-use crate::display::{Presenter, EXIT_OK};
-use crate::output::palette;
-use crate::output::primitives::Field;
+use crate::display::sink::{Field, Sink};
+use crate::display::EXIT_OK;
 use crate::output::projection::{
     project_json, project_pairs, split_cols, unknown_facet_message, warn_col_ignored, DefaultCols,
     DocView, KNOWN_FACETS,
@@ -21,28 +18,23 @@ use crate::output::projection::{
 
 use super::shared::truncation_note;
 
-pub(crate) fn render_find<O: Write, E: Write>(
+pub(crate) fn render_find(
     view: FindView,
-    global: &GlobalArgs,
-    presenter: &mut Presenter<O, E>,
+    format: Format,
+    sink: &mut Sink<'_>,
+    conv: &mut Conversation<'_>,
 ) -> i32 {
-    let format = view.spec.resolve(view.explicit, is_stdout_tty());
-    let palette = palette::resolve(global.color);
-    let width = term_width();
-    let (out, err) = presenter.streams();
-    let mut conv = Conversation::new(err);
-
     let result: io::Result<i32> = (|| {
         match format {
             Format::Paths => {
                 for doc in &view.report.documents {
-                    writeln!(out, "{}", doc.path)?;
+                    writeln!(sink.writer(), "{}", doc.path)?;
                 }
                 if view.report.truncated {
                     conv.line(&truncation_note(&view.report))?;
                 }
             }
-            Format::Json => render_find_json(out, &view)?,
+            Format::Json => render_find_json(sink.writer(), &view)?,
             Format::Jsonl => {
                 for doc in &view.report.documents {
                     let line = project_json(
@@ -51,15 +43,14 @@ pub(crate) fn render_find<O: Write, E: Write>(
                         view.all_cols,
                         DefaultCols::FrontmatterOnly,
                     );
-                    writeln!(out, "{}", serde_json::to_string(&line)?)?;
+                    writeln!(sink.writer(), "{}", serde_json::to_string(&line)?)?;
                 }
                 if view.report.truncated {
                     conv.line(&truncation_note(&view.report))?;
                 }
             }
             Format::Records => {
-                let mut sink = Sink::new(out, &palette, width);
-                render_find_records(&mut sink, &view)?;
+                render_find_records(sink, &view)?;
             }
             Format::Markdown => unreachable!("find has no markdown format"),
         }
@@ -233,7 +224,7 @@ fn find_doc_view(doc: &FindDoc) -> DocView<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::ColorWhen;
+    use crate::cli::{ColorWhen, GlobalArgs};
     use crate::display::format::FormatSpec;
     use crate::display::Presenter;
     use crate::display::EXIT_OPERATIONAL;
@@ -262,6 +253,21 @@ mod tests {
             help_long: false,
             dynamic_fields: Vec::new(),
         }
+    }
+
+    /// Drive `render_find` through the same resolution `emit` performs: a
+    /// non-tty format, the `--color`-resolved palette, an 80-col sink.
+    fn drive<O: Write, E: Write>(
+        view: FindView,
+        global: &GlobalArgs,
+        presenter: &mut Presenter<O, E>,
+    ) -> i32 {
+        let format = view.spec.resolve(view.explicit, false);
+        let palette = crate::output::palette::resolve(global.color);
+        let (out, err) = presenter.streams();
+        let mut sink = Sink::new(out, &palette, 80);
+        let mut conv = Conversation::new(err);
+        render_find(view, format, &mut sink, &mut conv)
     }
 
     fn one_find_doc() -> FindDoc {
@@ -304,7 +310,7 @@ mod tests {
         let global = global_args();
         let code = {
             let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
-            render_find(find_view(), &global, &mut presenter)
+            drive(find_view(), &global, &mut presenter)
         };
         assert_eq!(code, EXIT_OK);
         assert!(err.is_empty(), "broken pipe must stay silent: {err:?}");
@@ -317,7 +323,7 @@ mod tests {
         let code = {
             let mut presenter =
                 Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
-            render_find(find_view(), &global, &mut presenter)
+            drive(find_view(), &global, &mut presenter)
         };
         assert_eq!(code, EXIT_OPERATIONAL);
         assert!(
@@ -471,7 +477,7 @@ mod tests {
         let mut err = Vec::new();
         let code = {
             let mut presenter = Presenter::new(&mut out, &mut err);
-            render_find(view, &global, &mut presenter)
+            drive(view, &global, &mut presenter)
         };
         assert_eq!(
             code, EXIT_OK,

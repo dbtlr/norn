@@ -14,23 +14,22 @@ use norn_wire::ApplyOutcome;
 use crate::display::conversation::Conversation;
 use crate::display::emit::render_outcome;
 use crate::display::output::MoveMutationView;
-use crate::display::Presenter;
+use crate::display::sink::Sink;
 use crate::output::glyphs::{self, Glyph};
 
 use super::shared::{
     apply_report_exit, emit_cascade_failure_warnings, plural, render_apply_refusal,
 };
 
-pub(crate) fn render_move<O: Write, E: Write>(
+pub(crate) fn render_move(
     view: MoveMutationView,
-    presenter: &mut Presenter<O, E>,
+    sink: &mut Sink<'_>,
+    conv: &mut Conversation<'_>,
 ) -> i32 {
     let report = &view.report;
-    let (out, err) = presenter.streams();
-    let mut conv = Conversation::new(err);
 
     if report.outcome == ApplyOutcome::Refused {
-        return render_apply_refusal(report, view.json, out, &mut conv);
+        return render_apply_refusal(report, view.json, sink.writer(), conv);
     }
 
     emit_cascade_failure_warnings(report, conv.writer());
@@ -38,7 +37,7 @@ pub(crate) fn render_move<O: Write, E: Write>(
 
     if view.json {
         let result: io::Result<i32> = (|| {
-            writeln!(out, "{}", serde_json::to_string_pretty(report)?)?;
+            writeln!(sink.writer(), "{}", serde_json::to_string_pretty(report)?)?;
             Ok(exit)
         })();
         return render_outcome(result, conv.writer());
@@ -51,7 +50,7 @@ pub(crate) fn render_move<O: Write, E: Write>(
     let is_folder = report.operations.iter().any(|o| o.from.is_some());
     let result: io::Result<i32> = (|| {
         if is_folder {
-            render_folder_apply_tty(out, report, dry_run)?;
+            render_folder_apply_tty(sink.writer(), report, dry_run)?;
         } else {
             let (link_total, link_files) = report
                 .operations
@@ -61,11 +60,17 @@ pub(crate) fn render_move<O: Write, E: Write>(
                 .map_or((0, 0), |c| (c.applied, c.files));
             let applied = !dry_run && exit == 0;
             render_move_apply_tty(
-                out, &view.src, &view.dst, link_total, link_files, applied, ascii,
+                sink.writer(),
+                &view.src,
+                &view.dst,
+                link_total,
+                link_files,
+                applied,
+                ascii,
             )?;
         }
         if !dry_run {
-            writeln!(out, "trace: {}", report.trace_id)?;
+            writeln!(sink.writer(), "trace: {}", report.trace_id)?;
         }
         Ok(exit)
     })();

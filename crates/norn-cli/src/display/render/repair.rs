@@ -10,24 +10,25 @@ use std::io::{self, Write};
 
 use norn_wire::MigrationPlan;
 
-use crate::cli::{GlobalArgs, RepairPlanFormat};
-use crate::display::emit::{is_stdout_tty, render_outcome, term_width};
+use crate::cli::RepairPlanFormat;
+use crate::display::conversation::Conversation;
+use crate::display::emit::render_outcome;
 use crate::display::output::RepairView;
-use crate::display::{Presenter, EXIT_OK, EXIT_OPERATIONAL};
+use crate::display::sink::Sink;
+use crate::display::{EXIT_OK, EXIT_OPERATIONAL};
 use crate::output::glyphs;
-use crate::output::palette::{self, Palette};
+use crate::output::palette::Palette;
 use crate::output::primitives;
 
-pub(crate) fn render_repair<O: Write, E: Write>(
+pub(crate) fn render_repair(
     view: RepairView,
-    global: &GlobalArgs,
-    presenter: &mut Presenter<O, E>,
+    is_tty: bool,
+    sink: &mut Sink<'_>,
+    conv: &mut Conversation<'_>,
 ) -> i32 {
-    let palette = palette::resolve(global.color);
-    let width = term_width();
+    let palette = *sink.palette();
+    let width = sink.width();
     let ascii = glyphs::use_ascii();
-
-    let (out, err) = presenter.streams();
 
     // The plan now crosses the wire TYPED (NRN-405 part b) — no parse, no
     // undecodable-frame branch.
@@ -35,9 +36,9 @@ pub(crate) fn render_repair<O: Write, E: Write>(
 
     let result: io::Result<i32> = (|| {
         if view.plan {
-            emit_repair_plan(out, &palette, plan, &view, width, ascii)?;
+            emit_repair_plan(sink.writer(), &palette, plan, &view, width, ascii, is_tty)?;
         } else {
-            write_repair_summary(out, &view.report, plan)?;
+            write_repair_summary(sink.writer(), &view.report, plan)?;
         }
         Ok(if view.report.has_diagnostic_errors {
             EXIT_OPERATIONAL
@@ -46,7 +47,7 @@ pub(crate) fn render_repair<O: Write, E: Write>(
         })
     })();
 
-    render_outcome(result, err)
+    render_outcome(result, conv.writer())
 }
 
 /// Bare `norn repair`: a read-only findings summary — total findings across the
@@ -80,6 +81,7 @@ fn write_repair_summary(
 /// `norn repair --plan`: `--out` writes the JSON plan to a file (independent of
 /// `--format`); `--format` governs stdout (report / json / paths), silent when
 /// `--out` is set without `--format`. Donor `repair::emit_plan`.
+#[allow(clippy::too_many_arguments)]
 fn emit_repair_plan(
     out: &mut dyn Write,
     palette: &Palette,
@@ -87,6 +89,7 @@ fn emit_repair_plan(
     view: &RepairView,
     width: usize,
     ascii: bool,
+    is_tty: bool,
 ) -> io::Result<()> {
     // The verbatim `--format json` / `--out` bytes: the plan crosses typed now, so
     // the CLI serializes it here (byte-identical to the owner's former
@@ -103,8 +106,8 @@ fn emit_repair_plan(
     let stdout_format = if view.format.is_none() && view.out.is_some() {
         None
     } else {
-        Some(view.format.unwrap_or_else(|| {
-            if is_stdout_tty() {
+        Some(view.format.unwrap_or({
+            if is_tty {
                 RepairPlanFormat::Report
             } else {
                 RepairPlanFormat::Json

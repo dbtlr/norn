@@ -5,31 +5,33 @@ use std::io::{self, Write};
 
 use norn_wire::{CountReport, GroupNode};
 
-use crate::display::emit::{is_stdout_tty, render_outcome};
+use crate::display::conversation::Conversation;
+use crate::display::emit::render_outcome;
 use crate::display::format::Format;
 use crate::display::output::CountView;
-use crate::display::{Presenter, EXIT_OK};
+use crate::display::sink::Sink;
+use crate::display::EXIT_OK;
 
-pub(crate) fn render_count<O: Write, E: Write>(
+pub(crate) fn render_count(
     view: CountView,
-    presenter: &mut Presenter<O, E>,
+    format: Format,
+    sink: &mut Sink<'_>,
+    conv: &mut Conversation<'_>,
 ) -> i32 {
-    let format = view.spec.resolve(view.explicit, is_stdout_tty());
     let text = match format {
         Format::Json => count_json(&view.report),
         _ => count_text(&view.report),
     };
-    let (out, err) = presenter.streams();
     let result: io::Result<i32> = (|| {
         if text.ends_with('\n') {
-            write!(out, "{text}")?;
+            write!(sink.writer(), "{text}")?;
         } else {
-            writeln!(out, "{text}")?;
+            writeln!(sink.writer(), "{text}")?;
         }
-        warn_unknown_by_count(&view.report, err)?;
+        warn_unknown_by_count(&view.report, conv.writer())?;
         Ok(EXIT_OK)
     })();
-    render_outcome(result, err)
+    render_outcome(result, conv.writer())
 }
 
 /// The wire's "field entirely absent" bucket value (`"(missing)"`, mirrored
@@ -135,7 +137,19 @@ mod tests {
     use crate::display::format::FormatSpec;
     use crate::display::Presenter;
     use crate::display::EXIT_OPERATIONAL;
+    use crate::output::palette::Palette;
     use std::collections::BTreeMap;
+
+    /// Drive `render_count` through the same resolution `emit` performs — count
+    /// is unstyled, so a no-op palette sink.
+    fn drive<O: Write, E: Write>(view: CountView, presenter: &mut Presenter<O, E>) -> i32 {
+        let format = view.spec.resolve(view.explicit, false);
+        let palette = Palette::off();
+        let (out, err) = presenter.streams();
+        let mut sink = Sink::new(out, &palette, 80);
+        let mut conv = Conversation::new(err);
+        render_count(view, format, &mut sink, &mut conv)
+    }
 
     #[test]
     fn count_total_text_is_padded() {
@@ -196,7 +210,7 @@ mod tests {
         let mut err = Vec::new();
         let code = {
             let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
-            render_count(count_view(Format::Json), &mut presenter)
+            drive(count_view(Format::Json), &mut presenter)
         };
         assert_eq!(code, EXIT_OK);
         assert!(err.is_empty());
@@ -208,7 +222,7 @@ mod tests {
         let code = {
             let mut presenter =
                 Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
-            render_count(count_view(Format::Json), &mut presenter)
+            drive(count_view(Format::Json), &mut presenter)
         };
         assert_eq!(code, EXIT_OPERATIONAL);
         assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
@@ -309,7 +323,7 @@ mod tests {
         let mut err = Vec::new();
         let code = {
             let mut presenter = Presenter::new(&mut out, &mut err);
-            render_count(view, &mut presenter)
+            drive(view, &mut presenter)
         };
         assert_eq!(code, EXIT_OK);
         assert!(!out.is_empty(), "the count still renders its normal output");

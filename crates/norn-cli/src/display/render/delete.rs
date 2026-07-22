@@ -14,21 +14,20 @@ use norn_wire::{ApplyOutcome, ApplyReport};
 use crate::display::conversation::Conversation;
 use crate::display::emit::render_outcome;
 use crate::display::output::DeleteMutationView;
-use crate::display::Presenter;
+use crate::display::sink::Sink;
 use crate::output::glyphs::{self, Glyph};
 
 use super::shared::{apply_report_exit, emit_cascade_failure_warnings, noun, render_apply_refusal};
 
-pub(crate) fn render_delete<O: Write, E: Write>(
+pub(crate) fn render_delete(
     view: DeleteMutationView,
-    presenter: &mut Presenter<O, E>,
+    sink: &mut Sink<'_>,
+    conv: &mut Conversation<'_>,
 ) -> i32 {
     let report = &view.report;
-    let (out, err) = presenter.streams();
-    let mut conv = Conversation::new(err);
 
     if report.outcome == ApplyOutcome::Refused {
-        return render_apply_refusal(report, view.json, out, &mut conv);
+        return render_apply_refusal(report, view.json, sink.writer(), conv);
     }
 
     emit_cascade_failure_warnings(report, conv.writer());
@@ -36,7 +35,7 @@ pub(crate) fn render_delete<O: Write, E: Write>(
 
     if view.json {
         let result: io::Result<i32> = (|| {
-            writeln!(out, "{}", serde_json::to_string_pretty(report)?)?;
+            writeln!(sink.writer(), "{}", serde_json::to_string_pretty(report)?)?;
             Ok(exit)
         })();
         return render_outcome(result, conv.writer());
@@ -45,7 +44,7 @@ pub(crate) fn render_delete<O: Write, E: Write>(
     let ascii = glyphs::use_ascii();
     let dry_run = report.dry_run;
     let result: io::Result<i32> = (|| {
-        render_delete_records(out, report, &view.doc, dry_run, exit, ascii)?;
+        render_delete_records(sink.writer(), report, &view.doc, dry_run, exit, ascii)?;
         Ok(exit)
     })();
     render_outcome(result, conv.writer())

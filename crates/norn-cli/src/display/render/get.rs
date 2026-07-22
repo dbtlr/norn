@@ -6,32 +6,27 @@ use std::io::{self, Write};
 use norn_wire::{GetRecord, GetReport};
 use serde_json::Value;
 
-use crate::cli::GlobalArgs;
 use crate::display::conversation::Conversation;
-use crate::display::emit::{is_stdout_tty, render_outcome, term_width};
+use crate::display::emit::render_outcome;
 use crate::display::format::Format;
 use crate::display::output::GetView;
-use crate::display::sink::Sink;
-use crate::display::{Presenter, EXIT_OK, EXIT_OPERATIONAL};
-use crate::output::palette::{self, Palette};
-use crate::output::primitives::Field;
+use crate::display::sink::{Field, Sink};
+use crate::display::{EXIT_OK, EXIT_OPERATIONAL};
+use crate::output::palette::Palette;
 use crate::output::projection::{
     project_json, project_pairs, split_cols, unknown_facet_message, warn_col_ignored,
     warn_section_ignored, DefaultCols, DocView, KNOWN_FACETS,
 };
 
-pub(crate) fn render_get<O: Write, E: Write>(
+pub(crate) fn render_get(
     view: GetView,
-    global: &GlobalArgs,
-    presenter: &mut Presenter<O, E>,
+    format: Format,
+    sink: &mut Sink<'_>,
+    conv: &mut Conversation<'_>,
 ) -> i32 {
-    let format = view.spec.resolve(view.explicit, is_stdout_tty());
-    let (out, err) = presenter.streams();
-    let mut conv = Conversation::new(err);
-
     if format == Format::Markdown {
         // Byte-faithful source passthrough — never colorized, so no palette.
-        return render_get_markdown(&view, out, &mut conv);
+        return render_get_markdown(&view, sink.writer(), conv);
     }
 
     let text = match format {
@@ -40,18 +35,18 @@ pub(crate) fn render_get<O: Write, E: Write>(
         Format::Paths => render_get_paths(&view.report),
         Format::Records => {
             // NRN-362: get records render through the SAME resolved palette find
-            // uses. Piped (parity, pipelines) it resolves off → byte-unchanged.
-            let palette = palette::resolve(global.color);
-            render_get_records(&view.report, &palette, &view.cols)
+            // uses — threaded in via the sink. Piped (parity, pipelines) it is
+            // off → byte-unchanged.
+            render_get_records(&view.report, sink.palette(), sink.width(), &view.cols)
         }
         Format::Markdown => unreachable!("markdown handled above"),
     };
     let result: io::Result<i32> = (|| {
         // Exactly one trailing newline (donor `emit`).
         if text.ends_with('\n') {
-            write!(out, "{text}")?;
+            write!(sink.writer(), "{text}")?;
         } else {
-            writeln!(out, "{text}")?;
+            writeln!(sink.writer(), "{text}")?;
         }
 
         let paths_inert = (format == Format::Paths).then_some("paths");
@@ -147,8 +142,12 @@ fn render_get_paths(report: &GetReport) -> String {
     buf
 }
 
-fn render_get_records(report: &GetReport, palette: &Palette, cols: &[String]) -> String {
-    let width = term_width();
+fn render_get_records(
+    report: &GetReport,
+    palette: &Palette,
+    width: usize,
+    cols: &[String],
+) -> String {
     let mut buf: Vec<u8> = Vec::new();
     {
         let mut sink = Sink::new(&mut buf, palette, width);
@@ -248,7 +247,7 @@ fn get_record_view(rec: &GetRecord) -> DocView<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::ColorWhen;
+    use crate::cli::{ColorWhen, GlobalArgs};
     use crate::display::format::FormatSpec;
     use crate::display::Presenter;
     use serde_json::json;
@@ -278,6 +277,20 @@ mod tests {
         }
     }
 
+    /// Drive `render_get` through the same resolution `emit` performs.
+    fn drive<O: Write, E: Write>(
+        view: GetView,
+        global: &GlobalArgs,
+        presenter: &mut Presenter<O, E>,
+    ) -> i32 {
+        let format = view.spec.resolve(view.explicit, false);
+        let palette = crate::output::palette::resolve(global.color);
+        let (out, err) = presenter.streams();
+        let mut sink = Sink::new(out, &palette, 80);
+        let mut conv = Conversation::new(err);
+        render_get(view, format, &mut sink, &mut conv)
+    }
+
     fn get_record(path: &str, fm: Value) -> GetRecord {
         GetRecord {
             path: path.into(),
@@ -300,7 +313,7 @@ mod tests {
             notes: vec![],
             markdown_content: None,
         };
-        let text = render_get_records(&report, &Palette::off(), &[]);
+        let text = render_get_records(&report, &Palette::off(), 80, &[]);
         assert!(text.contains("a.md"), "path header: {text}");
         assert!(text.contains("title"), "frontmatter field: {text}");
         assert!(text.contains("headings"), "headings row: {text}");
@@ -315,8 +328,8 @@ mod tests {
             notes: vec![],
             markdown_content: None,
         };
-        let colored = render_get_records(&report, &Palette::on(), &[]);
-        let plain = render_get_records(&report, &Palette::off(), &[]);
+        let colored = render_get_records(&report, &Palette::on(), 80, &[]);
+        let plain = render_get_records(&report, &Palette::off(), 80, &[]);
         assert!(
             colored.contains('\u{1b}'),
             "expected ANSI escapes: {colored:?}"
@@ -368,7 +381,7 @@ mod tests {
         };
         let code = {
             let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
-            render_get(get_view(Format::Paths, report), &global, &mut presenter)
+            drive(get_view(Format::Paths, report), &global, &mut presenter)
         };
         assert_eq!(code, EXIT_OK);
         assert!(err.is_empty());
@@ -386,7 +399,7 @@ mod tests {
         let code = {
             let mut presenter =
                 Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
-            render_get(get_view(Format::Paths, report), &global, &mut presenter)
+            drive(get_view(Format::Paths, report), &global, &mut presenter)
         };
         assert_eq!(code, EXIT_OPERATIONAL);
         assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
@@ -403,7 +416,7 @@ mod tests {
         };
         let code = {
             let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
-            render_get(get_view(Format::Markdown, report), &global, &mut presenter)
+            drive(get_view(Format::Markdown, report), &global, &mut presenter)
         };
         assert_eq!(code, EXIT_OK);
         assert!(err.is_empty());
@@ -421,7 +434,7 @@ mod tests {
         let code = {
             let mut presenter =
                 Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
-            render_get(get_view(Format::Markdown, report), &global, &mut presenter)
+            drive(get_view(Format::Markdown, report), &global, &mut presenter)
         };
         assert_eq!(code, EXIT_OPERATIONAL);
         assert!(String::from_utf8(err).unwrap().starts_with("norn: "));

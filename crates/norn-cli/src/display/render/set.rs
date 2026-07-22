@@ -4,34 +4,31 @@ use std::io::{self, Write};
 
 use norn_wire::{FrontmatterChange, MutationOutcome};
 
-use crate::cli::GlobalArgs;
 use crate::display::conversation::Conversation;
-use crate::display::emit::{is_stdout_tty, render_outcome};
+use crate::display::emit::render_outcome;
 use crate::display::format::Format;
 use crate::display::output::SetMutationView;
-use crate::display::Presenter;
+use crate::display::sink::Sink;
 use crate::output::glyphs;
 use crate::output::palette::Palette;
 use crate::output::primitives;
 
 use super::shared::{mutation_exit, value_repr, warning_short};
 
-pub(crate) fn render_set<O: Write, E: Write>(
+pub(crate) fn render_set(
     view: SetMutationView,
-    global: &GlobalArgs,
-    presenter: &mut Presenter<O, E>,
+    format: Format,
+    sink: &mut Sink<'_>,
+    conv: &mut Conversation<'_>,
 ) -> i32 {
-    let format = view.spec.resolve(view.explicit, is_stdout_tty());
     let report = &view.report;
-    let (out, err) = presenter.streams();
-    let mut conv = Conversation::new(err);
 
     // JSON: the compact whole-report serialization is the contract (struct field
     // order, donor-faithful). Structured on refusal too (ADR 0016 unifies the
     // surfaces on the structured envelope).
     if format == Format::Json {
         let result: io::Result<i32> = (|| {
-            writeln!(out, "{}", serde_json::to_string(report)?)?;
+            writeln!(sink.writer(), "{}", serde_json::to_string(report)?)?;
             Ok(mutation_exit(report.outcome))
         })();
         return render_outcome(result, conv.writer());
@@ -51,7 +48,7 @@ pub(crate) fn render_set<O: Write, E: Write>(
         return render_outcome(result, conv.writer());
     }
 
-    let palette = crate::output::palette::resolve(global.color);
+    let palette = *sink.palette();
     let ascii = glyphs::use_ascii();
     let result: io::Result<i32> = (|| {
         let verb = if report.applied {
@@ -60,20 +57,20 @@ pub(crate) fn render_set<O: Write, E: Write>(
             "dry-run: set"
         };
         writeln!(
-            out,
+            sink.writer(),
             "{}{verb} {}{}",
             palette.header.render(),
             report.target,
             palette.header.render_reset()
         )?;
         for change in &report.frontmatter_changes {
-            render_frontmatter_change(out, &palette, change, ascii)?;
+            render_frontmatter_change(sink.writer(), &palette, change, ascii)?;
         }
         if report.body_changed {
             let old = report.body_bytes_old.unwrap_or(0);
             let new = report.body_bytes_new.unwrap_or(0);
             primitives::change_line(
-                out,
+                sink.writer(),
                 &palette,
                 "body",
                 &format!("{old} bytes"),
@@ -84,6 +81,7 @@ pub(crate) fn render_set<O: Write, E: Write>(
         // Warnings block (donor: on STDOUT): `  warnings: N` then `    - <short>`
         // for the first three, then `    … (K more)`.
         if !report.warnings.is_empty() {
+            let out = sink.writer();
             writeln!(out, "  warnings: {}", report.warnings.len())?;
             for w in report.warnings.iter().take(3) {
                 writeln!(out, "    - {}", warning_short(w))?;
@@ -93,10 +91,10 @@ pub(crate) fn render_set<O: Write, E: Write>(
             }
         }
         if report.applied {
-            writeln!(out, "trace: {}", report.trace_id)?;
+            writeln!(sink.writer(), "trace: {}", report.trace_id)?;
         } else {
-            writeln!(out)?;
-            writeln!(out, "Apply with --yes")?;
+            writeln!(sink.writer())?;
+            writeln!(sink.writer(), "Apply with --yes")?;
         }
         Ok(crate::display::EXIT_OK)
     })();

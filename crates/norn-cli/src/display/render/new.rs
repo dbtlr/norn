@@ -4,12 +4,12 @@ use std::io::{self, Write};
 
 use norn_wire::MutationOutcome;
 
-use crate::cli::GlobalArgs;
 use crate::display::conversation::Conversation;
-use crate::display::emit::{is_stdout_tty, render_outcome};
+use crate::display::emit::render_outcome;
 use crate::display::format::Format;
 use crate::display::output::NewMutationView;
-use crate::display::{Presenter, EXIT_OK};
+use crate::display::sink::Sink;
+use crate::display::EXIT_OK;
 
 use super::shared::{mutation_exit, value_repr, warning_short};
 
@@ -31,27 +31,24 @@ fn created_detail(created: &norn_wire::FrontmatterCreated) -> String {
     }
 }
 
-pub(crate) fn render_new<O: Write, E: Write>(
+pub(crate) fn render_new(
     view: NewMutationView,
-    global: &GlobalArgs,
-    presenter: &mut Presenter<O, E>,
+    format: Format,
+    sink: &mut Sink<'_>,
+    conv: &mut Conversation<'_>,
 ) -> i32 {
-    let format = view.spec.resolve(view.explicit, is_stdout_tty());
     let report = &view.report;
-    let (out, err) = presenter.streams();
-    let mut conv = Conversation::new(err);
 
     // JSON: pretty-printed with ALPHABETICAL keys (the donor serialized through a
     // `serde_json::Value`, whose map is a BTreeMap without `preserve_order`).
     if format == Format::Json {
-        let _ = global;
         let result: io::Result<i32> = (|| {
             let value = serde_json::to_value(report)?;
             // The donor's `new --format json` emits NO trailing newline (unlike
             // `set --format json`, which does) — a known cross-verb JSON framing
             // inconsistency, unified by NRN-408 (one trailing-newline rule);
             // current behavior held here (`write!`, not `writeln!`) until then.
-            write!(out, "{}", serde_json::to_string_pretty(&value)?)?;
+            write!(sink.writer(), "{}", serde_json::to_string_pretty(&value)?)?;
             Ok(mutation_exit(report.outcome))
         })();
         return render_outcome(result, conv.writer());
@@ -76,14 +73,14 @@ pub(crate) fn render_new<O: Write, E: Write>(
             .as_deref()
             .or(report.predicted_path.as_deref())
             .unwrap_or("(pending)");
-        new_kv(out, "path", shown_path)?;
-        new_kv(out, "operation", "new")?;
-        new_kv(out, "applied", &report.applied.to_string())?;
+        new_kv(sink.writer(), "path", shown_path)?;
+        new_kv(sink.writer(), "operation", "new")?;
+        new_kv(sink.writer(), "applied", &report.applied.to_string())?;
 
         // fields: `none`, or the first created field on the `fields` line with the
         // rest aligned under the value column (11-space continuation indent).
         if report.frontmatter_created.is_empty() {
-            new_kv(out, "fields", "none")?;
+            new_kv(sink.writer(), "fields", "none")?;
         } else {
             // Field-name sub-column padding (donor report.rs max_field_w): every
             // `field` cell is left-padded to the widest name so the `=` aligns.
@@ -101,32 +98,36 @@ pub(crate) fn render_new<O: Write, E: Write>(
                     created_detail(created)
                 );
                 if i == 0 {
-                    new_kv(out, "fields", &line)?;
+                    new_kv(sink.writer(), "fields", &line)?;
                 } else {
-                    writeln!(out, "           {line}")?;
+                    writeln!(sink.writer(), "           {line}")?;
                 }
             }
         }
 
-        new_kv(out, "body", &format!("{} bytes", report.body_bytes))?;
+        new_kv(
+            sink.writer(),
+            "body",
+            &format!("{} bytes", report.body_bytes),
+        )?;
 
         if report.warnings.is_empty() {
-            new_kv(out, "warnings", "none")?;
+            new_kv(sink.writer(), "warnings", "none")?;
         } else {
             for (i, w) in report.warnings.iter().enumerate() {
                 if i == 0 {
-                    new_kv(out, "warnings", &warning_short(w))?;
+                    new_kv(sink.writer(), "warnings", &warning_short(w))?;
                 } else {
-                    writeln!(out, "           {}", warning_short(w))?;
+                    writeln!(sink.writer(), "           {}", warning_short(w))?;
                 }
             }
         }
 
         if report.applied {
-            writeln!(out, "trace: {}", report.trace_id)?;
+            writeln!(sink.writer(), "trace: {}", report.trace_id)?;
         } else {
-            writeln!(out)?;
-            writeln!(out, "Apply with --yes")?;
+            writeln!(sink.writer())?;
+            writeln!(sink.writer(), "Apply with --yes")?;
         }
         Ok(EXIT_OK)
     })();
@@ -136,22 +137,21 @@ pub(crate) fn render_new<O: Write, E: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::ColorWhen;
     use crate::display::format::FormatSpec;
+    use crate::display::Presenter;
+    use crate::output::palette::Palette;
     use norn_wire::{FrontmatterCreated, NewReport};
     use serde_json::json;
 
-    fn global_args() -> GlobalArgs {
-        GlobalArgs {
-            cwd: None,
-            verbose: false,
-            no_cache_refresh: false,
-            color: ColorWhen::Never,
-            vault: None,
-            help_short: false,
-            help_long: false,
-            dynamic_fields: Vec::new(),
-        }
+    /// Drive `render_new` through the same resolution `emit` performs — `new` is
+    /// unstyled, so a no-op palette sink.
+    fn drive<O: Write, E: Write>(view: NewMutationView, presenter: &mut Presenter<O, E>) -> i32 {
+        let format = view.spec.resolve(view.explicit, false);
+        let palette = Palette::off();
+        let (out, err) = presenter.streams();
+        let mut sink = Sink::new(out, &palette, 80);
+        let mut conv = Conversation::new(err);
+        render_new(view, format, &mut sink, &mut conv)
     }
 
     fn created(
@@ -213,7 +213,7 @@ mod tests {
         let mut err = Vec::new();
         {
             let mut presenter = Presenter::new(&mut out, &mut err);
-            render_new(
+            drive(
                 NewMutationView {
                     report,
                     explicit: Some(Format::Records),
@@ -222,7 +222,6 @@ mod tests {
                         piped: Format::Records,
                     },
                 },
-                &global_args(),
                 &mut presenter,
             );
         }
