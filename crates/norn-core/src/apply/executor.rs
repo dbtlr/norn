@@ -2,14 +2,14 @@
 //! pass-based apply_repair_plan_with_context.
 //!
 //! This module is the integration point that wires the MigrationPlan →
-//! PlannedChange expansion to the existing pass-based apply orchestrator
+//! ApplyOp expansion to the existing pass-based apply orchestrator
 //! (repair_apply.rs). Every document-mutation command (move, delete,
 //! rewrite-wikilink, apply) builds a MigrationPlan and applies it here,
 //! emitting a single ApplyReport envelope.
 //!
 //! # Provenance tracking
 //!
-//! Each PlannedChange carries a `parent_op_idx` (index into
+//! Each ApplyOp carries a `parent_op_idx` (index into
 //! `plan.operations`) so the ApplyReport can:
 //! - set `from = Some(parent_idx.to_string())` for changes produced by
 //!   high-level expansions (move_folder → N move_document ops)
@@ -24,8 +24,7 @@ use crate::planner::intent::{expand, HIGH_LEVEL_KINDS};
 use crate::standards::apply::CascadeRecord;
 use crate::standards::apply::RepairApplyReport;
 use crate::standards::{
-    PlanWarning, PlannedChange, RepairPlan, RepairPlanFilters, RepairPlanSummary, SkippedSummary,
-    REPAIR_PLAN_SCHEMA_VERSION,
+    ApplyBatch, ApplyOp, PlanWarning, RepairPlanSummary, SkippedSummary, REPAIR_PLAN_SCHEMA_VERSION,
 };
 use crate::telemetry::event::{
     action_event_name, ATTR_LINK_FROM, ATTR_LINK_TO, ATTR_REASON_CODE, ATTR_REASON_MESSAGE,
@@ -79,7 +78,7 @@ pub struct ApplyContext {
 ///
 /// Each `MigrationOp` in `plan.operations` is expanded via
 /// `planner::intent::expand`. High-level ops (e.g. `move_folder`) expand to N
-/// `PlannedChange`s; low-level ops expand to exactly one. Provenance is
+/// `ApplyOp`s; low-level ops expand to exactly one. Provenance is
 /// tracked so the report can surface which parent op each change came from.
 ///
 /// # Phase 2 — Hash hydration
@@ -96,7 +95,7 @@ pub struct ApplyContext {
 ///
 /// # Phase 3 — Delegation
 ///
-/// A synthetic `RepairPlan` is built from the expanded changes and handed to
+/// A synthetic `ApplyBatch` is built from the expanded changes and handed to
 /// `apply_repair_plan_with_context`. That function owns all the pass sequencing.
 ///
 /// # Phase 4 — Conversion
@@ -167,7 +166,7 @@ pub fn apply_migration_plan(
     // ------------------------------------------------------------------
 
     // `all_changes[i]` came from `plan.operations[provenance[i]]`.
-    let mut all_changes: Vec<PlannedChange> = Vec::new();
+    let mut all_changes: Vec<ApplyOp> = Vec::new();
     let mut provenance: Vec<usize> = Vec::new(); // change idx → parent op idx
 
     for (i, op) in plan.operations.iter().enumerate() {
@@ -292,7 +291,7 @@ pub fn apply_migration_plan(
         .map(|d| (d.path.clone(), d.hash.clone()))
         .collect();
 
-    let hydrated: Vec<PlannedChange> = all_changes
+    let hydrated: Vec<ApplyOp> = all_changes
         .iter()
         .map(|c| {
             if c.document_hash.is_empty() && needs_hash_check(&c.operation) {
@@ -310,18 +309,15 @@ pub fn apply_migration_plan(
     // Phase 3: delegation to today's applier
     // ------------------------------------------------------------------
 
-    let repair_plan = RepairPlan {
+    let repair_plan = ApplyBatch {
         schema_version: REPAIR_PLAN_SCHEMA_VERSION,
         vault_root: vault_root.clone(),
-        source_filters: RepairPlanFilters::default(),
         summary: RepairPlanSummary {
             findings: hydrated.len(),
             planned_changes: hydrated.len(),
             skipped: SkippedSummary::default(),
         },
         changes: hydrated.clone(),
-        skipped_findings: Vec::new(),
-        footnotes: Vec::new(),
     };
 
     let create_ctx = CreateApplyContext {
@@ -566,7 +562,7 @@ fn resolve_create_paths(
     plan: &MigrationPlan,
     index: &GraphIndex,
     canonical_root: &std::path::Path,
-    changes: &mut [PlannedChange],
+    changes: &mut [ApplyOp],
     provenance: &[usize],
 ) -> Result<ResolvedCreatePaths> {
     let mut stems = HashMap::new();
@@ -649,7 +645,7 @@ fn resolve_create_paths(
 /// Direct's exit-2 refusal.
 fn build_refusal_report(
     plan: &MigrationPlan,
-    changes: &[PlannedChange],
+    changes: &[ApplyOp],
     provenance: &[usize],
     dry_run: bool,
     envelope: norn_wire::ApplyError,
@@ -717,7 +713,7 @@ fn build_refusal_report(
 }
 
 /// Build a pre-write refusal report for an EXPANSION-PHASE failure (NRN-231
-/// review F1), before any `PlannedChange` exists. Expansion is pure (index-only,
+/// review F1), before any `ApplyOp` exists. Expansion is pure (index-only,
 /// no filesystem write), so this is byte-identical: every plan operation becomes
 /// a `not_run` op EXCEPT `failed_op_idx`, which is `failed` carrying the
 /// structured `error` envelope. `outcome = refused` (exit 2). Mirrors
@@ -824,11 +820,16 @@ fn build_plan_refusal_report(
 
 /// Finding-provenance linkage echoed verbatim from an op onto its apply-report
 /// record (ADR 0022): `(finding_code, repair_rule)` read directly from the op's
-/// raw `fields` — the authoritative declaration of what the op is resolving.
-/// Repair-generated ops carry the real codes; verb-synthesized and authored ops
-/// declare none, yielding `(None, None)` so their report bytes are unchanged. The
-/// interior `PlannedChange`'s `operator-request` sentinel is deliberately NOT the
-/// source here — that fill is an adapter default, not declared provenance.
+/// raw `fields` — the authoritative per-op declaration of what the op is
+/// resolving. Repair-generated ops carry the real codes; verb-synthesized and
+/// authored ops declare none, yielding `(None, None)` so their report bytes are
+/// unchanged. The read stays on the wire op, NOT the interior [`ApplyOp`]: a
+/// repair-emitted structural op (`move_document` / `delete_document`) carries its
+/// linkage in the raw `fields`, but the typed
+/// [`MoveDocumentFields`](norn_wire::MoveDocumentFields) /
+/// [`DeleteDocumentFields`](norn_wire::DeleteDocumentFields) vocabulary the interior
+/// op is built from does not carry linkage — so reading the wire op is the only
+/// source that echoes those ops' declared codes faithfully.
 fn op_finding_linkage(op: &MigrationOp) -> (Option<String>, Option<String>) {
     let read = |key: &str| {
         op.fields
@@ -840,7 +841,7 @@ fn op_finding_linkage(op: &MigrationOp) -> (Option<String>, Option<String>) {
 }
 
 /// Best-effort display token for a raw `MigrationOp` (an expansion-phase refusal
-/// has no `PlannedChange` to summarize). Reads the common `path`/`src` fields;
+/// has no `ApplyOp` to summarize). Reads the common `path`/`src` fields;
 /// falls back to the op kind's placeholder. Only feeds the refusal report's
 /// `summary`, which the refusal renderer does not print — the coded `error` is
 /// the whole output — so exact prose here is not load-bearing.
@@ -865,7 +866,7 @@ fn op_display_path(op: &MigrationOp) -> String {
 #[allow(clippy::too_many_arguments)]
 fn build_partial_failure_report(
     plan: &MigrationPlan,
-    changes: &[PlannedChange],
+    changes: &[ApplyOp],
     provenance: &[usize],
     span_ids: &[String],
     events: &[Event],
@@ -988,7 +989,7 @@ fn needs_hash_check(operation: &str) -> bool {
 /// to surface the apply-time-resolved `{{seq}}` id (NRN-101) instead of the
 /// unresolved template `change.path`.
 fn build_summary(
-    change: &PlannedChange,
+    change: &ApplyOp,
     dry_run: bool,
     create_display: Option<&camino::Utf8Path>,
 ) -> String {
@@ -1036,7 +1037,7 @@ fn build_summary(
 }
 
 /// Returns true when the parent MigrationOp is a high-level kind (expands to
-/// multiple PlannedChanges). Used to set the `from` field in ApplyReportOp.
+/// multiple `ApplyOp`s). Used to set the `from` field in ApplyReportOp.
 fn is_high_level_op(op: &MigrationOp) -> bool {
     HIGH_LEVEL_KINDS.contains(&op.kind.as_str())
 }
@@ -1221,11 +1222,7 @@ fn fold_cascade_from_events(events: &[Event], span: Option<&str>, verbose: bool)
 /// - `redirect_to`: the raw `rewrite_to` field resolved against the index the
 ///   same way the CLI preflight resolves it — so a stem argument renders as its
 ///   resolved `.md` path, byte-identical to the direct arm.
-fn build_link_impact(
-    change: &PlannedChange,
-    parent_op: &MigrationOp,
-    index: &GraphIndex,
-) -> LinkImpact {
+fn build_link_impact(change: &ApplyOp, parent_op: &MigrationOp, index: &GraphIndex) -> LinkImpact {
     use std::collections::BTreeSet;
 
     let bl = crate::target::backlinks(index, &change.path);
@@ -1280,7 +1277,7 @@ fn build_link_impact(
 
 #[allow(clippy::too_many_arguments)]
 fn build_report_ops(
-    changes: &[PlannedChange],
+    changes: &[ApplyOp],
     provenance: &[usize],
     plan_ops: &[MigrationOp],
     apply_result: &RepairApplyReport, // still used for the dry-run cascade forecast
@@ -1792,22 +1789,22 @@ mod tests {
     /// invariant that the defensive `create_realized` guard enforces.
     #[test]
     fn build_report_ops_skipped_create_gets_absent_not_stale_path() {
-        // OpStatus, RepairApplyReport, SkippedSummary, PlannedChange,
+        // OpStatus, RepairApplyReport, SkippedSummary, ApplyOp,
         // MigrationOp, Event, action_event_name, ATTR_STATUS, Utf8PathBuf are all
         // already in scope via `super::*`; import only what is not.
         use crate::standards::apply::{CreateDocumentResult, RepairApplyPlanContext};
         use crate::telemetry::Severity;
 
-        // Minimal create_document PlannedChange (path/stem for a create come from
+        // Minimal create_document ApplyOp (path/stem for a create come from
         // `created_documents`, not from the change itself, so `path` is a filler).
-        fn create_change(change_id: &str) -> PlannedChange {
-            PlannedChange {
+        fn create_change(change_id: &str) -> ApplyOp {
+            ApplyOp {
                 change_id: change_id.into(),
                 path: Utf8PathBuf::from("filler.md"),
                 document_hash: String::new(),
-                finding_code: String::new(),
+                finding_code: None,
                 finding_rule: None,
-                repair_rule: String::new(),
+                repair_rule: None,
                 operation: "create_document".into(),
                 field: None,
                 expected_old_value: None,
@@ -2237,7 +2234,7 @@ mod tests {
 
     /// NRN-231 review F1 (expansion phase): a PRE-WRITE expansion failure (an
     /// unknown op kind) likewise crosses as a coded, report-shaped refusal under
-    /// `refuse_as_report`, before any `PlannedChange` exists. The CLI surface
+    /// `refuse_as_report`, before any `ApplyOp` exists. The CLI surface
     /// (`refuse_as_report: false`) keeps propagating the bare `Err`.
     #[test]
     fn expansion_failure_returns_report_under_refuse_as_report() {

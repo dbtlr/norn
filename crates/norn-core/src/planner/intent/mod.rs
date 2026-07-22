@@ -5,7 +5,7 @@
 //! passes low-level ops through with planner-filled link_risk.
 
 use crate::domain::GraphIndex;
-use crate::standards::{classify_link_risk, PlannedChange};
+use crate::standards::{classify_link_risk, ApplyOp};
 use anyhow::Result;
 use camino::Utf8PathBuf;
 use norn_wire::{ChangeOp, EditOp, MigrationOp, MoveDocumentFields, TypedOp, TypedOpError};
@@ -41,7 +41,7 @@ impl IntentOp {
 }
 
 /// Single dispatch entry point: converts any `MigrationOp` into a
-/// `Vec<PlannedChange>` ready for the applier.
+/// `Vec<ApplyOp>` ready for the applier.
 ///
 /// The op is first resolved to the typed [`TypedOp`] vocabulary
 /// (`TypedOp::try_from`), so no untyped `fields` indexing flows into this
@@ -61,10 +61,10 @@ impl IntentOp {
 ///   through with `link_risk` populated by `classify_link_risk`.
 /// - **Change ops** (`set_frontmatter`, `add_frontmatter`, `remove_frontmatter`,
 ///   `rewrite_link`, `replace_body`, `create_document`): deserialize the typed
-///   op's `fields` into a `PlannedChange` (a `norn-core` model `norn-wire` may not
+///   op's `fields` into a `ApplyOp` (a `norn-core` model `norn-wire` may not
 ///   name — hence the payload rides typed-through as a JSON object).
 /// - **Edit ops**: carry the `EditOp` payload for apply-time application.
-pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<PlannedChange>> {
+pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<ApplyOp>> {
     match TypedOp::try_from(op).map_err(anyhow::Error::new)? {
         TypedOp::MoveFolder(f) => move_folder::expand_move_folder(
             &move_folder::MoveFolderOp {
@@ -103,13 +103,13 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
                 ))
             };
 
-            let change = PlannedChange {
+            let change = ApplyOp {
                 change_id: format!("move-{src}"),
                 path: old_path,
                 document_hash: String::new(),
-                finding_code: "operator-request".into(),
+                finding_code: None,
                 finding_rule: None,
-                repair_rule: "operator-request".into(),
+                repair_rule: None,
                 operation: "move_document".into(),
                 field: None,
                 expected_old_value: None,
@@ -132,13 +132,13 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
                 classify_link_risk(&doc_path, &rewrite_path, &index.documents, &index.files)
             });
 
-            let change = PlannedChange {
+            let change = ApplyOp {
                 change_id: format!("delete-{}", f.path),
                 path: doc_path,
                 document_hash: String::new(),
-                finding_code: "operator-request".into(),
+                finding_code: None,
                 finding_rule: None,
-                repair_rule: "operator-request".into(),
+                repair_rule: None,
                 operation: "delete_document".into(),
                 field: None,
                 expected_old_value: None,
@@ -170,27 +170,23 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
                     }));
                 }
             }
-            // Adapt the wire-typed `ChangeFields` into `norn-core`'s `PlannedChange`.
-            // The `operator-request` sentinel for absent finding linkage is filled
-            // HERE (the interior model requires non-optional values) — not fabricated
-            // on the wire, where authored linkage stays `None` (ADR 0022). `link_risk`
-            // / `warnings` are planner-computed and never carried by a change op.
-            let change = PlannedChange {
+            // Adapt the wire-typed `ChangeFields` into `norn-core`'s `ApplyOp`.
+            // Finding linkage rides through as `Option<String>` — a repair-sourced
+            // op carries the real codes, an authored op leaves them `None` (ADR
+            // 0022); no `operator-request` sentinel is fabricated (the interior op
+            // is optional end-to-end). The report echoes linkage from the wire op,
+            // not this interior view. `link_risk` / `warnings` are planner-computed
+            // and never carried by a change op.
+            let change = ApplyOp {
                 change_id: fields
                     .change_id
                     .clone()
                     .unwrap_or_else(|| format!("{kind}-{}", fields.path)),
                 path: fields.path.clone().into(),
                 document_hash: fields.document_hash.clone().unwrap_or_default(),
-                finding_code: fields
-                    .finding_code
-                    .clone()
-                    .unwrap_or_else(|| "operator-request".into()),
+                finding_code: fields.finding_code.clone(),
                 finding_rule: fields.finding_rule.clone(),
-                repair_rule: fields
-                    .repair_rule
-                    .clone()
-                    .unwrap_or_else(|| "operator-request".into()),
+                repair_rule: fields.repair_rule.clone(),
                 operation: kind,
                 field: fields.field.clone(),
                 expected_old_value: fields.expected_old_value.clone(),
@@ -260,13 +256,13 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
                 format!("{kind}-{path}-{}", &digest[..8])
             });
 
-            let change = PlannedChange {
+            let change = ApplyOp {
                 change_id,
                 path: path.into(),
                 document_hash: fields.document_hash.clone().unwrap_or_default(),
-                finding_code: "operator-request".into(),
+                finding_code: None,
                 finding_rule: None,
-                repair_rule: "operator-request".into(),
+                repair_rule: None,
                 operation: kind,
                 field: None,
                 expected_old_value: None,
@@ -643,7 +639,7 @@ mod expansion_tests {
         let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
         let index = crate::graph::build_index(root).unwrap();
 
-        // A repair-sourced op carries real linkage → PlannedChange echoes it.
+        // A repair-sourced op carries real linkage → ApplyOp echoes it.
         let repair_op = MigrationOp {
             kind: "rewrite_link".into(),
             id: None,
@@ -656,11 +652,11 @@ mod expansion_tests {
             footnote: None,
         };
         let change = expand(&repair_op, &index).unwrap().pop().unwrap();
-        assert_eq!(change.finding_code, "link-target-missing");
-        assert_eq!(change.repair_rule, "closest-match");
+        assert_eq!(change.finding_code.as_deref(), Some("link-target-missing"));
+        assert_eq!(change.repair_rule.as_deref(), Some("closest-match"));
 
-        // An authored op omits linkage → the `operator-request` sentinel is filled
-        // at the adapter boundary (not on the wire).
+        // An authored op omits linkage → the interior op leaves it `None` (no
+        // `operator-request` sentinel; linkage is optional end-to-end).
         let authored_op = MigrationOp {
             kind: "set_frontmatter".into(),
             id: None,
@@ -669,8 +665,8 @@ mod expansion_tests {
             footnote: None,
         };
         let change = expand(&authored_op, &index).unwrap().pop().unwrap();
-        assert_eq!(change.finding_code, "operator-request");
-        assert_eq!(change.repair_rule, "operator-request");
+        assert_eq!(change.finding_code, None);
+        assert_eq!(change.repair_rule, None);
     }
 
     #[test]

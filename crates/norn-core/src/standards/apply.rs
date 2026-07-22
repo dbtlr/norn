@@ -11,10 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::standards::op::{ApplyBatch, ApplyOp};
 use crate::standards::repair::warnings::PlanWarning;
-use crate::standards::repair::{
-    PlannedChange, RepairPlan, SkippedSummary, REPAIR_PLAN_SCHEMA_VERSION,
-};
+use crate::standards::repair::{SkippedSummary, REPAIR_PLAN_SCHEMA_VERSION};
 use crate::standards::summary::Summary;
 
 #[derive(Debug, Error)]
@@ -509,7 +508,7 @@ pub struct RepairApplyVerification {
 }
 
 impl RepairApplyReport {
-    pub fn new(plan: &RepairPlan, dry_run: bool) -> Self {
+    pub fn new(plan: &ApplyBatch, dry_run: bool) -> Self {
         Self {
             schema_version: plan.schema_version,
             dry_run,
@@ -579,7 +578,7 @@ impl RepairApplyReport {
     }
 }
 
-pub fn validate_plan_for_apply(cwd: &Utf8PathBuf, plan: &RepairPlan) -> Result<(), ApplyError> {
+pub fn validate_plan_for_apply(cwd: &Utf8PathBuf, plan: &ApplyBatch) -> Result<(), ApplyError> {
     if plan.schema_version != REPAIR_PLAN_SCHEMA_VERSION {
         return Err(ApplyError::UnsupportedSchemaVersion {
             expected: REPAIR_PLAN_SCHEMA_VERSION,
@@ -617,9 +616,9 @@ fn is_orchestrator_pass_op(operation: &str) -> bool {
 }
 
 pub fn changes_by_path(
-    plan: &RepairPlan,
-) -> Result<BTreeMap<Utf8PathBuf, Vec<&PlannedChange>>, ApplyError> {
-    let mut grouped: BTreeMap<Utf8PathBuf, Vec<&PlannedChange>> = BTreeMap::new();
+    plan: &ApplyBatch,
+) -> Result<BTreeMap<Utf8PathBuf, Vec<&ApplyOp>>, ApplyError> {
+    let mut grouped: BTreeMap<Utf8PathBuf, Vec<&ApplyOp>> = BTreeMap::new();
     let mut seen_fields = BTreeSet::new();
 
     for change in &plan.changes {
@@ -740,7 +739,7 @@ fn trailing_line_comment(line: &str) -> Option<&str> {
     Some(&line[ws..])
 }
 
-pub fn apply_file_changes(content: &str, changes: &[&PlannedChange]) -> Result<String, ApplyError> {
+pub fn apply_file_changes(content: &str, changes: &[&ApplyOp]) -> Result<String, ApplyError> {
     let path = if let Some(change) = changes.first() {
         change.path.clone()
     } else {
@@ -1345,7 +1344,7 @@ pub(crate) fn rewrite_one_backlink(
 /// as failures (retried later by the cleanup pass) — neither aborts the apply.
 pub fn apply_link_rewrites(
     cwd: &Utf8Path,
-    change: &PlannedChange,
+    change: &ApplyOp,
 ) -> Result<LinkRewriteOutcome, ApplyError> {
     let mut outcome = LinkRewriteOutcome::default();
     let risk = match &change.link_risk {
@@ -1411,7 +1410,7 @@ pub fn apply_link_rewrites(
 /// not a string.
 ///
 /// Caller is responsible for hash verification before invoking this.
-/// (NRN-385) Apply a `strip_bom` `PlannedChange`: remove a leading UTF-8
+/// (NRN-385) Apply a `strip_bom` `ApplyOp`: remove a leading UTF-8
 /// byte-order mark, and nothing else — a minimal edit over the first 3 bytes,
 /// independent of every other content op (frontmatter, links, body, section
 /// edits all operate at offsets past the BOM, so removing it is safe to
@@ -1419,14 +1418,14 @@ pub fn apply_link_rewrites(
 /// BOM (already stripped, or the finding went stale) passes through unchanged
 /// rather than erroring — the op has no field/value to validate against, so
 /// there is nothing else to check.
-pub fn apply_strip_bom(content: &str, _change: &PlannedChange) -> Result<String, ApplyError> {
+pub fn apply_strip_bom(content: &str, _change: &ApplyOp) -> Result<String, ApplyError> {
     Ok(content
         .strip_prefix('\u{feff}')
         .unwrap_or(content)
         .to_string())
 }
 
-pub fn apply_replace_body(content: &str, change: &PlannedChange) -> Result<String, ApplyError> {
+pub fn apply_replace_body(content: &str, change: &ApplyOp) -> Result<String, ApplyError> {
     let new_body = change
         .new_value
         .as_ref()
@@ -1490,7 +1489,7 @@ pub fn apply_edit_ops(
 /// too). Target matching uses the parser's decomposition, so a bare `^` stays in
 /// the target (NRN-433) and the embed marker / alias / anchor are preserved
 /// (NRN-431).
-pub fn apply_rewrite_link(content: &str, change: &PlannedChange) -> Result<String, ApplyError> {
+pub fn apply_rewrite_link(content: &str, change: &ApplyOp) -> Result<String, ApplyError> {
     use norn_frontmatter::wikilink::{
         parse_wikilinks, parse_wikilinks_in_text, reconstruct_wikilink, splice_wikilinks,
         wikilink_target_is_representable, Wikilink,
@@ -1540,7 +1539,7 @@ pub fn apply_rewrite_link(content: &str, change: &PlannedChange) -> Result<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::standards::repair::{RepairPlanFilters, RepairPlanSummary, SkippedSummary};
+    use crate::standards::repair::{RepairPlanSummary, SkippedSummary};
     use serde_json::json;
 
     /// NRN-150: every `ApplyError` variant reports a stable, non-empty KEBAB
@@ -1753,19 +1752,16 @@ mod tests {
         assert!(!ApplyError::DeleteSourceMissing { path: p() }.is_precondition());
     }
 
-    fn empty_plan(schema_version: u32, vault_root: &str) -> RepairPlan {
-        RepairPlan {
+    fn empty_plan(schema_version: u32, vault_root: &str) -> ApplyBatch {
+        ApplyBatch {
             schema_version,
             vault_root: vault_root.into(),
-            source_filters: RepairPlanFilters::default(),
             summary: RepairPlanSummary {
                 findings: 0,
                 planned_changes: 0,
                 skipped: SkippedSummary::default(),
             },
             changes: vec![],
-            skipped_findings: vec![],
-            footnotes: vec![],
         }
     }
 
@@ -1775,14 +1771,14 @@ mod tests {
         hash: &str,
         operation: &str,
         new_value: Option<Value>,
-    ) -> PlannedChange {
-        PlannedChange {
+    ) -> ApplyOp {
+        ApplyOp {
             change_id: "test-change-id".to_string(),
             path: path.into(),
             document_hash: hash.to_string(),
-            finding_code: "value-not-allowed".into(),
+            finding_code: Some("value-not-allowed".into()),
             finding_rule: None,
-            repair_rule: "test".into(),
+            repair_rule: Some("test".into()),
             operation: operation.to_string(),
             field: Some(field.to_string()),
             expected_old_value: None,
@@ -1895,7 +1891,7 @@ mod tests {
         assert!(matches!(err, ApplyError::UnsupportedOperation { .. }));
     }
 
-    fn apply_change(content: &str, change: &PlannedChange) -> Result<String, ApplyError> {
+    fn apply_change(content: &str, change: &ApplyOp) -> Result<String, ApplyError> {
         apply_file_changes(content, &[change])
     }
 
@@ -1914,7 +1910,7 @@ mod tests {
     #[test]
     fn set_frontmatter_replaces_plain_scalar_value() {
         let content = "---\nstatus: someday\n---\n# body\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("someday")),
             new_value: Some(json!("completed")),
             ..make_change(
@@ -1932,7 +1928,7 @@ mod tests {
     #[test]
     fn set_frontmatter_preserves_double_quoted_style() {
         let content = "---\nworkspace: \"[[norn]]\"\n---\n# body\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("[[norn]]")),
             new_value: Some(json!("[[other]]")),
             ..make_change(
@@ -1950,7 +1946,7 @@ mod tests {
     #[test]
     fn set_frontmatter_preserves_single_quoted_style() {
         let content = "---\nworkspace: '[[norn]]'\n---\n# body\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("[[norn]]")),
             new_value: Some(json!("[[other]]")),
             ..make_change(
@@ -1968,7 +1964,7 @@ mod tests {
     #[test]
     fn set_frontmatter_preserves_same_line_comment() {
         let content = "---\nstatus: someday  # legacy\n---\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("someday")),
             new_value: Some(json!("completed")),
             ..make_change(
@@ -1986,7 +1982,7 @@ mod tests {
     #[test]
     fn remove_frontmatter_deletes_full_line() {
         let content = "---\ntitle: hi\nkind: legacy\nstatus: done\n---\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("legacy")),
             ..make_change("a.md", "kind", "h1", "remove_frontmatter", None)
         };
@@ -1997,7 +1993,7 @@ mod tests {
     #[test]
     fn remove_frontmatter_can_delete_block_value_lines() {
         let content = "---\ntitle: hi\naliases:\n  - one\n  - two\nstatus: done\n---\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!(["one", "two"])),
             ..make_change("a.md", "aliases", "h1", "remove_frontmatter", None)
         };
@@ -2008,7 +2004,7 @@ mod tests {
     #[test]
     fn set_frontmatter_rejects_block_sequence_target() {
         let content = "---\naliases:\n  - one\n  - two\n---\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!(["one", "two"])),
             ..make_change(
                 "a.md",
@@ -2025,7 +2021,7 @@ mod tests {
     #[test]
     fn apply_rejects_expected_old_value_mismatch() {
         let content = "---\nstatus: completed\n---\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("someday")),
             new_value: Some(json!("backlog")),
             ..make_change(
@@ -2043,7 +2039,7 @@ mod tests {
     #[test]
     fn apply_treats_yaml_null_as_absent_for_expected_old_value() {
         let content = "---\nstatus: ~\n---\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: None,
             new_value: Some(json!("backlog")),
             ..make_change(
@@ -2062,7 +2058,7 @@ mod tests {
     fn apply_preserves_markdown_body_exactly() {
         let content =
             "---\nstatus: someday\n---\n# Heading\n\nParagraph with `code` and **bold**.\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("someday")),
             new_value: Some(json!("completed")),
             ..make_change(
@@ -2309,7 +2305,7 @@ mod tests {
         // NRN-141: `set aliases=[]` on a block list must write `aliases: []`
         // (not a bare `aliases:` that reads back as null).
         let content = "---\naliases:\n  - old\ntitle: hi\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!(["old"])),
             ..make_change("a.md", "aliases", "h1", "set_frontmatter", Some(json!([])))
         };
@@ -2324,7 +2320,7 @@ mod tests {
     #[test]
     fn apply_set_frontmatter_array_on_existing_block_replaces_items() {
         let content = "---\naliases:\n  - old\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!(["old"])),
             ..make_change(
                 "a.md",
@@ -2348,7 +2344,7 @@ mod tests {
     #[test]
     fn apply_set_frontmatter_array_on_existing_flow_replaces_inline() {
         let content = "---\naliases: [old]\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!(["old"])),
             ..make_change(
                 "a.md",
@@ -2372,7 +2368,7 @@ mod tests {
         // whole field. It now edits through whole-line replacement, and the new
         // value re-parses to the requested array.
         let content = "---\ntags: [\"a\", \"b\"]\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!(["a", "b"])),
             ..make_change(
                 "a.md",
@@ -2401,7 +2397,7 @@ mod tests {
         // which dropped a trailing same-line comment. The comment (with its
         // leading whitespace) is now re-appended after the replacement.
         let content = "---\ntags: [a, b]  # note\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!(["a", "b"])),
             ..make_change("a.md", "tags", "h1", "set_frontmatter", Some(json!(["x"])))
         };
@@ -2415,7 +2411,7 @@ mod tests {
         // captured as a trailing comment, and a real trailing comment after the
         // quoted `#` must still be preserved.
         let content = "---\ntags: [\"a#b\"]  # real\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!(["a#b"])),
             ..make_change("a.md", "tags", "h1", "set_frontmatter", Some(json!(["c"])))
         };
@@ -2428,7 +2424,7 @@ mod tests {
         // With only a quoted `#` and no real comment, nothing is appended and
         // the value round-trips cleanly (no spurious `# ...` bytes).
         let content = "---\ntags: [\"a#b\"]\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!(["a#b"])),
             ..make_change(
                 "a.md",
@@ -2450,7 +2446,7 @@ mod tests {
         // Phantom-boundary fix: `- name:` item lines are not confirmed keys, so
         // `contacts`'s line_range covers the whole block — remove takes it all.
         let content = "---\ncontacts:\n- name: Bob\n- name: Alice\nowner: x\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!([{"name": "Bob"}, {"name": "Alice"}])),
             ..make_change("a.md", "contacts", "h1", "remove_frontmatter", None)
         };
@@ -2465,7 +2461,7 @@ mod tests {
         let content = "---\n\"\\x61\": v\nx61: w\n---\nbody\n";
         // expected_old_value matches serde's x61 so the precondition passes and
         // we exercise the span-level refusal specifically.
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("w")),
             ..make_change("a.md", "x61", "h1", "set_frontmatter", Some(json!("NEW")))
         };
@@ -2485,7 +2481,7 @@ mod tests {
         // same document must refuse (the whole-doc span refusal), never write —
         // otherwise `a` would be absorbed into `title`'s line and clobbered.
         let content = "---\ntitle: hi\n\"\\x61\": 1\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("hi")),
             ..make_change("a.md", "title", "h1", "set_frontmatter", Some(json!("bye")))
         };
@@ -2503,7 +2499,7 @@ mod tests {
         // No write path is reached — a remove of the same field also refuses at
         // the span-absent site with the same truthful diagnostic. (expected_old
         // is supplied so the precondition passes and we reach that site.)
-        let remove = PlannedChange {
+        let remove = ApplyOp {
             expected_old_value: Some(json!("hi")),
             ..make_change("a.md", "title", "h1", "remove_frontmatter", None)
         };
@@ -2520,7 +2516,7 @@ mod tests {
     #[test]
     fn apply_set_frontmatter_scalar_into_scalar_still_works() {
         let content = "---\nstatus: draft\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("draft")),
             ..make_change(
                 "a.md",
@@ -2581,13 +2577,13 @@ mod tests {
     #[test]
     fn apply_rewrite_link_replaces_bare_wikilink() {
         let original = "---\ntitle: x\n---\n\nSee [[Norn Brand]] for details.\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "test".into(),
             path: "doc.md".into(),
             document_hash: "test-hash".into(),
-            finding_code: "link-target-missing".into(),
+            finding_code: Some("link-target-missing".into()),
             finding_rule: None,
-            repair_rule: "built-in:closest-match-stem".into(),
+            repair_rule: Some("built-in:closest-match-stem".into()),
             operation: "rewrite_link".into(),
             field: None,
             expected_old_value: Some(Value::String("Norn Brand".into())),
@@ -2606,13 +2602,13 @@ mod tests {
     #[test]
     fn apply_rewrite_link_preserves_display_text() {
         let original = "Reference: [[Norn Brand|the brand spec]] here.\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "test".into(),
             path: "doc.md".into(),
             document_hash: "test-hash".into(),
-            finding_code: "link-target-missing".into(),
+            finding_code: Some("link-target-missing".into()),
             finding_rule: None,
-            repair_rule: "built-in:closest-match-stem".into(),
+            repair_rule: Some("built-in:closest-match-stem".into()),
             operation: "rewrite_link".into(),
             field: None,
             expected_old_value: Some(Value::String("Norn Brand".into())),
@@ -2630,13 +2626,13 @@ mod tests {
     #[test]
     fn apply_rewrite_link_preserves_anchor() {
         let original = "See [[Norn Brand#colors]].\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "test".into(),
             path: "doc.md".into(),
             document_hash: "test-hash".into(),
-            finding_code: "link-target-missing".into(),
+            finding_code: Some("link-target-missing".into()),
             finding_rule: None,
-            repair_rule: "built-in:closest-match-stem".into(),
+            repair_rule: Some("built-in:closest-match-stem".into()),
             operation: "rewrite_link".into(),
             field: None,
             expected_old_value: Some(Value::String("Norn Brand".into())),
@@ -2658,13 +2654,13 @@ mod tests {
         // former assertion pinned a bare-`^` split — the NRN-433 bug — where
         // `[[Norn Brand^block-id]]` was rewritten as if `^` began the suffix.)
         let original = "See [[Norn Brand#^block-id]].\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "test".into(),
             path: "doc.md".into(),
             document_hash: "test-hash".into(),
-            finding_code: "link-target-missing".into(),
+            finding_code: Some("link-target-missing".into()),
             finding_rule: None,
-            repair_rule: "built-in:closest-match-stem".into(),
+            repair_rule: Some("built-in:closest-match-stem".into()),
             operation: "rewrite_link".into(),
             field: None,
             expected_old_value: Some(Value::String("Norn Brand".into())),
@@ -2687,13 +2683,13 @@ mod tests {
         // fragment does NOT match (the old split-on-`^` falsely reported success
         // while leaving the file untouched).
         let original = "See [[a^b]].\n";
-        let matching = PlannedChange {
+        let matching = ApplyOp {
             change_id: "test".into(),
             path: "doc.md".into(),
             document_hash: "test-hash".into(),
-            finding_code: "link-target-missing".into(),
+            finding_code: Some("link-target-missing".into()),
             finding_rule: None,
-            repair_rule: "operator-request".into(),
+            repair_rule: None,
             operation: "rewrite_link".into(),
             field: None,
             expected_old_value: Some(Value::String("a^b".into())),
@@ -2708,7 +2704,7 @@ mod tests {
             apply_rewrite_link(original, &matching).unwrap(),
             "See [[renamed]].\n"
         );
-        let non_matching = PlannedChange {
+        let non_matching = ApplyOp {
             expected_old_value: Some(Value::String("a".into())),
             ..matching.clone()
         };
@@ -2722,13 +2718,13 @@ mod tests {
     #[test]
     fn apply_rewrite_link_replaces_all_occurrences() {
         let original = "[[Norn Brand]] and [[Norn Brand]] again.\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "test".into(),
             path: "doc.md".into(),
             document_hash: "test-hash".into(),
-            finding_code: "link-target-missing".into(),
+            finding_code: Some("link-target-missing".into()),
             finding_rule: None,
-            repair_rule: "built-in:closest-match-stem".into(),
+            repair_rule: Some("built-in:closest-match-stem".into()),
             operation: "rewrite_link".into(),
             field: None,
             expected_old_value: Some(Value::String("Norn Brand".into())),
@@ -2747,13 +2743,13 @@ mod tests {
     #[test]
     fn apply_rewrite_link_leaves_unmatched_wikilinks_alone() {
         let original = "See [[Other Doc]] and [[Norn Brand]].\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "test".into(),
             path: "doc.md".into(),
             document_hash: "test-hash".into(),
-            finding_code: "link-target-missing".into(),
+            finding_code: Some("link-target-missing".into()),
             finding_rule: None,
-            repair_rule: "built-in:closest-match-stem".into(),
+            repair_rule: Some("built-in:closest-match-stem".into()),
             operation: "rewrite_link".into(),
             field: None,
             expected_old_value: Some(Value::String("Norn Brand".into())),
@@ -2772,13 +2768,13 @@ mod tests {
     #[test]
     fn apply_rewrite_link_preserves_anchor_then_block_ref_combination() {
         let original = "See [[Norn Brand#^block-id]] for details.\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "test".into(),
             path: "doc.md".into(),
             document_hash: "test-hash".into(),
-            finding_code: "link-target-missing".into(),
+            finding_code: Some("link-target-missing".into()),
             finding_rule: None,
-            repair_rule: "built-in:closest-match-stem".into(),
+            repair_rule: Some("built-in:closest-match-stem".into()),
             operation: "rewrite_link".into(),
             field: None,
             expected_old_value: Some(Value::String("Norn Brand".into())),
@@ -2801,13 +2797,13 @@ mod tests {
         // fence is code-opaque and left alone (NRN-432) — both in one call.
         let original =
             "---\nrelated: \"[[old]]\"\n---\n\n```\n[[old]]\n```\n\nprose [[old]] link\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "test".into(),
             path: "doc.md".into(),
             document_hash: "test-hash".into(),
-            finding_code: "operator-request".into(),
+            finding_code: None,
             finding_rule: None,
-            repair_rule: "operator-request".into(),
+            repair_rule: None,
             operation: "rewrite_link".into(),
             field: None,
             expected_old_value: Some(Value::String("old".into())),
@@ -2833,13 +2829,13 @@ mod tests {
         // written as `[[a|b]]` (which reads as target `a`, alias `b`).
         let original = "See [[old]] here.\n";
         for bad in ["a|b", "a#b", "a]]b"] {
-            let change = PlannedChange {
+            let change = ApplyOp {
                 change_id: "test".into(),
                 path: "doc.md".into(),
                 document_hash: "test-hash".into(),
-                finding_code: "operator-request".into(),
+                finding_code: None,
                 finding_rule: None,
-                repair_rule: "operator-request".into(),
+                repair_rule: None,
                 operation: "rewrite_link".into(),
                 field: None,
                 expected_old_value: Some(Value::String("old".into())),
@@ -2859,13 +2855,13 @@ mod tests {
     #[test]
     fn apply_replace_body_replaces_body_preserves_frontmatter() {
         let content = "---\ntitle: Foo\n---\nold body line 1\nold body line 2\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "test".to_string(),
             path: "test.md".into(),
             document_hash: "ignored".to_string(),
-            finding_code: "operator-mutation".to_string(),
+            finding_code: Some("operator-mutation".to_string()),
             finding_rule: None,
-            repair_rule: "vault-set".to_string(),
+            repair_rule: Some("vault-set".to_string()),
             operation: "replace_body".to_string(),
             field: None,
             expected_old_value: None,
@@ -2884,13 +2880,13 @@ mod tests {
     #[test]
     fn apply_replace_body_handles_doc_with_no_frontmatter() {
         let content = "raw body line 1\nraw body line 2\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "test".to_string(),
             path: "test.md".into(),
             document_hash: "ignored".to_string(),
-            finding_code: "operator-mutation".to_string(),
+            finding_code: Some("operator-mutation".to_string()),
             finding_rule: None,
-            repair_rule: "vault-set".to_string(),
+            repair_rule: Some("vault-set".to_string()),
             operation: "replace_body".to_string(),
             field: None,
             expected_old_value: None,
@@ -2909,13 +2905,13 @@ mod tests {
     #[test]
     fn apply_replace_body_returns_error_when_new_value_missing() {
         let content = "---\ntitle: Foo\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "test".to_string(),
             path: "test.md".into(),
             document_hash: "ignored".to_string(),
-            finding_code: "operator-mutation".to_string(),
+            finding_code: Some("operator-mutation".to_string()),
             finding_rule: None,
-            repair_rule: "vault-set".to_string(),
+            repair_rule: Some("vault-set".to_string()),
             operation: "replace_body".to_string(),
             field: None,
             expected_old_value: None,
@@ -2939,13 +2935,13 @@ mod tests {
         // Backlinker on disk references [[c]], but the plan expects [[a]] → drift.
         std::fs::write(root.join("d.md"), "see [[c]] here\n").unwrap();
 
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "test-skip-id".into(),
             path: camino::Utf8PathBuf::from("a.md"),
             document_hash: String::new(),
-            finding_code: "move_document".into(),
+            finding_code: Some("move_document".into()),
             finding_rule: None,
-            repair_rule: "test".into(),
+            repair_rule: Some("test".into()),
             operation: "move_document".into(),
             field: None,
             expected_old_value: None,
@@ -3031,13 +3027,13 @@ mod tests {
                 rewritten: "[[old]]".into(),
                 unrepresentable: true,
             });
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "t".into(),
             path: "old.md".into(),
             document_hash: "h".into(),
-            finding_code: "operator-request".into(),
+            finding_code: None,
             finding_rule: None,
-            repair_rule: "operator-request".into(),
+            repair_rule: None,
             operation: "move_document".into(),
             field: None,
             expected_old_value: None,
@@ -3083,13 +3079,13 @@ mod tests {
         std::fs::write(root.join("b.md"), b_doc).unwrap();
         std::fs::write(root.join("c.md"), "---\ntype: note\n---\nsee [[Parent]]\n").unwrap();
 
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "move-parent".into(),
             path: camino::Utf8PathBuf::from("Parent.md"),
             document_hash: String::new(),
-            finding_code: "move_document".into(),
+            finding_code: Some("move_document".into()),
             finding_rule: None,
-            repair_rule: "operator-request".into(),
+            repair_rule: None,
             operation: "move_document".into(),
             field: None,
             expected_old_value: None,
@@ -3177,20 +3173,16 @@ mod tests {
         assert!(o.failed.is_empty());
     }
 
-    /// Build a minimal `PlannedChange` whose `link_risk` points at one
+    /// Build a minimal `ApplyOp` whose `link_risk` points at one
     /// `AffectedLink` with `source_path` relative to the vault root.
-    fn make_move_change_with_backlinker(
-        source_path: &str,
-        raw: &str,
-        rewritten: &str,
-    ) -> PlannedChange {
-        PlannedChange {
+    fn make_move_change_with_backlinker(source_path: &str, raw: &str, rewritten: &str) -> ApplyOp {
+        ApplyOp {
             change_id: "test-id".into(),
             path: camino::Utf8PathBuf::from("a.md"),
             document_hash: String::new(),
-            finding_code: "move_document".into(),
+            finding_code: Some("move_document".into()),
             finding_rule: None,
-            repair_rule: "test".into(),
+            repair_rule: Some("test".into()),
             operation: "move_document".into(),
             field: None,
             expected_old_value: None,
@@ -3509,13 +3501,13 @@ mod tests {
         std::fs::write(root.join("good-backlinker.md"), "see [[a]] here\n").unwrap();
 
         // Build a change with two AffectedLinks: directory first, good file second.
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: "test-hardfail-id".into(),
             path: camino::Utf8PathBuf::from("a.md"),
             document_hash: String::new(),
-            finding_code: "move_document".into(),
+            finding_code: Some("move_document".into()),
             finding_rule: None,
-            repair_rule: "test".into(),
+            repair_rule: Some("test".into()),
             operation: "move_document".into(),
             field: None,
             expected_old_value: None,
@@ -3586,7 +3578,7 @@ mod tests {
         // the quote-aware absorb guard (NRN-141 absorb fix) — see the guard-
         // specific test below.
         let content = "---\nfoo: [a,\n\"b]c\",\nbar: v]\n\"\\x62ar\": realvalue\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("realvalue")),
             ..make_change("a.md", "bar", "h1", "remove_frontmatter", None)
         };
@@ -3604,7 +3596,7 @@ mod tests {
         // back as a comment (pre-v0.44 corruption; v0.44 refused). The key reads
         // back byte-exact with its new array value.
         let content = "---\n\"#foo\": [a, b]\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!(["a", "b"])),
             ..make_change("a.md", "#foo", "h1", "set_frontmatter", Some(json!(["x"])))
         };
@@ -3619,7 +3611,7 @@ mod tests {
         // so the post-image is valid YAML and round-trips (pre-v0.44 produced
         // invalid `a: b: [..]`; v0.44 refused). Sibling fields stay intact.
         let content = "---\n\"a: b\": [x]\nkeep: kept\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!(["x"])),
             ..make_change("a.md", "a: b", "h1", "set_frontmatter", Some(json!(["y"])))
         };
@@ -3707,7 +3699,7 @@ mod tests {
         // so it applies unchanged in behavior.
         let content = "---\ntitle: hi\nstatus: draft\nkind: old\n---\nbody\n";
         let changes = [
-            PlannedChange {
+            ApplyOp {
                 expected_old_value: Some(json!("draft")),
                 ..make_change(
                     "a.md",
@@ -3717,13 +3709,13 @@ mod tests {
                     Some(json!("done")),
                 )
             },
-            PlannedChange {
+            ApplyOp {
                 expected_old_value: Some(json!("old")),
                 ..make_change("a.md", "kind", "h1", "remove_frontmatter", None)
             },
             make_change("a.md", "author", "h1", "add_frontmatter", Some(json!("me"))),
         ];
-        let refs: Vec<&PlannedChange> = changes.iter().collect();
+        let refs: Vec<&ApplyOp> = changes.iter().collect();
         let result = apply_file_changes(content, &refs).expect("ordinary batch must apply");
         assert_eq!(
             result,
@@ -3741,7 +3733,7 @@ mod tests {
         // (well-formed) document. Quote-aware absorb steps over the quoted `}`,
         // so the sibling `title` is uniquely located and editable again.
         let content = "---\ntitle: hi\nmeta: {\na: \"}\",\nnext: 1\n}\nnext: 2\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("hi")),
             ..make_change("a.md", "title", "h1", "set_frontmatter", Some(json!("bye")))
         };
@@ -3760,7 +3752,7 @@ mod tests {
         // spans — `remove bar` refuses at the span layer (CannotMinimalEdit),
         // earlier than the post-image gate, never reaching a corrupting edit.
         let content = "---\nfoo: [a,\n\"b]c\",\nbar: v]\n\"\\x62ar\": realvalue\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("realvalue")),
             ..make_change("a.md", "bar", "h1", "remove_frontmatter", None)
         };
@@ -3780,7 +3772,7 @@ mod tests {
         // an unseeded absorb misread the closing `"` as opening, skipped the
         // `]`, absorbed `title`, and refused this valid document whole.
         let content = "---\nfoo: [\"a,\nb\", c]\ntitle: hi\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("hi")),
             ..make_change("a.md", "title", "h1", "set_frontmatter", Some(json!("bye")))
         };
@@ -3798,7 +3790,7 @@ mod tests {
         // absorb stopped at the shielded `]`, re-exposed the phantom, and the
         // remove corrupted the doc (caught only by the post-image gate).
         let content = "---\ntags: [\"a,\nb]: c\",\nphantom: v]\n\"\\x70hantom\": real\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("real")),
             ..make_change("a.md", "phantom", "h1", "remove_frontmatter", None)
         };
@@ -3817,7 +3809,7 @@ mod tests {
         // stays uniquely located and editable; the comment-blind scan absorbed
         // it and refused this valid document whole.
         let content = "---\nfoo: [ # \"x\n  a, b ]\ntitle: hi\n---\nbody\n";
-        let change = PlannedChange {
+        let change = ApplyOp {
             expected_old_value: Some(json!("hi")),
             ..make_change("a.md", "title", "h1", "set_frontmatter", Some(json!("bye")))
         };
