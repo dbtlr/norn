@@ -102,8 +102,11 @@ said it belonged.
   synthesis time from the loaded index (the pattern repair's planner already
   used), not hydrated from the live index at apply time. A present hash is a
   compare-and-swap precondition checked via the transaction fingerprint path
-  (delete) or pre-rename (move); an absent hash means no check. Delete-hash
-  *required* remains an open question, deliberately left un-forced here.
+  (delete) or pre-rename (move). For `move_document` an absent hash means no
+  check. For `delete_document` the hash is **required** (resolved 2026-07-22,
+  NRN-151): an absent or empty hash refuses fail-closed with the dedicated
+  `delete-hash-required` code — a document is never deleted without proof the
+  plan was authored against its current bytes.
 
 ## Consequences
 
