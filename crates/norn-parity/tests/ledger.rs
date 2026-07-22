@@ -64,11 +64,15 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // value, three cases). NRN-436 added PD-125 (discovered-inconsistency: the
     // bare-anyhow user-fault refusal families carry typed codes instead of
     // `internal-error` — create-destination-exists / create-parent-missing /
-    // malformed-plan / invalid-precondition, five cases).
+    // malformed-plan / invalid-precondition, five cases). NRN-406 (ADR 0024) added
+    // PD-126 (decided-better true per-op tracking: a multi-seq-create report tells
+    // the truth — `applied: 2` with distinct resolved paths — instead of the
+    // oracle's event-reconstruction under-count) and PD-127 (decided-better partial
+    // apply: independent files proceed past a per-op failure).
     assert_eq!(
         ledger.entries.len(),
-        25,
-        "expected exactly PD-101..PD-125, found {}",
+        27,
+        "expected exactly PD-101..PD-127, found {}",
         ledger.entries.len()
     );
 
