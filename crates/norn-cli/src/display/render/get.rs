@@ -1,0 +1,456 @@
+//! `get` (NRN-409): the projection ladder shared with `find`, plus the
+//! `--format markdown` byte-faithful source passthrough.
+
+use std::io::{self, Write};
+
+use norn_wire::{GetRecord, GetReport};
+use serde_json::Value;
+
+use crate::cli::GlobalArgs;
+use crate::display::conversation::Conversation;
+use crate::display::emit::{is_stdout_tty, render_outcome, term_width};
+use crate::display::format::Format;
+use crate::display::output::GetView;
+use crate::display::sink::Sink;
+use crate::display::{Presenter, EXIT_OK, EXIT_OPERATIONAL};
+use crate::output::palette::{self, Palette};
+use crate::output::primitives::Field;
+use crate::output::projection::{
+    project_json, project_pairs, split_cols, unknown_facet_message, warn_col_ignored,
+    warn_section_ignored, DefaultCols, DocView, KNOWN_FACETS,
+};
+
+pub(crate) fn render_get<O: Write, E: Write>(
+    view: GetView,
+    global: &GlobalArgs,
+    presenter: &mut Presenter<O, E>,
+) -> i32 {
+    let format = view.spec.resolve(view.explicit, is_stdout_tty());
+    let (out, err) = presenter.streams();
+    let mut conv = Conversation::new(err);
+
+    if format == Format::Markdown {
+        // Byte-faithful source passthrough — never colorized, so no palette.
+        return render_get_markdown(&view, out, &mut conv);
+    }
+
+    let text = match format {
+        Format::Json => render_get_json(&view.report, &view.cols),
+        Format::Jsonl => render_get_jsonl(&view.report, &view.cols),
+        Format::Paths => render_get_paths(&view.report),
+        Format::Records => {
+            // NRN-362: get records render through the SAME resolved palette find
+            // uses. Piped (parity, pipelines) it resolves off → byte-unchanged.
+            let palette = palette::resolve(global.color);
+            render_get_records(&view.report, &palette, &view.cols)
+        }
+        Format::Markdown => unreachable!("markdown handled above"),
+    };
+    let result: io::Result<i32> = (|| {
+        // Exactly one trailing newline (donor `emit`).
+        if text.ends_with('\n') {
+            write!(out, "{text}")?;
+        } else {
+            writeln!(out, "{text}")?;
+        }
+
+        let paths_inert = (format == Format::Paths).then_some("paths");
+        warn_col_ignored(&view.cols, paths_inert, conv.writer())?;
+        warn_section_ignored(&view.sections, paths_inert, conv.writer())?;
+        warn_unknown_cols_get(&view.cols, &view.report, conv.writer())?;
+        warn_unknown_sort_get(&view.report, view.sort_field.as_deref(), conv.writer())?;
+        for note in &view.report.notes {
+            conv.line(note)?;
+        }
+
+        Ok(if has_error(&view.report) {
+            EXIT_OPERATIONAL
+        } else {
+            EXIT_OK
+        })
+    })();
+
+    render_outcome(result, conv.writer())
+}
+
+/// `--format markdown`: the exact source bytes (donor `emit_markdown`). Errors
+/// unless exactly one document resolved; `--col`/`--section` are ignored (warned).
+fn render_get_markdown(view: &GetView, out: &mut dyn Write, conv: &mut Conversation<'_>) -> i32 {
+    let result: io::Result<i32> = (|| {
+        warn_col_ignored(&view.cols, Some("markdown"), conv.writer())?;
+        warn_section_ignored(&view.sections, Some("markdown"), conv.writer())?;
+        for note in &view.report.notes {
+            conv.line(note)?;
+        }
+
+        if let Some(content) = &view.report.markdown_content {
+            write!(out, "{content}")?;
+            return Ok(if has_error(&view.report) {
+                EXIT_OPERATIONAL
+            } else {
+                EXIT_OK
+            });
+        }
+
+        Ok(match view.report.records.len() {
+            // Zero resolved, or one resolved but no content (source-read
+            // failure): the per-target `error:` notes are already printed.
+            0 | 1 => EXIT_OPERATIONAL,
+            n => {
+                conv.line(&format!(
+                    "error: --format markdown returns a single document; {n} selected \
+                     — request one target at a time"
+                ))?;
+                EXIT_OPERATIONAL
+            }
+        })
+    })();
+
+    render_outcome(result, conv.writer())
+}
+
+/// The single get "failure" signal: an `error:`-prefixed note drives exit 1.
+fn has_error(report: &GetReport) -> bool {
+    report.notes.iter().any(|n| n.starts_with("error:"))
+}
+
+fn render_get_json(report: &GetReport, cols: &[String]) -> String {
+    let array: Vec<Value> = report
+        .records
+        .iter()
+        .map(|r| project_json(&get_record_view(r), cols, false, DefaultCols::FullFacets))
+        .collect();
+    serde_json::to_string(&array).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn render_get_jsonl(report: &GetReport, cols: &[String]) -> String {
+    let mut buf = String::new();
+    for record in &report.records {
+        let line = project_json(
+            &get_record_view(record),
+            cols,
+            false,
+            DefaultCols::FullFacets,
+        );
+        buf.push_str(&serde_json::to_string(&line).unwrap_or_default());
+        buf.push('\n');
+    }
+    buf
+}
+
+fn render_get_paths(report: &GetReport) -> String {
+    let mut buf = String::new();
+    for record in &report.records {
+        buf.push_str(&record.path);
+        buf.push('\n');
+    }
+    buf
+}
+
+fn render_get_records(report: &GetReport, palette: &Palette, cols: &[String]) -> String {
+    let width = term_width();
+    let mut buf: Vec<u8> = Vec::new();
+    {
+        let mut sink = Sink::new(&mut buf, palette, width);
+        for (i, record) in report.records.iter().enumerate() {
+            if i > 0 {
+                let _ = sink.separator();
+            }
+            let pairs = project_pairs(&get_record_view(record), cols, cols.is_empty());
+            let fields: Vec<Field<'_>> = pairs
+                .iter()
+                .map(|(k, v)| Field {
+                    label: k.as_str(),
+                    value: v.as_str(),
+                    highlight: false,
+                })
+                .collect();
+            let _ = sink.record_block(Some(&record.path), &fields);
+            if fields.is_empty() {
+                let _ = writeln!(sink.writer(), "  (no fields)");
+            }
+        }
+    }
+    String::from_utf8(buf).unwrap_or_default()
+}
+
+/// Warn for `--col` tokens that won't resolve (donor `get::warn_unknown_cols`,
+/// `warn:` prefix — distinct from find's `warning:`).
+fn warn_unknown_cols_get(
+    cols: &[String],
+    report: &GetReport,
+    err: &mut dyn Write,
+) -> io::Result<()> {
+    let (facets, fields) = split_cols(cols);
+    for facet in &facets {
+        if !KNOWN_FACETS.contains(&facet.as_str()) {
+            writeln!(err, "warn: {}", unknown_facet_message(facet))?;
+        }
+    }
+    for field in &fields {
+        let present_in_any = report.records.iter().any(|r| {
+            r.frontmatter
+                .as_ref()
+                .and_then(Value::as_object)
+                .is_some_and(|obj| obj.contains_key(field))
+        });
+        if !present_in_any {
+            writeln!(
+                err,
+                "warn: --col field '{field}' not present in document (bare names select frontmatter fields; use '.{field}' for a structural facet)"
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// `get`'s counterpart to `warn_unknown_sort_find` (NRN-374): same field-absent
+/// check over the resolved records, same `path`/`stem` exemption and zero-match
+/// skip, but the `warn:` prefix matching `get`'s own `--col` convention above.
+fn warn_unknown_sort_get(
+    report: &GetReport,
+    sort_field: Option<&str>,
+    err: &mut dyn Write,
+) -> io::Result<()> {
+    let Some(field) = sort_field else {
+        return Ok(());
+    };
+    if matches!(field, "path" | "stem") || report.records.is_empty() {
+        return Ok(());
+    }
+    let present_in_any = report.records.iter().any(|r| {
+        r.frontmatter
+            .as_ref()
+            .and_then(Value::as_object)
+            .is_some_and(|obj| obj.contains_key(field))
+    });
+    if !present_in_any {
+        writeln!(err, "warn: --sort field '{field}' not present in document")?;
+    }
+    Ok(())
+}
+
+fn get_record_view(rec: &GetRecord) -> DocView<'_> {
+    DocView {
+        path: &rec.path,
+        stem: &rec.stem,
+        hash: &rec.hash,
+        frontmatter: rec.frontmatter.as_ref(),
+        headings: &rec.headings,
+        outgoing_links: &rec.outgoing_links,
+        unresolved_links: &rec.unresolved_links,
+        incoming_links: &rec.incoming_links,
+        body: rec.body.as_deref(),
+        sections: rec.sections.as_deref(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::ColorWhen;
+    use crate::display::format::FormatSpec;
+    use crate::display::Presenter;
+    use serde_json::json;
+
+    /// A `Write` that fails every write with a fixed [`io::ErrorKind`].
+    struct FailingWriter(io::ErrorKind);
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(self.0))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn global_args() -> GlobalArgs {
+        GlobalArgs {
+            cwd: None,
+            verbose: false,
+            no_cache_refresh: false,
+            color: ColorWhen::Never,
+            vault: None,
+            help_short: false,
+            help_long: false,
+            dynamic_fields: Vec::new(),
+        }
+    }
+
+    fn get_record(path: &str, fm: Value) -> GetRecord {
+        GetRecord {
+            path: path.into(),
+            stem: path.trim_end_matches(".md").into(),
+            hash: "deadbeef".into(),
+            frontmatter: if fm.is_null() { None } else { Some(fm) },
+            headings: vec![json!({"level": 2, "text": "Sec", "slug": "sec"})],
+            outgoing_links: vec![json!({"target": "b", "resolved_path": "b.md"})],
+            unresolved_links: vec![],
+            incoming_links: vec![],
+            body: None,
+            sections: None,
+        }
+    }
+
+    #[test]
+    fn get_records_default_shows_frontmatter_then_facets() {
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({"title": "A", "type": "note"}))],
+            notes: vec![],
+            markdown_content: None,
+        };
+        let text = render_get_records(&report, &Palette::off(), &[]);
+        assert!(text.contains("a.md"), "path header: {text}");
+        assert!(text.contains("title"), "frontmatter field: {text}");
+        assert!(text.contains("headings"), "headings row: {text}");
+    }
+
+    #[test]
+    fn get_records_colorize_under_an_enabled_palette() {
+        // NRN-362: get honors the resolved palette. Color on → ANSI escapes;
+        // off (the piped / parity path) → bytes unchanged.
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({"title": "A"}))],
+            notes: vec![],
+            markdown_content: None,
+        };
+        let colored = render_get_records(&report, &Palette::on(), &[]);
+        let plain = render_get_records(&report, &Palette::off(), &[]);
+        assert!(
+            colored.contains('\u{1b}'),
+            "expected ANSI escapes: {colored:?}"
+        );
+        assert!(
+            !plain.contains('\u{1b}'),
+            "off palette stays plain: {plain:?}"
+        );
+    }
+
+    #[test]
+    fn has_error_drives_the_failure_signal() {
+        let report = GetReport {
+            records: vec![],
+            notes: vec!["error: 'x' did not resolve to any doc".into()],
+            markdown_content: None,
+        };
+        assert!(has_error(&report));
+        let ok = GetReport {
+            records: vec![],
+            notes: vec!["note: 'x' resolved to 2 docs".into()],
+            markdown_content: None,
+        };
+        assert!(!has_error(&ok));
+    }
+
+    fn get_view(explicit: Format, report: GetReport) -> GetView {
+        GetView {
+            report,
+            cols: vec![],
+            sections: vec![],
+            sort_field: None,
+            explicit: Some(explicit),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
+        }
+    }
+
+    #[test]
+    fn render_get_tolerates_broken_pipe() {
+        let mut err = Vec::new();
+        let global = global_args();
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({"title": "A"}))],
+            notes: vec![],
+            markdown_content: None,
+        };
+        let code = {
+            let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
+            render_get(get_view(Format::Paths, report), &global, &mut presenter)
+        };
+        assert_eq!(code, EXIT_OK);
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn render_get_reports_other_io_errors() {
+        let mut err = Vec::new();
+        let global = global_args();
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({"title": "A"}))],
+            notes: vec![],
+            markdown_content: None,
+        };
+        let code = {
+            let mut presenter =
+                Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
+            render_get(get_view(Format::Paths, report), &global, &mut presenter)
+        };
+        assert_eq!(code, EXIT_OPERATIONAL);
+        assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
+    }
+
+    #[test]
+    fn render_get_markdown_tolerates_broken_pipe() {
+        let mut err = Vec::new();
+        let global = global_args();
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({}))],
+            notes: vec![],
+            markdown_content: Some("# hello\n".into()),
+        };
+        let code = {
+            let mut presenter = Presenter::new(FailingWriter(io::ErrorKind::BrokenPipe), &mut err);
+            render_get(get_view(Format::Markdown, report), &global, &mut presenter)
+        };
+        assert_eq!(code, EXIT_OK);
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn render_get_markdown_reports_other_io_errors() {
+        let mut err = Vec::new();
+        let global = global_args();
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({}))],
+            notes: vec![],
+            markdown_content: Some("# hello\n".into()),
+        };
+        let code = {
+            let mut presenter =
+                Presenter::new(FailingWriter(io::ErrorKind::PermissionDenied), &mut err);
+            render_get(get_view(Format::Markdown, report), &global, &mut presenter)
+        };
+        assert_eq!(code, EXIT_OPERATIONAL);
+        assert!(String::from_utf8(err).unwrap().starts_with("norn: "));
+    }
+
+    #[test]
+    fn warn_unknown_sort_get_warns_with_the_get_warn_prefix() {
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({"title": "A"}))],
+            notes: vec![],
+            markdown_content: None,
+        };
+        let mut err = Vec::new();
+        warn_unknown_sort_get(&report, Some("priorty"), &mut err).unwrap();
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "warn: --sort field 'priorty' not present in document\n"
+        );
+    }
+
+    #[test]
+    fn warn_unknown_sort_get_silent_for_a_present_field() {
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({"title": "A"}))],
+            notes: vec![],
+            markdown_content: None,
+        };
+        let mut err = Vec::new();
+        warn_unknown_sort_get(&report, Some("title"), &mut err).unwrap();
+        assert!(err.is_empty());
+    }
+}

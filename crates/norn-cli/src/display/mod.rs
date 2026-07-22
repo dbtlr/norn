@@ -24,6 +24,7 @@ mod format;
 mod output;
 mod presenter;
 mod prompt;
+mod render;
 mod sink;
 
 pub use conversation::Conversation;
