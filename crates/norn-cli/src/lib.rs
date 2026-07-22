@@ -154,8 +154,7 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
         // is output-shape-only and never implies interactive consent — none
         // of those three should ever reach a prompt.
         Command::Set(args) => {
-            let can_prompt =
-                !args.dry_run && !args.yes && !matches!(args.format, cli::SetFormat::Json);
+            let can_prompt = args.mode.can_prompt();
             emit_mutation(
                 commands::set::run(&args, &cli.global),
                 can_prompt,
@@ -165,8 +164,7 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
             )
         }
         Command::Edit(args) => {
-            let can_prompt =
-                !args.dry_run && !args.yes && !matches!(args.format, cli::EditFormat::Json);
+            let can_prompt = args.mode.can_prompt();
             emit_mutation(
                 commands::edit::run(&args, &cli.global),
                 can_prompt,
@@ -176,8 +174,7 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
             )
         }
         Command::New(args) => {
-            let can_prompt =
-                !args.dry_run && !args.yes && !matches!(args.format, cli::NewFormat::Json);
+            let can_prompt = args.mode.can_prompt();
             emit_mutation(
                 commands::new::run(&args, &cli.global),
                 can_prompt,
@@ -188,8 +185,7 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
         }
         Command::Init(_) => presenter.not_yet_ported("init"),
         Command::Move(args) => {
-            let can_prompt =
-                !args.dry_run && !args.yes && !matches!(args.format, cli::MoveFormat::Json);
+            let can_prompt = args.mode.can_prompt();
             emit_mutation(
                 commands::move_doc::run(&args, &cli.global),
                 can_prompt,
@@ -199,8 +195,7 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
             )
         }
         Command::Delete(args) => {
-            let can_prompt =
-                !args.dry_run && !args.yes && !matches!(args.format, cli::DeleteFormat::Json);
+            let can_prompt = args.mode.can_prompt();
             emit_mutation(
                 commands::delete::run(&args, &cli.global),
                 can_prompt,
@@ -210,8 +205,7 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
             )
         }
         Command::Apply(args) => {
-            let can_prompt =
-                !args.dry_run && !args.yes && !matches!(args.format, cli::ApplyFormat::Json);
+            let can_prompt = args.mode.can_prompt();
             emit_mutation(
                 commands::apply::run(&args, &cli.global),
                 can_prompt,
@@ -226,9 +220,7 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
             presenter,
         ),
         Command::RewriteWikilink(args) => {
-            let can_prompt = !args.dry_run
-                && !args.yes
-                && !matches!(args.format, cli::RewriteWikilinkFormat::Json);
+            let can_prompt = args.mode.can_prompt();
             emit_mutation(
                 commands::rewrite_wikilink::run(&args, &cli.global),
                 can_prompt,

@@ -10,25 +10,16 @@
 
 use std::io::Read;
 
-use crate::cli::{GlobalArgs, NewArgs, NewFormat};
+use crate::cli::{GlobalArgs, NewArgs};
 use crate::display::{Diagnostic, Format, FormatChoice, FormatSpec, NewMutationView, Output};
 use norn_wire::NewParams;
-
-impl From<NewFormat> for Format {
-    fn from(f: NewFormat) -> Self {
-        match f {
-            NewFormat::Records => Format::Records,
-            NewFormat::Json => Format::Json,
-        }
-    }
-}
 
 /// Run a `new` creation and return its report as an [`Output`], or a
 /// soft-landing [`Diagnostic`] on a connection/owner failure. A clean pre-write
 /// decline (unknown rule, destination exists, …) arrives as a report with
 /// `outcome = refused` the display layer renders at exit 2.
 pub fn run(args: &NewArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
-    run_confirm(args, global, args.yes && !args.dry_run)
+    run_confirm(args, global, args.mode.confirm())
 }
 
 /// Same as [`run`], but with `confirm` supplied rather than derived from
@@ -69,7 +60,7 @@ pub(crate) fn run_confirm(
     Ok(Output::New(NewMutationView {
         report,
         format: FormatChoice {
-            explicit: Some(args.format.into()),
+            explicit: Some(args.mode.format.into()),
             spec: FormatSpec {
                 tty: Format::Records,
                 piped: Format::Records,

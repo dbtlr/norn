@@ -25,26 +25,17 @@
 
 use std::io::Read;
 
-use crate::cli::{EditArgs, EditFormat, GlobalArgs};
+use crate::cli::{EditArgs, GlobalArgs};
 use crate::display::{Diagnostic, EditMutationView, Format, FormatChoice, FormatSpec, Output};
 use norn_core::edit::ops::EditOp;
 use norn_wire::{CodedError, EditParams, EditReport, MutationOutcome, EDIT_REPORT_SCHEMA_VERSION};
-
-impl From<EditFormat> for Format {
-    fn from(f: EditFormat) -> Self {
-        match f {
-            EditFormat::Records => Format::Records,
-            EditFormat::Json => Format::Json,
-        }
-    }
-}
 
 /// Run an `edit` and return its report as an [`Output`], or a soft-landing
 /// [`Diagnostic`] on a connection/owner failure. A CLI-side op-resolution error
 /// or an owner-side pre-write decline arrives as a report with `outcome =
 /// refused` the display layer renders at exit 2.
 pub fn run(args: &EditArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
-    run_confirm(args, global, args.yes && !args.dry_run)
+    run_confirm(args, global, args.mode.confirm())
 }
 
 /// Same as [`run`], but with `confirm` supplied rather than derived from
@@ -256,7 +247,7 @@ fn edit_output(args: &EditArgs, report: EditReport) -> Output {
     Output::Edit(EditMutationView {
         report,
         format: FormatChoice {
-            explicit: Some(args.format.into()),
+            explicit: Some(args.mode.format.into()),
             // Mutations do not switch format on isatty — the mode ladder decides
             // apply-vs-forecast, and `--format` (default records) decides shape.
             spec: FormatSpec {
@@ -480,34 +471,5 @@ mod tests {
         let args = edit_args(&["norn", "edit", "a.md", "--edits-json", r#"[{"op":"nope"}]"#]);
         let err = resolve_ops(&args).unwrap_err();
         assert!(err.starts_with("invalid edits JSON:"), "{err}");
-    }
-
-    /// The confirm ladder: `--dry-run` wins over `--yes`; `--yes` alone applies.
-    #[test]
-    fn confirm_ladder() {
-        let confirm = |a: &EditArgs| a.yes && !a.dry_run;
-        let a = edit_args(&[
-            "norn",
-            "edit",
-            "a.md",
-            "--str-replace",
-            "x",
-            "--new",
-            "y",
-            "--yes",
-            "--dry-run",
-        ]);
-        assert!(!confirm(&a), "dry-run wins over yes");
-        let b = edit_args(&[
-            "norn",
-            "edit",
-            "a.md",
-            "--str-replace",
-            "x",
-            "--new",
-            "y",
-            "--yes",
-        ]);
-        assert!(confirm(&b), "--yes alone applies");
     }
 }

@@ -7,25 +7,16 @@
 //! single-writer lock, and answers with the shared typed `ApplyReport` the
 //! display layer renders. `--out` writes the JSON report to a file.
 
-use crate::cli::{GlobalArgs, RewriteWikilinkArgs, RewriteWikilinkFormat};
+use crate::cli::{GlobalArgs, RewriteWikilinkArgs};
 use crate::display::{Diagnostic, Format, FormatChoice, FormatSpec, Output, RewriteWikilinkView};
 use norn_wire::RewriteWikilinkParams;
-
-impl From<RewriteWikilinkFormat> for Format {
-    fn from(f: RewriteWikilinkFormat) -> Self {
-        match f {
-            RewriteWikilinkFormat::Records => Format::Records,
-            RewriteWikilinkFormat::Json => Format::Json,
-        }
-    }
-}
 
 /// Run a `rewrite-wikilink` mutation and return its report as an [`Output`], or a
 /// soft-landing [`Diagnostic`] on a connection/owner failure. An unresolvable
 /// `OLD` arrives IN the report (`outcome = refused`) the display renders at
 /// exit 2.
 pub fn run(args: &RewriteWikilinkArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
-    run_confirm(args, global, args.yes && !args.dry_run)
+    run_confirm(args, global, args.mode.confirm())
 }
 
 /// Same as [`run`], but with `confirm` supplied rather than derived from
@@ -55,7 +46,7 @@ pub(crate) fn run_confirm(
         old: args.old.clone(),
         new: args.new.clone(),
         format: FormatChoice {
-            explicit: Some(args.format.into()),
+            explicit: Some(args.mode.format.into()),
             spec: FormatSpec {
                 tty: Format::Records,
                 piped: Format::Records,

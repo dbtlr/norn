@@ -16,19 +16,10 @@
 
 use std::io::Read;
 
-use crate::cli::{ApplyArgs, ApplyFormat, GlobalArgs, InputFormat};
+use crate::cli::{ApplyArgs, GlobalArgs, InputFormat};
 use crate::display::{ApplyMutationView, Diagnostic, Format, FormatChoice, FormatSpec, Output};
 use norn_wire::ApplyParams;
 use norn_wire::MigrationPlan;
-
-impl From<ApplyFormat> for Format {
-    fn from(f: ApplyFormat) -> Self {
-        match f {
-            ApplyFormat::Records => Format::Records,
-            ApplyFormat::Json => Format::Json,
-        }
-    }
-}
 
 /// Run an `apply` and return its report as an [`Output`], or a soft-landing
 /// [`Diagnostic`] on a bad/unreadable plan or a connection/owner failure. A
@@ -36,7 +27,7 @@ impl From<ApplyFormat> for Format {
 /// (`outcome = refused`) the display renders at exit 2.
 pub fn run(args: &ApplyArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
     // --dry-run wins over --yes; no --yes is a forecast (the shared mode ladder).
-    run_confirm(args, global, args.yes && !args.dry_run)
+    run_confirm(args, global, args.mode.confirm())
 }
 
 /// Same as [`run`], but with `confirm` supplied rather than derived from
@@ -75,7 +66,7 @@ pub(crate) fn run_confirm(
     Ok(Output::Apply(ApplyMutationView {
         report,
         format: FormatChoice {
-            explicit: Some(args.format.into()),
+            explicit: Some(args.mode.format.into()),
             spec: FormatSpec {
                 tty: Format::Records,
                 piped: Format::Records,
@@ -145,41 +136,6 @@ fn parse_plan(raw: &str, fmt: InputFormat, source: &str) -> Result<MigrationPlan
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{Cli, Command};
-    use clap::Parser;
-
-    fn apply_args(argv: &[&str]) -> ApplyArgs {
-        match Cli::try_parse_from(argv).unwrap().command {
-            Command::Apply(a) => a,
-            other => panic!("expected apply, got {other:?}"),
-        }
-    }
-
-    fn confirm(a: &ApplyArgs) -> bool {
-        a.yes && !a.dry_run
-    }
-
-    #[test]
-    fn confirm_ladder_dry_run_wins_over_yes() {
-        assert!(
-            !confirm(&apply_args(&[
-                "norn",
-                "apply",
-                "p.json",
-                "--yes",
-                "--dry-run"
-            ])),
-            "dry-run wins over yes"
-        );
-        assert!(
-            confirm(&apply_args(&["norn", "apply", "p.json", "--yes"])),
-            "yes alone applies"
-        );
-        assert!(
-            !confirm(&apply_args(&["norn", "apply", "p.json"])),
-            "no flag forecasts"
-        );
-    }
 
     #[test]
     fn format_detection_extension_and_override() {

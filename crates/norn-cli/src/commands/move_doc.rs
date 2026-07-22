@@ -7,25 +7,16 @@
 //! answers with the shared typed `ApplyReport`; the display layer renders it
 //! (records summary / pretty json) and derives the exit code.
 
-use crate::cli::{GlobalArgs, MoveArgs, MoveFormat};
+use crate::cli::{GlobalArgs, MoveArgs};
 use crate::display::{Diagnostic, Format, FormatChoice, FormatSpec, MoveMutationView, Output};
 use norn_wire::MoveParams;
-
-impl From<MoveFormat> for Format {
-    fn from(f: MoveFormat) -> Self {
-        match f {
-            MoveFormat::Records => Format::Records,
-            MoveFormat::Json => Format::Json,
-        }
-    }
-}
 
 /// Run a `move` mutation and return its report as an [`Output`], or a
 /// soft-landing [`Diagnostic`] on a connection/owner failure. A clean pre-write
 /// decline arrives IN the report (`outcome = refused`) the display renders at
 /// exit 2.
 pub fn run(args: &MoveArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
-    run_confirm(args, global, args.yes && !args.dry_run)
+    run_confirm(args, global, args.mode.confirm())
 }
 
 /// Same as [`run`], but with `confirm` supplied rather than derived from
@@ -59,51 +50,11 @@ pub(crate) fn run_confirm(
         src: args.src.clone(),
         dst: args.dst.clone(),
         format: FormatChoice {
-            explicit: Some(args.format.into()),
+            explicit: Some(args.mode.format.into()),
             spec: FormatSpec {
                 tty: Format::Records,
                 piped: Format::Records,
             },
         },
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::cli::{Cli, Command, MoveArgs};
-    use clap::Parser;
-
-    fn move_args(argv: &[&str]) -> MoveArgs {
-        match Cli::try_parse_from(argv).unwrap().command {
-            Command::Move(a) => a,
-            other => panic!("expected move, got {other:?}"),
-        }
-    }
-
-    fn confirm(a: &MoveArgs) -> bool {
-        a.yes && !a.dry_run
-    }
-
-    #[test]
-    fn confirm_ladder_dry_run_wins_over_yes() {
-        assert!(
-            !confirm(&move_args(&[
-                "norn",
-                "move",
-                "a.md",
-                "b.md",
-                "--yes",
-                "--dry-run"
-            ])),
-            "dry-run wins over yes"
-        );
-        assert!(
-            confirm(&move_args(&["norn", "move", "a.md", "b.md", "--yes"])),
-            "yes alone applies"
-        );
-        assert!(
-            !confirm(&move_args(&["norn", "move", "a.md", "b.md"])),
-            "no flag forecasts"
-        );
-    }
 }
