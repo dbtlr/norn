@@ -265,6 +265,7 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-120",
         "PD-121",
         "PD-122",
+        "PD-123",
         "PD-124",
         "read-find-eq-numeric-quoted-value-zoo",
         "read-find-not-eq-numeric-quoted-value-zoo",
