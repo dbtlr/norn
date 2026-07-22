@@ -348,12 +348,39 @@ pub enum PlanStructureError {
 
     #[error("MigrationPlan `requires` edges form a cycle involving operation id: {op}")]
     RequiresCycle { op: String },
+
+    // ── delete-hash required (NRN-151, ADR 0024) ──────────────────────────────
+    // A `delete_document` op with no plan-time `document_hash` cannot
+    // compare-and-swap the file before removing it. It carries its own dedicated
+    // code (not the generic `malformed-plan`) so an agent can branch the precise
+    // remedy — "stamp the document's hash into the op, or regenerate the plan" —
+    // rather than treating it as an unspecified structural fault.
+    #[error(
+        "delete_document op for {path} carries no document_hash; a delete requires a plan-time hash so the file is compare-and-swapped before removal — add `document_hash` to the op (or regenerate the plan with `norn repair --plan`)"
+    )]
+    DeleteHashRequired { path: Utf8PathBuf },
 }
 
 impl PlanStructureError {
-    /// Every plan-structure fault is a malformed authored plan (NRN-436).
+    /// A stable, machine-branchable kebab code. Most plan-structure faults are a
+    /// generic malformed authored plan (NRN-436); the delete-hash fault carries
+    /// its own `delete-hash-required` code (NRN-151) so an agent branches the
+    /// precise "add the hash" remedy.
     pub fn code(&self) -> &'static str {
-        "malformed-plan"
+        match self {
+            PlanStructureError::DeleteHashRequired { .. } => "delete-hash-required",
+            _ => "malformed-plan",
+        }
+    }
+
+    /// The vault-relative path a plan-structure fault is about, when it carries
+    /// one. Only the delete-hash fault surfaces a path today (the rest name none
+    /// in their messages); feeds the structured error envelope's `path`.
+    pub fn path(&self) -> Option<&Utf8Path> {
+        match self {
+            PlanStructureError::DeleteHashRequired { path } => Some(path.as_path()),
+            _ => None,
+        }
     }
 }
 

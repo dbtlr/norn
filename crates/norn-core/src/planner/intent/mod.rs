@@ -89,6 +89,8 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<ApplyOp
             parents,
             force,
             no_link_rewrite,
+            document_hash,
+            ..
         }) => {
             let old_path: Utf8PathBuf = src.clone().into();
             let new_path: Utf8PathBuf = dst.into();
@@ -106,7 +108,11 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<ApplyOp
             let change = ApplyOp {
                 change_id: format!("move-{src}"),
                 path: old_path,
-                document_hash: String::new(),
+                // The move CAS is optional (ADR 0024): the plan-time hash (stamped
+                // by the move verb / repair from the loaded index) rides through so
+                // the move pass fingerprint-checks the source before renaming;
+                // absent → empty → no check.
+                document_hash: document_hash.unwrap_or_default(),
                 finding_code: None,
                 finding_rule: None,
                 repair_rule: None,
@@ -135,7 +141,10 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<ApplyOp
             let change = ApplyOp {
                 change_id: format!("delete-{}", f.path),
                 path: doc_path,
-                document_hash: String::new(),
+                // A delete's hash is required (NRN-151, enforced as a plan-level
+                // barrier before this expansion); carry it so the delete pass
+                // fingerprint-CAS runs against the file bytes before removal.
+                document_hash: f.document_hash.clone().unwrap_or_default(),
                 finding_code: None,
                 finding_rule: None,
                 repair_rule: None,

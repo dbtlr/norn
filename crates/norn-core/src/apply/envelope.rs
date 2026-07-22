@@ -97,6 +97,9 @@ impl CodedError for crate::standards::apply::PlanStructureError {
     fn code(&self) -> &'static str {
         crate::standards::apply::PlanStructureError::code(self)
     }
+    fn error_path(&self) -> Option<String> {
+        self.path().map(|p| p.to_string())
+    }
 }
 
 // A malformed AUTHORED op payload (unknown kind, a structural op missing a
@@ -450,6 +453,21 @@ mod tests {
             assert_eq!(envelope.code, "malformed-plan");
             assert!(envelope.path.is_none());
         }
+    }
+
+    #[test]
+    fn from_anyhow_codes_delete_hash_required_with_path() {
+        // The delete-hash fault carries its OWN dedicated code (not the generic
+        // `malformed-plan`) plus the offending vault-relative path, so an agent
+        // branches the precise "stamp the hash" remedy (NRN-151, ADR 0024).
+        let err: anyhow::Error = crate::standards::apply::PlanStructureError::DeleteHashRequired {
+            path: camino::Utf8PathBuf::from("notes/alpha.md"),
+        }
+        .into();
+        let envelope = from_anyhow(&err);
+        assert_eq!(envelope.code, "delete-hash-required");
+        assert_eq!(envelope.path.as_deref(), Some("notes/alpha.md"));
+        assert!(envelope.message.contains("no document_hash"));
     }
 
     #[test]

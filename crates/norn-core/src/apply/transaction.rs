@@ -104,11 +104,14 @@ pub(crate) fn fingerprint_cas(
     Ok(content)
 }
 
-/// Fingerprint CAS for a delete: if the file reads, its bytes must match the
-/// plan hash; a missing/unreadable file is left for `apply_delete` to report
-/// with its precise `delete-source-missing` refusal rather than a read error.
-/// An empty `plan_hash` skips the check (the op carried no hash).
-pub(crate) fn fingerprint_delete(
+/// Read-optional fingerprint CAS for an op that VACATES a path — a delete or a
+/// move (ADR 0024). If the file reads, its bytes must match the plan hash; a
+/// missing/unreadable file is left for `apply_delete` / `apply_move` to report
+/// with its precise `delete-source-missing` / `move-source-missing` refusal
+/// rather than a read error. An empty `plan_hash` skips the check (the op carried
+/// no hash — a delete without one is refused plan-level before reaching here; a
+/// move without one legitimately opts out of the CAS).
+pub(crate) fn fingerprint_vacate(
     abs_path: &Utf8Path,
     rel_path: &Utf8Path,
     plan_hash: &str,

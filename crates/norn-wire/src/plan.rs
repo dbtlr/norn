@@ -150,6 +150,15 @@ pub struct RewriteWikilinkFields {
 
 /// `move_document` payload: relocate one document and (unless `no_link_rewrite`)
 /// cascade its backlinks.
+///
+/// `document_hash` is the OPTIONAL plan-time compare-and-swap precondition (ADR
+/// 0024): stamped by the move verb / repair planner from the index at plan
+/// synthesis, it drives a pre-rename fingerprint check against the file bytes; a
+/// drifted source refuses `stale-document-hash`. Absent → no check (move stays
+/// optional, unlike delete). `finding_code` / `repair_rule` ride as optional
+/// finding-provenance (ADR 0022) so a repair-emitted structural op's linkage is
+/// decoded and echoed through the typed path like a change op. All three decode
+/// strictly: present-but-wrong-typed refuses, `null` == absent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MoveDocumentFields {
     pub src: String,
@@ -157,14 +166,29 @@ pub struct MoveDocumentFields {
     pub parents: bool,
     pub force: bool,
     pub no_link_rewrite: bool,
+    pub document_hash: Option<String>,
+    pub finding_code: Option<String>,
+    pub repair_rule: Option<String>,
 }
 
 /// `delete_document` payload: remove a document, optionally redirecting its
 /// incoming links to `rewrite_to`.
+///
+/// `document_hash` is the plan-time compare-and-swap precondition (ADR 0024).
+/// Unlike move, a delete's hash is REQUIRED (NRN-151): the executor's plan-level
+/// validation refuses a hash-less delete `delete-hash-required` before any write,
+/// so a delete always CAS-checks the file bytes (`fingerprint_vacate`) before
+/// removal. The verbs and repair always stamp it; only hand-authored hash-less
+/// deletes newly refuse. `finding_code` / `repair_rule` ride as optional
+/// finding-provenance (ADR 0022), echoed through the typed path like a change op.
+/// All decode strictly: present-but-wrong-typed refuses, `null` == absent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeleteDocumentFields {
     pub path: String,
     pub rewrite_to: Option<String>,
+    pub document_hash: Option<String>,
+    pub finding_code: Option<String>,
+    pub repair_rule: Option<String>,
 }
 
 /// The decoded `fields` of a frontmatter/body change op. Decoded strictly: a
@@ -351,6 +375,23 @@ impl TryFrom<&MigrationOp> for TypedOp {
                 }),
             }
         };
+        // Strict optional-string decode (ADR 0024), the sibling of `bool_field`:
+        // absent or explicit `null` (the verbs' "unset" sentinel) → `None`;
+        // present-and-string → `Some`; present-but-wrong-typed → refuse (never
+        // coerce). The structural ops' `document_hash` / `finding_code` /
+        // `repair_rule` — and `delete_document`'s `rewrite_to` — all decode through
+        // this one arm so a non-string value is no longer indistinguishable from
+        // absent.
+        let opt_str_field = |field: &'static str| -> Result<Option<String>, TypedOpError> {
+            match op.fields.get(field) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(s)) => Ok(Some(s.clone())),
+                Some(_) => Err(TypedOpError::MalformedFields {
+                    kind: op.kind.clone(),
+                    message: format!("field `{field}` must be a string"),
+                }),
+            }
+        };
         let object = || -> Result<Map<String, Value>, TypedOpError> {
             op.fields
                 .as_object()
@@ -375,24 +416,24 @@ impl TryFrom<&MigrationOp> for TypedOp {
                 parents: bool_field("parents")?,
                 force: bool_field("force")?,
                 no_link_rewrite: bool_field("no_link_rewrite")?,
+                document_hash: opt_str_field("document_hash")?,
+                finding_code: opt_str_field("finding_code")?,
+                repair_rule: opt_str_field("repair_rule")?,
             }),
             "delete_document" => {
                 let path = str_field("path")?;
                 // Strict `rewrite_to` (ADR 0022): absent, or explicit `null` (the
                 // delete verb's "no redirect" sentinel), → `None`; present-and-string
                 // → `Some`; present-but-wrong-typed → refuse (a non-string, non-null
-                // value is no longer indistinguishable from absent).
-                let rewrite_to = match op.fields.get("rewrite_to") {
-                    None | Some(Value::Null) => None,
-                    Some(Value::String(s)) => Some(s.clone()),
-                    Some(_) => {
-                        return Err(TypedOpError::MalformedFields {
-                            kind: op.kind.clone(),
-                            message: "field `rewrite_to` must be a string".to_string(),
-                        })
-                    }
-                };
-                TypedOp::DeleteDocument(DeleteDocumentFields { path, rewrite_to })
+                // value is no longer indistinguishable from absent). The optional
+                // hash + linkage decode the same way (ADR 0024).
+                TypedOp::DeleteDocument(DeleteDocumentFields {
+                    path,
+                    rewrite_to: opt_str_field("rewrite_to")?,
+                    document_hash: opt_str_field("document_hash")?,
+                    finding_code: opt_str_field("finding_code")?,
+                    repair_rule: opt_str_field("repair_rule")?,
+                })
             }
             "set_frontmatter" | "add_frontmatter" | "remove_frontmatter" | "rewrite_link"
             | "replace_body" | "create_document" => {
@@ -773,6 +814,129 @@ operations:
         };
         assert_eq!(c.fields.finding_code, None);
         assert_eq!(c.fields.repair_rule, None);
+    }
+
+    // ── structural-op hash + linkage decode (ADR 0024) ────────────────────────
+
+    #[test]
+    fn move_document_hash_absent_string_null_and_wrong_typed() {
+        // absent → None (move CAS optional)
+        let TypedOp::MoveDocument(f) = TypedOp::try_from(&op(
+            "move_document",
+            serde_json::json!({"src": "a.md", "dst": "b.md"}),
+        ))
+        .unwrap() else {
+            panic!("expected MoveDocument");
+        };
+        assert_eq!(f.document_hash, None);
+
+        // present-and-string → Some
+        let TypedOp::MoveDocument(f) = TypedOp::try_from(&op(
+            "move_document",
+            serde_json::json!({"src": "a.md", "dst": "b.md", "document_hash": "cafe"}),
+        ))
+        .unwrap() else {
+            panic!("expected MoveDocument");
+        };
+        assert_eq!(f.document_hash.as_deref(), Some("cafe"));
+
+        // explicit null (the verbs' unset sentinel) → None
+        let TypedOp::MoveDocument(f) = TypedOp::try_from(&op(
+            "move_document",
+            serde_json::json!({"src": "a.md", "dst": "b.md", "document_hash": null}),
+        ))
+        .unwrap() else {
+            panic!("expected MoveDocument");
+        };
+        assert_eq!(f.document_hash, None);
+
+        // present-but-wrong-typed (a number) → refuse, never coerce
+        let err = TypedOp::try_from(&op(
+            "move_document",
+            serde_json::json!({"src": "a.md", "dst": "b.md", "document_hash": 5}),
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, TypedOpError::MalformedFields { kind, .. } if kind == "move_document"),
+            "expected MalformedFields, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn delete_document_hash_absent_string_and_wrong_typed() {
+        // absent → None (the required-hash refusal is a plan-level executor
+        // barrier, NOT a decode rejection — a hash-less delete still DECODES).
+        let TypedOp::DeleteDocument(f) =
+            TypedOp::try_from(&op("delete_document", serde_json::json!({"path": "b.md"}))).unwrap()
+        else {
+            panic!("expected DeleteDocument");
+        };
+        assert_eq!(f.document_hash, None);
+
+        // present-and-string → Some
+        let TypedOp::DeleteDocument(f) = TypedOp::try_from(&op(
+            "delete_document",
+            serde_json::json!({"path": "b.md", "document_hash": "beef"}),
+        ))
+        .unwrap() else {
+            panic!("expected DeleteDocument");
+        };
+        assert_eq!(f.document_hash.as_deref(), Some("beef"));
+
+        // present-but-wrong-typed (a bool) → refuse
+        let err = TypedOp::try_from(&op(
+            "delete_document",
+            serde_json::json!({"path": "b.md", "document_hash": true}),
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, TypedOpError::MalformedFields { kind, .. } if kind == "delete_document"),
+            "expected MalformedFields, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn structural_ops_carry_optional_finding_linkage() {
+        // A repair-emitted move op carries real linkage; it decodes to typed Options.
+        let TypedOp::MoveDocument(f) = TypedOp::try_from(&op(
+            "move_document",
+            serde_json::json!({
+                "src": "a.md", "dst": "b.md",
+                "finding_code": "frontmatter-required-field-missing",
+                "repair_rule": "set-default"
+            }),
+        ))
+        .unwrap() else {
+            panic!("expected MoveDocument");
+        };
+        assert_eq!(
+            f.finding_code.as_deref(),
+            Some("frontmatter-required-field-missing")
+        );
+        assert_eq!(f.repair_rule.as_deref(), Some("set-default"));
+
+        // A verb-synthesized / authored delete omits linkage → None (omitted, not
+        // fabricated).
+        let TypedOp::DeleteDocument(f) = TypedOp::try_from(&op(
+            "delete_document",
+            serde_json::json!({"path": "b.md", "document_hash": "beef"}),
+        ))
+        .unwrap() else {
+            panic!("expected DeleteDocument");
+        };
+        assert_eq!(f.finding_code, None);
+        assert_eq!(f.repair_rule, None);
+
+        // A wrong-typed linkage member refuses like any other strict field.
+        let err = TypedOp::try_from(&op(
+            "move_document",
+            serde_json::json!({"src": "a.md", "dst": "b.md", "finding_code": 7}),
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, TypedOpError::MalformedFields { kind, .. } if kind == "move_document"),
+            "expected MalformedFields, got {err:?}"
+        );
     }
 
     #[test]

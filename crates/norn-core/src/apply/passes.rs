@@ -752,7 +752,7 @@ pub(crate) fn run_apply_passes(
     content_pass(&env, plan, &mut outcomes, sink, &mut phase_a_wrote);
     delete_pass(&env, plan, &mut outcomes, sink, &phase_a_wrote);
     create_pass(&env, plan, &mut outcomes, sink);
-    move_pass(&env, plan, &mut outcomes, sink);
+    move_pass(&env, plan, &mut outcomes, sink, &phase_a_wrote);
     cascade_pass(&env, plan, &mut outcomes);
     retry_pass(&env, plan, &mut outcomes, sink);
 
@@ -970,7 +970,7 @@ fn delete_pass(
             continue;
         }
         if !phase_a_wrote.contains(&change.path) {
-            if let Err(e) = transaction::fingerprint_delete(
+            if let Err(e) = transaction::fingerprint_vacate(
                 &env.cwd.join(&change.path),
                 &change.path,
                 &change.document_hash,
@@ -1207,7 +1207,20 @@ fn create_one(
 /// move_pass — INVARIANT: each `move_document` renames its file, after creates.
 /// Backlink rewrites are the separate cascade pass. A per-op failure records
 /// `failed`; independent moves still run.
-fn move_pass(env: &PassEnv, plan: &ApplyBatch, outcomes: &mut ApplyOutcomes, sink: &mut EventSink) {
+///
+/// Move CAS is OPTIONAL (ADR 0024): when the op carries a plan-time
+/// `document_hash`, the source file bytes are fingerprint-checked before the
+/// rename — a drifted source refuses `stale-document-hash`, the same class as the
+/// delete pass. An absent (empty) hash skips the check. The check is suppressed
+/// for a path this run's content pass already rewrote (`phase_a_wrote`): the
+/// plan hash intentionally no longer matches those bytes.
+fn move_pass(
+    env: &PassEnv,
+    plan: &ApplyBatch,
+    outcomes: &mut ApplyOutcomes,
+    sink: &mut EventSink,
+    phase_a_wrote: &BTreeSet<Utf8PathBuf>,
+) {
     use crate::telemetry::event;
     use crate::telemetry::Severity;
     for change in plan
@@ -1217,6 +1230,19 @@ fn move_pass(env: &PassEnv, plan: &ApplyBatch, outcomes: &mut ApplyOutcomes, sin
     {
         if gate_blocked(env, outcomes, change) {
             continue;
+        }
+        // Optional pre-rename fingerprint CAS against the source bytes. Skipped
+        // when the content pass already rewrote this path (the hash intentionally
+        // drifted) or when the op carries no hash.
+        if !phase_a_wrote.contains(&change.path) {
+            if let Err(e) = transaction::fingerprint_vacate(
+                &env.cwd.join(&change.path),
+                &change.path,
+                &change.document_hash,
+            ) {
+                outcomes.tracker.failed(&change.change_id, &change.path, e);
+                continue;
+            }
         }
         if env.dry_run {
             if let Some(destination) = change.destination.as_ref() {

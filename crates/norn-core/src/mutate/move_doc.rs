@@ -57,11 +57,20 @@ pub fn execute(
                 return Ok(refused(vault_root.to_string(), dry_run, refusal));
             }
         };
+        // Stamp the plan-time compare-and-swap hash from the index loaded at plan
+        // synthesis (ADR 0024) — the move pass fingerprint-checks the source
+        // before renaming. The source was just resolved out of this same index,
+        // so its hash is present.
+        let src_hash = index
+            .documents
+            .iter()
+            .find(|d| d.path == resolved_src)
+            .map(|d| d.hash.clone());
         let op = MigrationOp {
             kind: "move_document".into(),
             id: None,
             requires: Vec::new(),
-            fields: single_move_fields(&resolved_src, params),
+            fields: single_move_fields(&resolved_src, params, src_hash.as_deref()),
             footnote: None,
         };
         one_op_plan(vault_root.to_string(), op)
@@ -88,12 +97,18 @@ pub fn execute(
     })
 }
 
-/// Build the `move_document` op fields — this field set IS the wire contract,
-/// pinned by the move plan parity case (the `plan_hash` is
-/// `MigrationPlan::canonical_hash()`) for `--format json`. `src` (resolved) / `dst` / `parents` are
+/// Build the `move_document` op fields. `src` (resolved) / `dst` / `parents` are
 /// ALWAYS present; `force` and `no_link_rewrite` are added ONLY when set (donor
-/// `mcp/tools/move_doc.rs`).
-fn single_move_fields(resolved_src: &camino::Utf8Path, params: &norn_wire::MoveParams) -> Value {
+/// `mcp/tools/move_doc.rs`). `document_hash` — the plan-time CAS precondition
+/// (ADR 0024) — is added when the source resolves in the index (always, for a
+/// verb move). This field set feeds `MigrationPlan::canonical_hash()`; the
+/// added `document_hash` shifts that hash from the donor's (a deliberate,
+/// ledgered plan-byte divergence).
+fn single_move_fields(
+    resolved_src: &camino::Utf8Path,
+    params: &norn_wire::MoveParams,
+    document_hash: Option<&str>,
+) -> Value {
     let mut fields = serde_json::Map::new();
     fields.insert("src".into(), Value::String(resolved_src.to_string()));
     fields.insert("dst".into(), Value::String(params.to.clone()));
@@ -103,6 +118,9 @@ fn single_move_fields(resolved_src: &camino::Utf8Path, params: &norn_wire::MoveP
     }
     if params.no_link_rewrite {
         fields.insert("no_link_rewrite".into(), Value::Bool(true));
+    }
+    if let Some(hash) = document_hash {
+        fields.insert("document_hash".into(), Value::String(hash.to_string()));
     }
     Value::Object(fields)
 }
@@ -290,7 +308,8 @@ mod tests {
 
     // Field-set fidelity (donor `mcp/tools/move_doc.rs`, mirroring the donor's
     // `route.rs:165-168` omit-when-false assertions): `src`/`dst`/`parents` always
-    // present; `force`/`no_link_rewrite` present only when set. Pins the plan_hash
+    // present; `force`/`no_link_rewrite` present only when set; `document_hash`
+    // present when the source resolves in the index (ADR 0024). Pins the plan_hash
     // contract for `--format json` independent of the parity harness.
     #[test]
     fn move_fields_omit_false_force_and_no_link_rewrite() {
@@ -299,11 +318,32 @@ mod tests {
             to: "renamed.md".into(),
             ..Default::default()
         };
-        let f = single_move_fields(camino::Utf8Path::new("notes/b.md"), &p);
+        // No hash resolved (source absent from index): document_hash omitted.
+        let f = single_move_fields(camino::Utf8Path::new("notes/b.md"), &p, None);
         assert_eq!(
             f,
             serde_json::json!({"src": "notes/b.md", "dst": "renamed.md", "parents": false}),
             "false force/no_link_rewrite must be omitted; parents always present"
+        );
+    }
+
+    #[test]
+    fn move_fields_stamp_document_hash_when_present() {
+        let p = norn_wire::MoveParams {
+            from: "b".into(),
+            to: "renamed.md".into(),
+            ..Default::default()
+        };
+        let f = single_move_fields(camino::Utf8Path::new("notes/b.md"), &p, Some("cafef00d"));
+        assert_eq!(
+            f,
+            serde_json::json!({
+                "src": "notes/b.md",
+                "dst": "renamed.md",
+                "parents": false,
+                "document_hash": "cafef00d",
+            }),
+            "the plan-time CAS hash rides the move op fields (ADR 0024)"
         );
     }
 
@@ -317,7 +357,7 @@ mod tests {
             no_link_rewrite: true,
             ..Default::default()
         };
-        let f = single_move_fields(camino::Utf8Path::new("notes/b.md"), &p);
+        let f = single_move_fields(camino::Utf8Path::new("notes/b.md"), &p, Some("deadbeef"));
         assert_eq!(
             f,
             serde_json::json!({
@@ -326,6 +366,7 @@ mod tests {
                 "parents": true,
                 "force": true,
                 "no_link_rewrite": true,
+                "document_hash": "deadbeef",
             })
         );
     }

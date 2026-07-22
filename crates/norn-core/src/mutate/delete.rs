@@ -45,11 +45,20 @@ pub fn execute(
     // `null` as "no redirect", and classify_link_risk rewrites stem backlinks to
     // the new stem identically whether the arg is a stem or a path, so post-state
     // is unaffected; only the hashed field value must match.
+    // Stamp the REQUIRED plan-time compare-and-swap hash (ADR 0024 / NRN-151)
+    // from the index loaded at plan synthesis — the delete pass fingerprint-CASs
+    // the file bytes before removal. The target was just resolved out of this
+    // same index, so its hash is present.
+    let doc_hash = index
+        .documents
+        .iter()
+        .find(|d| d.path == doc_rel)
+        .map(|d| d.hash.clone());
     let op = MigrationOp {
         kind: "delete_document".into(),
         id: None,
         requires: Vec::new(),
-        fields: delete_fields(&doc_rel, params),
+        fields: delete_fields(&doc_rel, params, doc_hash.as_deref()),
         footnote: None,
     };
     let plan = MigrationPlan {
@@ -83,14 +92,20 @@ pub fn execute(
     })
 }
 
-/// Build the `delete_document` op fields — this field set IS the wire contract,
-/// pinned by the delete plan parity case (the `plan_hash` is
-/// `MigrationPlan::canonical_hash()`) for `--format json`. Field set + insertion order
-/// (`mcp/tools/delete.rs`): `path` (RESOLVED target), `rewrite_to` (the RAW arg,
-/// always present as a key — JSON `null` when absent, NOT the resolved path), and
-/// `allow_broken_links` (always present). `rewrite_to` as a stem-or-path does not
-/// change the cascade (classify_link_risk rewrites to the new stem either way).
-fn delete_fields(doc_rel: &camino::Utf8Path, params: &norn_wire::DeleteParams) -> Value {
+/// Build the `delete_document` op fields. Field set (`mcp/tools/delete.rs`):
+/// `path` (RESOLVED target), `rewrite_to` (the RAW arg, always present as a key —
+/// JSON `null` when absent, NOT the resolved path), `allow_broken_links` (always
+/// present), and `document_hash` — the REQUIRED plan-time CAS precondition (ADR
+/// 0024 / NRN-151) — added when the target resolves in the index (always, for a
+/// verb delete). This field set feeds `MigrationPlan::canonical_hash()`; the
+/// added `document_hash` shifts that hash from the donor's (a deliberate,
+/// ledgered plan-byte divergence). `rewrite_to` as a stem-or-path does not change
+/// the cascade (classify_link_risk rewrites to the new stem either way).
+fn delete_fields(
+    doc_rel: &camino::Utf8Path,
+    params: &norn_wire::DeleteParams,
+    document_hash: Option<&str>,
+) -> Value {
     let mut fields = Map::new();
     fields.insert("path".into(), Value::String(doc_rel.to_string()));
     fields.insert(
@@ -104,6 +119,9 @@ fn delete_fields(doc_rel: &camino::Utf8Path, params: &norn_wire::DeleteParams) -
         "allow_broken_links".into(),
         Value::Bool(params.allow_broken_links),
     );
+    if let Some(hash) = document_hash {
+        fields.insert("document_hash".into(), Value::String(hash.to_string()));
+    }
     Value::Object(fields)
 }
 
@@ -255,15 +273,17 @@ mod tests {
 
     // Field-set fidelity (donor `mcp/tools/delete.rs`): `path` (resolved),
     // `rewrite_to` (RAW arg, null when None), `allow_broken_links` (always
-    // present). Pins the plan_hash contract for `--format json`.
+    // present), `document_hash` when the target resolves (ADR 0024). Pins the
+    // plan_hash contract for `--format json`.
     #[test]
     fn delete_fields_carry_raw_rewrite_to_null_and_allow_broken() {
         let none = norn_wire::DeleteParams {
             target: "b".into(),
             ..Default::default()
         };
+        // No hash (target absent from index): document_hash omitted.
         assert_eq!(
-            delete_fields(camino::Utf8Path::new("b.md"), &none),
+            delete_fields(camino::Utf8Path::new("b.md"), &none, None),
             serde_json::json!({"path": "b.md", "rewrite_to": null, "allow_broken_links": false}),
             "rewrite_to is null (present) when absent; allow_broken_links always present"
         );
@@ -275,9 +295,9 @@ mod tests {
             confirm: true,
         };
         assert_eq!(
-            delete_fields(camino::Utf8Path::new("b.md"), &with),
-            serde_json::json!({"path": "b.md", "rewrite_to": "c", "allow_broken_links": false}),
-            "rewrite_to carries the RAW arg (not the resolved path); confirm is not a plan field"
+            delete_fields(camino::Utf8Path::new("b.md"), &with, Some("beefcafe")),
+            serde_json::json!({"path": "b.md", "rewrite_to": "c", "allow_broken_links": false, "document_hash": "beefcafe"}),
+            "rewrite_to carries the RAW arg (not the resolved path); the plan-time CAS hash rides when resolved; confirm is not a plan field"
         );
     }
 
