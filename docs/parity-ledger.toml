@@ -611,3 +611,23 @@ old = "a `move_document` op is never fingerprinted, so a plan-time `document_has
 new = "a present `document_hash` is a pre-rename compare-and-swap: a stale hash refuses `stale-document-hash` (exit 2) before the rename, the same drift-refusal class the delete and content paths already enforce (an absent hash still proceeds unchecked)"
 reason = "decided-better"
 decision = "docs/decisions/0024-one-applier-repair-as-planner.md"
+
+# NRN-164 (ADR 0010, decided-better): the section resolver accepts ATX-prefixed
+# heading anchors. It tries the anchor EXACTLY first (preserving every working
+# anchor, including heading text that legitimately begins with `#`), then — only
+# on a total miss, and only for an ATX-prefixed anchor (1-6 `#` + a space) —
+# retries on the heading TEXT with the prefix and any trailing closer stripped.
+# Level is syntax noise (a `## X` anchor resolves a `### X` heading). Silent
+# acceptance, per ADR 0010's forgiving-inputs doctrine. The oracle's resolver
+# requires the bare heading text and refuses the markdown form (`## X`) that
+# agents and humans naturally pass. All edit consumers inherit the fix through
+# the single resolver. See `crates/norn-frontmatter/src/section.rs`
+# (`resolve_section_in` exact-first + `atx_anchor_text`).
+[[entry]]
+id = "PD-130"
+surface = "edit --yes (forgiving ATX-prefixed heading anchor)"
+cases = ["edit-atx-prefixed-heading-anchor-diverge"]
+old = "the section resolver requires the bare heading text: a `replace_section` anchored on the natural markdown form `## Section One` refuses `heading not found: \"## Section One\"` (exit 2), write-free"
+new = "the resolver tries the anchor exactly, then strips a leading ATX prefix (and any trailing closer) on the miss and matches on heading TEXT (level is syntax noise): `## Section One` resolves the `Section One` section and the edit applies (exit 0)"
+reason = "decided-better"
+decision = "docs/decisions/0010-cli-grammar-forgiving-inputs.md"

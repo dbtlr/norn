@@ -73,11 +73,14 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // `delete_document` refuses `delete-hash-required` fail-closed where the
     // oracle proceeds) and PD-129 (decided-better: a present-but-stale
     // `document_hash` on a `move_document` refuses `stale-document-hash` before
-    // the rename — the optional move CAS the donor never had).
+    // the rename — the optional move CAS the donor never had). NRN-164 added
+    // PD-130 (decided-better: the section resolver accepts an ATX-prefixed
+    // heading anchor — `## Section One` resolves the `Section One` section where
+    // the oracle requires the bare text, one case).
     assert_eq!(
         ledger.entries.len(),
-        29,
-        "expected exactly PD-101..PD-129, found {}",
+        30,
+        "expected exactly PD-101..PD-130, found {}",
         ledger.entries.len()
     );
 
@@ -324,6 +327,13 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         .expect("the move stale-hash refusal case must resolve to an entry");
     assert_eq!(pd129.id, "PD-129");
     assert_eq!(pd129.reason, norn_parity::ledger::Reason::DecidedBetter);
+
+    // NRN-164 forgiving ATX-prefixed heading anchor (PD-130), decided-better.
+    let pd130 = ledger
+        .entry_for_case("edit-atx-prefixed-heading-anchor-diverge")
+        .expect("the ATX-prefixed heading anchor case must resolve to an entry");
+    assert_eq!(pd130.id, "PD-130");
+    assert_eq!(pd130.reason, norn_parity::ledger::Reason::DecidedBetter);
 }
 
 #[test]
