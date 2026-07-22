@@ -118,18 +118,18 @@ impl MigrationPlan {
 // ── typed op payloads ─────────────────────────────────────────────────────────
 //
 // The typed successor to indexing `MigrationOp.fields` at execution (ADR 0016 /
-// NRN-405 part b). Each structural payload struct mirrors the keys of the
-// `fields` object the on-disk plan carries; [`TypedOp::try_from`] reads those
-// keys by hand with the applier's prior tolerance (unknown fields ignored — a
-// repair-sourced op can carry harmless leftover keys). The structs are a
-// construction-time view, never serialized — typing the vocabulary does NOT
-// change the parity-pinned plan JSON.
+// NRN-405 part b, ADR 0022). Every op payload — the structural move/delete ops
+// AND the frontmatter/body change and section/body edit ops — resolves to a real
+// typed struct here; no `Map<String, Value>` payload rides on the plan path past
+// [`TypedOp::try_from`]. The interior crates (`planner::intent`) consume the typed
+// structs and adapt them into `norn-core`'s own `PlannedChange` at that boundary.
 //
-// The frontmatter/body change ops and the section/body edit ops carry payloads
-// that ARE `norn-core`'s own `PlannedChange` / `EditOp` models — types this crate
-// may not name (the dependency rule). Their [`TypedOp`] variants therefore carry
-// the raw `fields` object for the executor to deserialize into those core types;
-// the untyped map does not flow further than that one typed decode.
+// The structs mirror the keys of the `fields` object the on-disk plan carries.
+// They are a construction-time view, never serialized — typing the vocabulary does
+// NOT change the parity-pinned plan JSON (`MigrationOp.fields` stays the raw
+// `Value` envelope). `Value` survives ONLY at genuinely-arbitrary-JSON leaves
+// (`ChangeFields::expected_old_value` / `new_value` — a frontmatter value is any
+// JSON, exactly as `PlannedChange` types it), never as an opaque whole-op map.
 
 use serde_json::{Map, Value};
 
@@ -167,28 +167,95 @@ pub struct DeleteDocumentFields {
     pub rewrite_to: Option<String>,
 }
 
+/// The decoded `fields` of a frontmatter/body change op — the wire-owned mirror
+/// of the authored subset of `norn-core`'s `PlannedChange`. Decoded strictly: a
+/// wrong-typed member refuses (`MalformedFields`), never coerces. `path` is
+/// required; every other member is optional and defaults at the
+/// [`planner::intent`](../../norn_core/planner/intent/index.html) adapter boundary
+/// where the `PlannedChange` is built.
+///
+/// Finding linkage (`finding_code` / `repair_rule`) rides here as optional
+/// provenance: authored ops omit it (decoding to `None`); repair-sourced ops carry
+/// the real codes. The `operator-request` sentinel the interior model uses when
+/// linkage is absent is filled at that adapter boundary, not fabricated on the
+/// wire. `expected_old_value` / `new_value` stay `Value` — a frontmatter value is
+/// arbitrary JSON, the same leaf type `PlannedChange` carries.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ChangeFields {
+    pub path: String,
+    #[serde(default)]
+    pub change_id: Option<String>,
+    #[serde(default)]
+    pub document_hash: Option<String>,
+    #[serde(default)]
+    pub finding_code: Option<String>,
+    #[serde(default)]
+    pub finding_rule: Option<String>,
+    #[serde(default)]
+    pub repair_rule: Option<String>,
+    /// The write-dispatch discriminator when present. Refused later if it
+    /// disagrees with the op `kind`; filled from `kind` when absent.
+    #[serde(default)]
+    pub operation: Option<String>,
+    #[serde(default)]
+    pub field: Option<String>,
+    #[serde(default)]
+    pub expected_old_value: Option<Value>,
+    #[serde(default)]
+    pub new_value: Option<Value>,
+    #[serde(default)]
+    pub destination: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub parents: bool,
+}
+
 /// A frontmatter/body change op (`set_frontmatter` / `add_frontmatter` /
-/// `remove_frontmatter` / `rewrite_link` / `replace_body` / `create_document`).
-/// The payload IS `norn-core`'s `PlannedChange` shape (unnameable here), so the
-/// raw `fields` object rides through for the executor to deserialize.
+/// `remove_frontmatter` / `rewrite_link` / `replace_body` / `create_document`)
+/// with its [`ChangeFields`] payload decoded. `planner::intent` adapts the typed
+/// payload into a `norn-core` `PlannedChange` at the execution boundary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChangeOp {
     pub kind: String,
-    pub fields: Map<String, Value>,
+    pub fields: ChangeFields,
+}
+
+/// The decoded `fields` of a section/body edit op — the wire-owned mirror of the
+/// authored subset of a plan's section-edit payload (a `norn-core` `EditOp` body
+/// plus its addressing). `path` is pre-extracted (required) by
+/// [`TypedOp::try_from`]; the remaining members are the union of the section-edit
+/// op body fields, each decoded strictly so a wrong-typed member (a non-string
+/// `document_hash`, a non-bool `replace_all`) refuses rather than coerces. The
+/// interior adapter reassembles these into the `op`-tagged JSON the transform
+/// engine deserializes into its own `EditOp`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct EditFields {
+    #[serde(default)]
+    pub document_hash: Option<String>,
+    #[serde(default)]
+    pub old: Option<String>,
+    #[serde(default)]
+    pub new: Option<String>,
+    #[serde(default)]
+    pub replace_all: Option<bool>,
+    #[serde(default)]
+    pub heading: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
 }
 
 /// A section/body edit op (`str_replace` / `replace_section` /
 /// `append_to_section` / `delete_section` / `insert_before_heading` /
-/// `insert_after_heading`). The payload IS an `EditOp` (a `norn-core` type),
-/// carried raw; `path`/`document_hash` are pre-extracted for the executor's
-/// change envelope, and `id` supplies the change-id when present.
+/// `insert_after_heading`). `path` is pre-extracted for the executor's change
+/// envelope, `id` supplies the change-id when present, and [`EditFields`] carries
+/// the typed body.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditOp {
     pub kind: String,
     pub id: Option<String>,
     pub path: String,
-    pub document_hash: String,
-    pub fields: Map<String, Value>,
+    pub fields: EditFields,
 }
 
 /// The typed operation vocabulary the executor consumes — the resolved view of a
@@ -272,11 +339,19 @@ impl TryFrom<&MigrationOp> for TypedOp {
                     field,
                 })
         };
-        let bool_field = |field: &str| -> bool {
-            op.fields
-                .get(field)
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
+        // Strict boolean decode (ADR 0022): absent (or explicit `null`, the
+        // verbs' "unset" sentinel) → the historical `false` default;
+        // present-and-bool → its value; present-but-wrong-typed → refuse
+        // (`"force": "true"` is a malformed plan, not a silent `false`).
+        let bool_field = |field: &'static str| -> Result<bool, TypedOpError> {
+            match op.fields.get(field) {
+                None | Some(Value::Null) => Ok(false),
+                Some(Value::Bool(b)) => Ok(*b),
+                Some(_) => Err(TypedOpError::MalformedFields {
+                    kind: op.kind.clone(),
+                    message: format!("field `{field}` must be a boolean"),
+                }),
+            }
         };
         let object = || -> Result<Map<String, Value>, TypedOpError> {
             op.fields
@@ -286,12 +361,11 @@ impl TryFrom<&MigrationOp> for TypedOp {
                     kind: op.kind.clone(),
                 })
         };
-
         Ok(match op.kind.as_str() {
             "move_folder" => TypedOp::MoveFolder(MoveFolderFields {
                 src: str_field("src")?,
                 dst: str_field("dst")?,
-                parents: bool_field("parents"),
+                parents: bool_field("parents")?,
             }),
             "rewrite_wikilink" => TypedOp::RewriteWikilink(RewriteWikilinkFields {
                 old: str_field("old")?,
@@ -300,43 +374,74 @@ impl TryFrom<&MigrationOp> for TypedOp {
             "move_document" => TypedOp::MoveDocument(MoveDocumentFields {
                 src: str_field("src")?,
                 dst: str_field("dst")?,
-                parents: bool_field("parents"),
-                force: bool_field("force"),
-                no_link_rewrite: bool_field("no_link_rewrite"),
+                parents: bool_field("parents")?,
+                force: bool_field("force")?,
+                no_link_rewrite: bool_field("no_link_rewrite")?,
             }),
-            "delete_document" => TypedOp::DeleteDocument(DeleteDocumentFields {
-                path: str_field("path")?,
-                rewrite_to: op
-                    .fields
-                    .get("rewrite_to")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            }),
+            "delete_document" => {
+                let path = str_field("path")?;
+                // Strict `rewrite_to` (ADR 0022): absent, or explicit `null` (the
+                // delete verb's "no redirect" sentinel), → `None`; present-and-string
+                // → `Some`; present-but-wrong-typed → refuse (a non-string, non-null
+                // value is no longer indistinguishable from absent).
+                let rewrite_to = match op.fields.get("rewrite_to") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(s)) => Some(s.clone()),
+                    Some(_) => {
+                        return Err(TypedOpError::MalformedFields {
+                            kind: op.kind.clone(),
+                            message: "field `rewrite_to` must be a string".to_string(),
+                        })
+                    }
+                };
+                TypedOp::DeleteDocument(DeleteDocumentFields { path, rewrite_to })
+            }
             "set_frontmatter" | "add_frontmatter" | "remove_frontmatter" | "rewrite_link"
-            | "replace_body" | "create_document" => TypedOp::Change(ChangeOp {
-                kind: op.kind.clone(),
-                fields: object()?,
-            }),
+            | "replace_body" | "create_document" => {
+                // Non-object `fields` refuses identically on every arm (FieldsNotObject
+                // BEFORE any member decode).
+                let obj = object()?;
+                // Required `path` refuses `MissingField` like the edit and delete
+                // arms (a non-string `path` is treated as missing, matching them),
+                // rather than surfacing as serde's generic missing-field text.
+                str_field("path")?;
+                let fields: ChangeFields =
+                    serde_json::from_value(Value::Object(obj)).map_err(|e| {
+                        TypedOpError::MalformedFields {
+                            kind: op.kind.clone(),
+                            message: e.to_string(),
+                        }
+                    })?;
+                TypedOp::Change(ChangeOp {
+                    kind: op.kind.clone(),
+                    fields,
+                })
+            }
             "str_replace"
             | "replace_section"
             | "append_to_section"
             | "delete_section"
             | "insert_before_heading"
             | "insert_after_heading" => {
-                // `path` is required (matches the executor's `{kind} missing path`).
+                // FieldsNotObject BEFORE the required-field read, so a non-object
+                // `fields` refuses `FieldsNotObject` here too (was misreported as
+                // `missing path`).
+                let obj = object()?;
+                // `path` is required (matches the executor's `{kind} missing path`);
+                // a non-string `path` is treated as missing, as before.
                 let path = str_field("path")?;
-                let document_hash = op
-                    .fields
-                    .get("document_hash")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
+                let fields: EditFields =
+                    serde_json::from_value(Value::Object(obj)).map_err(|e| {
+                        TypedOpError::MalformedFields {
+                            kind: op.kind.clone(),
+                            message: e.to_string(),
+                        }
+                    })?;
                 TypedOp::Edit(EditOp {
                     kind: op.kind.clone(),
                     id: op.id.clone(),
                     path,
-                    document_hash,
-                    fields: object()?,
+                    fields,
                 })
             }
             other => return Err(TypedOpError::UnknownKind(other.to_string())),
@@ -445,6 +550,231 @@ operations:
             serialized["preconditions"][0]["selector"]["eq"],
             serde_json::json!(["type:project", "key:MMR"])
         );
+    }
+
+    // ── typed op payload decode (ADR 0022) ────────────────────────────────────
+
+    fn op(kind: &str, fields: serde_json::Value) -> MigrationOp {
+        MigrationOp {
+            kind: kind.into(),
+            id: None,
+            requires: vec![],
+            fields,
+            footnote: None,
+        }
+    }
+
+    #[test]
+    fn move_document_decodes_bools_and_defaults_absent() {
+        let o = op(
+            "move_document",
+            serde_json::json!({"src": "a.md", "dst": "b.md", "parents": true}),
+        );
+        let TypedOp::MoveDocument(f) = TypedOp::try_from(&o).unwrap() else {
+            panic!("expected MoveDocument");
+        };
+        assert_eq!(f.src, "a.md");
+        assert_eq!(f.dst, "b.md");
+        assert!(f.parents);
+        // `force` / `no_link_rewrite` absent → false (historical default).
+        assert!(!f.force);
+        assert!(!f.no_link_rewrite);
+    }
+
+    #[test]
+    fn strict_bool_refuses_wrong_typed_force() {
+        // `"force": "true"` (a string) previously coerced to a silent `false`;
+        // it now refuses with a precise `MalformedFields` (ADR 0022 F5).
+        let o = op(
+            "move_document",
+            serde_json::json!({"src": "a.md", "dst": "b.md", "force": "true"}),
+        );
+        let err = TypedOp::try_from(&o).unwrap_err();
+        assert!(
+            matches!(&err, TypedOpError::MalformedFields { kind, .. } if kind == "move_document"),
+            "expected MalformedFields, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn strict_bool_refuses_wrong_typed_parents_and_no_link_rewrite() {
+        for field in ["parents", "no_link_rewrite"] {
+            let mut fields = serde_json::json!({"src": "a.md", "dst": "b.md"});
+            fields[field] = serde_json::json!(1); // a number, not a bool
+            let err = TypedOp::try_from(&op("move_document", fields)).unwrap_err();
+            assert!(
+                matches!(&err, TypedOpError::MalformedFields { .. }),
+                "expected MalformedFields for {field}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_bool_treats_null_as_absent_default() {
+        // `null` is the verbs' "unset" sentinel — historically coerced to the
+        // default, so it must NOT refuse.
+        let o = op(
+            "move_document",
+            serde_json::json!({"src": "a.md", "dst": "b.md", "no_link_rewrite": null}),
+        );
+        let TypedOp::MoveDocument(f) = TypedOp::try_from(&o).unwrap() else {
+            panic!("expected MoveDocument");
+        };
+        assert!(!f.no_link_rewrite);
+    }
+
+    #[test]
+    fn delete_rewrite_to_string_null_and_wrong_typed() {
+        // present-and-string → Some
+        let TypedOp::DeleteDocument(f) = TypedOp::try_from(&op(
+            "delete_document",
+            serde_json::json!({"path": "b.md", "rewrite_to": "c.md"}),
+        ))
+        .unwrap() else {
+            panic!("expected DeleteDocument");
+        };
+        assert_eq!(f.rewrite_to.as_deref(), Some("c.md"));
+
+        // explicit null (the delete verb's no-redirect sentinel) → None
+        let TypedOp::DeleteDocument(f) = TypedOp::try_from(&op(
+            "delete_document",
+            serde_json::json!({"path": "b.md", "rewrite_to": null}),
+        ))
+        .unwrap() else {
+            panic!("expected DeleteDocument");
+        };
+        assert_eq!(f.rewrite_to, None);
+
+        // present-but-wrong-typed (a number) → refuse, no longer silently `None`
+        let err = TypedOp::try_from(&op(
+            "delete_document",
+            serde_json::json!({"path": "b.md", "rewrite_to": 5}),
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, TypedOpError::MalformedFields { kind, .. } if kind == "delete_document"),
+            "expected MalformedFields, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn edit_document_hash_absent_string_and_wrong_typed() {
+        // absent → resolved to "" at the adapter boundary (fields carries None)
+        let TypedOp::Edit(e) = TypedOp::try_from(&op(
+            "str_replace",
+            serde_json::json!({"path": "a.md", "old": "x", "new": "y"}),
+        ))
+        .unwrap() else {
+            panic!("expected Edit");
+        };
+        assert_eq!(e.path, "a.md");
+        assert_eq!(e.fields.document_hash, None);
+        assert_eq!(e.fields.old.as_deref(), Some("x"));
+
+        // present-and-string → Some
+        let TypedOp::Edit(e) = TypedOp::try_from(&op(
+            "str_replace",
+            serde_json::json!({"path": "a.md", "old": "x", "new": "y", "document_hash": "deadbeef"}),
+        ))
+        .unwrap() else {
+            panic!("expected Edit");
+        };
+        assert_eq!(e.fields.document_hash.as_deref(), Some("deadbeef"));
+
+        // present-but-wrong-typed (a number) → refuse (was silently coerced to "")
+        let err = TypedOp::try_from(&op(
+            "str_replace",
+            serde_json::json!({"path": "a.md", "old": "x", "new": "y", "document_hash": 5}),
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(&err, TypedOpError::MalformedFields { kind, .. } if kind == "str_replace"),
+            "expected MalformedFields, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn non_object_fields_refuse_fields_not_object_on_every_arm() {
+        // Change arm and edit arm both report FieldsNotObject for a non-object
+        // `fields` — the edit arm previously misreported it as `missing path`.
+        for kind in ["set_frontmatter", "str_replace"] {
+            let err = TypedOp::try_from(&op(kind, serde_json::json!("not-an-object"))).unwrap_err();
+            assert!(
+                matches!(&err, TypedOpError::FieldsNotObject { kind: k } if k == kind),
+                "expected FieldsNotObject for {kind}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_missing_path_is_missing_field_not_malformed() {
+        // An object `fields` without `path` keeps the `{kind} missing path`
+        // contract (MissingField), distinct from the non-object FieldsNotObject.
+        let err = TypedOp::try_from(&op(
+            "append_to_section",
+            serde_json::json!({"heading": "Tasks", "content": "- x"}),
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            TypedOpError::MissingField {
+                kind: "append_to_section".into(),
+                field: "path"
+            }
+        );
+    }
+
+    #[test]
+    fn change_missing_path_is_missing_field_not_malformed() {
+        // The change arm keeps the same `{kind} missing path` contract as the
+        // edit and delete arms — not serde's generic missing-field text wrapped
+        // in MalformedFields. A non-string `path` is treated as missing, like
+        // the edit arm.
+        for fields in [
+            serde_json::json!({"field": "status", "new_value": "done"}),
+            serde_json::json!({"path": 5, "field": "status", "new_value": "done"}),
+        ] {
+            let err = TypedOp::try_from(&op("set_frontmatter", fields)).unwrap_err();
+            assert_eq!(
+                err,
+                TypedOpError::MissingField {
+                    kind: "set_frontmatter".into(),
+                    field: "path"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn change_fields_carry_optional_finding_linkage() {
+        // Repair-sourced ops carry real linkage; it decodes to typed Options.
+        let TypedOp::Change(c) = TypedOp::try_from(&op(
+            "rewrite_link",
+            serde_json::json!({
+                "path": "a.md",
+                "finding_code": "link-target-missing",
+                "repair_rule": "closest-match"
+            }),
+        ))
+        .unwrap() else {
+            panic!("expected Change");
+        };
+        assert_eq!(
+            c.fields.finding_code.as_deref(),
+            Some("link-target-missing")
+        );
+        assert_eq!(c.fields.repair_rule.as_deref(), Some("closest-match"));
+
+        // Authored ops omit it → None (no `operator-request` fabricated on the wire).
+        let TypedOp::Change(c) = TypedOp::try_from(&op(
+            "set_frontmatter",
+            serde_json::json!({"path": "a.md", "field": "title", "new_value": "T"}),
+        ))
+        .unwrap() else {
+            panic!("expected Change");
+        };
+        assert_eq!(c.fields.finding_code, None);
+        assert_eq!(c.fields.repair_rule, None);
     }
 
     #[test]

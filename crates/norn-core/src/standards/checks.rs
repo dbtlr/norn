@@ -422,7 +422,6 @@ pub(crate) fn check_links(document: &Document) -> Vec<Finding> {
 mod tests {
     use super::*;
     use crate::standards::config::FieldTypeSpec;
-    use crate::standards::findings::FindingBody;
     use serde_json::json;
 
     fn doc_with_frontmatter(fm: serde_json::Value) -> Document {
@@ -456,19 +455,14 @@ mod tests {
         let findings = check_field_types(&doc, &types, None);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].code, "frontmatter-exceeds-max-length");
-        match &findings[0].body {
-            FindingBody::ExceedsMaxLength {
-                field,
-                max_length,
-                actual_length,
-                ..
-            } => {
-                assert_eq!(field, "project");
-                assert_eq!(*max_length, 5);
-                assert_eq!(*actual_length, 7);
-            }
-            other => panic!("expected ExceedsMaxLength, got {other:?}"),
-        }
+        // The max_length / actual_length detail folded into the message (ADR
+        // 0022): `field` keeps its slot, the bounds ride the message.
+        assert_eq!(findings[0].field.as_deref(), Some("project"));
+        assert!(
+            findings[0].message.contains("(7 > 5)"),
+            "message should carry the length bounds: {}",
+            findings[0].message
+        );
     }
 
     #[test]
@@ -495,10 +489,11 @@ mod tests {
         let findings = check_field_types(&doc, &types, None);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].code, "frontmatter-exceeds-max-length");
-        match &findings[0].body {
-            FindingBody::ExceedsMaxLength { actual_length, .. } => assert_eq!(*actual_length, 7),
-            other => panic!("expected ExceedsMaxLength, got {other:?}"),
-        }
+        assert!(
+            findings[0].message.contains("(7 > 3)"),
+            "message should carry the over-length element bound: {}",
+            findings[0].message
+        );
     }
 
     #[test]
@@ -542,19 +537,15 @@ mod tests {
             let finding = check_portable_filename(&doc)
                 .unwrap_or_else(|| panic!("expected a finding for illegal char {ch:?}"));
             assert_eq!(finding.code, "nonportable-filename");
-            match &finding.body {
-                FindingBody::NonportableFilename { issues } => {
-                    assert_eq!(issues.len(), 1);
-                    let expected_segment = format!("bad{ch}name.md");
-                    assert!(
-                        issues[0].contains(&expected_segment),
-                        "issue should name the offending segment '{expected_segment}': {}",
-                        issues[0]
-                    );
-                    assert!(issues[0].contains(&ch.to_string()));
-                }
-                other => panic!("expected NonportableFilename, got {other:?}"),
-            }
+            let issues = &finding.issues;
+            assert_eq!(issues.len(), 1);
+            let expected_segment = format!("bad{ch}name.md");
+            assert!(
+                issues[0].contains(&expected_segment),
+                "issue should name the offending segment '{expected_segment}': {}",
+                issues[0]
+            );
+            assert!(issues[0].contains(&ch.to_string()));
         }
     }
 
@@ -562,41 +553,29 @@ mod tests {
     fn portable_filename_flags_leading_space_segment() {
         let doc = doc_with_path(" leading-space/note.md");
         let finding = check_portable_filename(&doc).expect("expected a finding");
-        match &finding.body {
-            FindingBody::NonportableFilename { issues } => {
-                assert_eq!(issues.len(), 1);
-                assert!(issues[0].contains("leading space"));
-                assert!(issues[0].contains(" leading-space"));
-            }
-            other => panic!("expected NonportableFilename, got {other:?}"),
-        }
+        let issues = &finding.issues;
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("leading space"));
+        assert!(issues[0].contains(" leading-space"));
     }
 
     #[test]
     fn portable_filename_flags_trailing_space_segment() {
         let doc = doc_with_path("notes/trailing-space.md ");
         let finding = check_portable_filename(&doc).expect("expected a finding");
-        match &finding.body {
-            FindingBody::NonportableFilename { issues } => {
-                assert_eq!(issues.len(), 1);
-                assert!(issues[0].contains("trailing space"));
-            }
-            other => panic!("expected NonportableFilename, got {other:?}"),
-        }
+        let issues = &finding.issues;
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("trailing space"));
     }
 
     #[test]
     fn portable_filename_flags_trailing_dot_segment() {
         let doc = doc_with_path("notes/trailing-dot./note.md");
         let finding = check_portable_filename(&doc).expect("expected a finding");
-        match &finding.body {
-            FindingBody::NonportableFilename { issues } => {
-                assert_eq!(issues.len(), 1);
-                assert!(issues[0].contains("trailing dot"));
-                assert!(issues[0].contains("trailing-dot."));
-            }
-            other => panic!("expected NonportableFilename, got {other:?}"),
-        }
+        let issues = &finding.issues;
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].contains("trailing dot"));
+        assert!(issues[0].contains("trailing-dot."));
     }
 
     #[test]
@@ -606,12 +585,8 @@ mod tests {
         let doc = doc_with_path("weird:name?.dir/trailing-dot./note.md");
         let finding = check_portable_filename(&doc).expect("expected a finding");
         assert_eq!(finding.code, "nonportable-filename");
-        match &finding.body {
-            FindingBody::NonportableFilename { issues } => {
-                assert_eq!(issues.len(), 3, "expected 3 issues, got: {issues:?}");
-            }
-            other => panic!("expected NonportableFilename, got {other:?}"),
-        }
+        let issues = &finding.issues;
+        assert_eq!(issues.len(), 3, "expected 3 issues, got: {issues:?}");
     }
 
     #[test]

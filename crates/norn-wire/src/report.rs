@@ -129,6 +129,8 @@ impl ApplyReport {
                 footnote: None,
                 cascade: None,
                 link_impact: None,
+                finding_code: None,
+                repair_rule: None,
             }],
             warnings: Vec::new(),
             outcome: ApplyOutcome::Refused,
@@ -195,6 +197,19 @@ pub struct ApplyReportOp {
     /// serialized bytes are unchanged.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub link_impact: Option<LinkImpact>,
+    /// Finding-provenance linkage echoed verbatim from the op that produced this
+    /// record (ADR 0022): the validation finding code a repair-generated op is
+    /// resolving. Present only when the op carried it (repair-sourced plans);
+    /// `None` — and thus absent from the JSON — for verb-synthesized and authored
+    /// ops that declare no linkage, so existing verb-driven report bytes are
+    /// unchanged. Carried for provenance only; the applier never reads it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub finding_code: Option<String>,
+    /// Finding-provenance linkage echoed verbatim from the op (ADR 0022): the
+    /// repair rule the op applies. Present/absent on the same terms as
+    /// [`ApplyReportOp::finding_code`]; provenance only, never read for behavior.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repair_rule: Option<String>,
 }
 
 /// Index-derived, planning-time incoming-link impact of a `delete_document` op
@@ -369,6 +384,8 @@ mod tests {
                 footnote: None,
                 cascade: None,
                 link_impact: None,
+                finding_code: None,
+                repair_rule: None,
             }],
             warnings: vec![],
             outcome: ApplyOutcome::Applied,
@@ -474,6 +491,8 @@ mod tests {
                 failures: vec![],
             }),
             link_impact: None,
+            finding_code: None,
+            repair_rule: None,
         };
         let json = serde_json::to_value(&op).unwrap();
         assert_eq!(json["cascade"]["planned"], 3);
@@ -494,6 +513,8 @@ mod tests {
             footnote: None,
             cascade: None,
             link_impact: None,
+            finding_code: None,
+            repair_rule: None,
         };
         let bare_json = serde_json::to_value(&bare).unwrap();
         assert!(bare_json.get("cascade").is_none());
@@ -516,6 +537,8 @@ mod tests {
             footnote: None,
             cascade: None,
             link_impact: None,
+            finding_code: None,
+            repair_rule: None,
         };
         let bare_json = serde_json::to_value(&bare).unwrap();
         assert!(bare_json.get("path").is_none(), "path omitted when None");
@@ -533,6 +556,8 @@ mod tests {
             footnote: None,
             cascade: None,
             link_impact: None,
+            finding_code: None,
+            repair_rule: None,
         };
         let pop_json = serde_json::to_value(&populated).unwrap();
         assert_eq!(pop_json["path"], "tasks/task-7.md");
@@ -584,6 +609,8 @@ mod tests {
             footnote: None,
             cascade: None,
             link_impact: None,
+            finding_code: None,
+            repair_rule: None,
         };
         let sibling_json = serde_json::to_value(&sibling).unwrap();
         assert!(
@@ -607,6 +634,8 @@ mod tests {
                 incoming_files: vec!["x.md".into(), "y.md".into()],
                 redirect_to: None,
             }),
+            finding_code: None,
+            repair_rule: None,
         };
         let del_json = serde_json::to_value(&deleted).unwrap();
         assert_eq!(del_json["link_impact"]["incoming_total"], 2);

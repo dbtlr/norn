@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 use crate::domain::display;
 use crate::standards::path_match::PathPattern;
-use crate::standards::{Finding, FindingBody};
+use crate::standards::Finding;
 use anyhow::{bail, Result};
 
 #[derive(Debug)]
@@ -167,87 +167,36 @@ fn severity_key(finding: &Finding) -> &'static str {
 }
 
 fn finding_field(finding: &Finding) -> Option<&str> {
-    match &finding.body {
-        FindingBody::RequiredFrontmatterMissing { field, .. }
-        | FindingBody::DisallowedValue { field, .. }
-        | FindingBody::InvalidFieldType { field, .. }
-        | FindingBody::ExceedsMaxLength { field, .. }
-        | FindingBody::ForbiddenField { field, .. }
-        | FindingBody::AliasMalformed { field, .. }
-        | FindingBody::ReferenceType { field, .. } => Some(field),
-        FindingBody::GraphDiagnostic { .. }
-        | FindingBody::LinkIssue { .. }
-        | FindingBody::DocumentMisrouted { .. }
-        | FindingBody::AliasShadowedByStem { .. }
-        | FindingBody::AliasDuplicateAcrossDocs { .. }
-        | FindingBody::NonportableFilename { .. } => None,
-    }
+    finding.field.as_deref()
 }
 
 fn finding_rule(finding: &Finding) -> Option<&str> {
-    match &finding.body {
-        FindingBody::RequiredFrontmatterMissing { rule, .. }
-        | FindingBody::DisallowedValue { rule, .. }
-        | FindingBody::InvalidFieldType { rule, .. }
-        | FindingBody::ExceedsMaxLength { rule, .. }
-        | FindingBody::ForbiddenField { rule, .. }
-        | FindingBody::DocumentMisrouted { rule, .. }
-        | FindingBody::ReferenceType { rule, .. } => rule.as_deref(),
-        FindingBody::GraphDiagnostic { .. }
-        | FindingBody::LinkIssue { .. }
-        | FindingBody::AliasMalformed { .. }
-        | FindingBody::AliasShadowedByStem { .. }
-        | FindingBody::AliasDuplicateAcrossDocs { .. }
-        | FindingBody::NonportableFilename { .. } => None,
-    }
+    finding.rule.as_deref()
 }
 
 fn finding_target(finding: &Finding) -> Option<&str> {
-    match &finding.body {
-        FindingBody::LinkIssue { link } => Some(&link.target),
-        _ => None,
-    }
+    finding.target.as_deref()
 }
 
 fn finding_reason(finding: &Finding) -> Option<&'static str> {
-    let reason = match &finding.body {
-        FindingBody::LinkIssue { link } => link.unresolved_reason.as_ref()?,
-        _ => return None,
-    };
-
-    Some(display::unresolved_reason_str(reason))
+    finding.reason.as_ref().map(display::unresolved_reason_str)
 }
 
 #[cfg(test)]
 mod glob_match_tests {
     use super::*;
-    use crate::domain::{Link, LinkKind, LinkStatus, Severity, UnresolvedReason};
-    use crate::standards::{Finding, FindingBody};
+    use crate::standards::Finding;
 
     fn link_finding(code: &str) -> Finding {
-        Finding {
-            code: code.to_string(),
-            severity: Severity::Warning,
-            path: "doc.md".into(),
-            message: String::new(),
-            body: FindingBody::LinkIssue {
-                link: Link {
-                    source_path: "doc.md".into(),
-                    raw: "[[x]]".into(),
-                    kind: LinkKind::Wikilink,
-                    target: "x".into(),
-                    label: None,
-                    anchor: None,
-                    block_ref: None,
-                    source_span: None,
-                    source_context: None,
-                    resolved_path: None,
-                    unresolved_reason: Some(UnresolvedReason::TargetMissing),
-                    candidates: vec![],
-                    status: LinkStatus::Unresolved,
-                },
-            },
-        }
+        // A link finding carrying a target + reason, tagged with an explicit
+        // code so the code/target/reason filter matrix can exercise it.
+        let mut finding = Finding::from_graph_diagnostic(
+            "doc.md".into(),
+            crate::domain::Diagnostic::warning(code, ""),
+        );
+        finding.target = Some("x".into());
+        finding.reason = Some(crate::domain::UnresolvedReason::TargetMissing);
+        finding
     }
 
     fn opts<'a>(codes: &'a [String]) -> ValidateFilterOptions<'a> {

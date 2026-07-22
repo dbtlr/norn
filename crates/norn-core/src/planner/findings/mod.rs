@@ -150,8 +150,8 @@ pub(crate) fn plan_from_findings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Link, LinkKind, LinkStatus, Severity, UnresolvedReason};
-    use crate::standards::{Finding, FindingBody};
+    use crate::domain::{Link, LinkKind, LinkStatus, UnresolvedReason};
+    use crate::standards::Finding;
 
     fn vault_root() -> Utf8PathBuf {
         "/vault".into()
@@ -203,18 +203,13 @@ mod tests {
     }
 
     fn finding_disallowed_value(path: &str, field: &str, value: serde_json::Value) -> Finding {
-        Finding {
-            code: "value-not-allowed".into(),
-            severity: Severity::Warning,
-            path: path.into(),
-            message: format!("frontmatter field has a disallowed value: {field}"),
-            body: FindingBody::DisallowedValue {
-                rule: Some("test-rule".into()),
-                field: field.into(),
-                actual_value: value,
-                allowed_values: vec![serde_json::json!("allowed")],
-            },
-        }
+        Finding::frontmatter_disallowed_value(
+            path.into(),
+            Some("test-rule".into()),
+            field.into(),
+            value,
+            vec![serde_json::json!("allowed")],
+        )
     }
 
     #[test]

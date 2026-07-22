@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::standards::config::{RepairAction, RepairConfig, RepairRule, RepairRuleMatch};
-use crate::standards::findings::{Finding, FindingBody};
+use crate::standards::findings::Finding;
 
 pub const REPAIR_PLAN_SCHEMA_VERSION: u32 = 9;
 
@@ -275,10 +275,11 @@ fn handle_closest_match(
     occurrence_counts: &mut BTreeMap<(Utf8PathBuf, String, String), u32>,
     medium_threshold: f64,
 ) -> ClosestMatchOutcome {
-    let FindingBody::LinkIssue { link } = &finding.body else {
+    // Only reached for `link-target-missing` findings, which always carry a
+    // target; a finding lacking one has no broken link to closest-match.
+    let Some(broken_target) = finding.target.as_deref() else {
         return ClosestMatchOutcome::NoMatch;
     };
-    let broken_target = link.target.as_str();
 
     let outcome = closest_match::closest_match(broken_target, stem_corpus, medium_threshold);
 
@@ -409,7 +410,7 @@ pub fn plan_repairs(
         // they must not be matchable by field-/rule-scoped repair rules —
         // a code-less `match: { field: parent }` rule would otherwise
         // overwrite the reference with a fixed value.
-        if matches!(finding.body, FindingBody::ReferenceType { .. }) {
+        if finding.code == "frontmatter-reference-type" {
             skipped.push(skipped_finding(finding, SkipReason::NoRuleMatched, None));
             continue;
         }
@@ -505,7 +506,7 @@ pub fn plan_repairs(
                         }
                     }
                 } else {
-                    let skip = skip_reason_for_body(&finding.body);
+                    let skip = skip_reason_for_finding(finding);
                     skipped.push(skipped_finding(finding, skip, None));
                 }
             }
@@ -701,26 +702,28 @@ fn planned_change(
     })
 }
 
-/// Derive the fine-grained `SkipReason` variant from a finding's body.
-/// Used at emit sites that previously emitted the coarse `Unsupported` or `Ambiguous` variants.
-fn skip_reason_for_body(body: &FindingBody) -> SkipReason {
-    match body {
-        FindingBody::LinkIssue { link } if link.status == crate::domain::LinkStatus::Ambiguous => {
-            SkipReason::AmbiguousTarget
+/// Derive the fine-grained `SkipReason` from a finding's code (ADR 0022: repair
+/// keys on codes, not on a variant body). Link findings split on the ambiguous
+/// code; every code that is neither a known frontmatter/link/alias/nonportable
+/// finding is a graph diagnostic (the open-set fallback).
+fn skip_reason_for_finding(finding: &Finding) -> SkipReason {
+    match finding.code.as_str() {
+        "link-ambiguous" => SkipReason::AmbiguousTarget,
+        "link-target-missing" | "link-anchor-missing" | "link-block-missing" => {
+            SkipReason::LinkDecisionNeeded
         }
-        FindingBody::LinkIssue { .. } => SkipReason::LinkDecisionNeeded,
-        FindingBody::RequiredFrontmatterMissing { .. } => SkipReason::MissingDefault,
-        FindingBody::DisallowedValue { .. }
-        | FindingBody::InvalidFieldType { .. }
-        | FindingBody::ExceedsMaxLength { .. }
-        | FindingBody::ForbiddenField { .. }
-        | FindingBody::DocumentMisrouted { .. }
-        | FindingBody::ReferenceType { .. }
-        | FindingBody::AliasMalformed { .. }
-        | FindingBody::AliasDuplicateAcrossDocs { .. }
-        | FindingBody::NonportableFilename { .. } => SkipReason::NoRuleMatched,
-        FindingBody::AliasShadowedByStem { .. } => SkipReason::AliasShadowed,
-        FindingBody::GraphDiagnostic { .. } => SkipReason::GraphDiagnostic,
+        "frontmatter-required-field-missing" => SkipReason::MissingDefault,
+        "value-not-allowed"
+        | "field-type-invalid"
+        | "frontmatter-exceeds-max-length"
+        | "frontmatter-forbidden-field"
+        | "document-misrouted"
+        | "frontmatter-reference-type"
+        | "frontmatter-alias-malformed"
+        | "frontmatter-alias-duplicate-across-docs"
+        | "nonportable-filename" => SkipReason::NoRuleMatched,
+        "frontmatter-alias-shadowed-by-stem" => SkipReason::AliasShadowed,
+        _ => SkipReason::GraphDiagnostic,
     }
 }
 
@@ -729,8 +732,9 @@ fn skipped_finding(
     skip_reason: SkipReason,
     reason_override: Option<String>,
 ) -> SkippedFinding {
-    let (reason, next_actions) = match &finding.body {
-        FindingBody::LinkIssue { link } if link.status == crate::domain::LinkStatus::Ambiguous => (
+    let field = finding.field.as_deref().unwrap_or("");
+    let (reason, next_actions) = match finding.code.as_str() {
+        "link-ambiguous" => (
             "ambiguous link target".to_string(),
             vec![
                 "change the link to an explicit path".to_string(),
@@ -738,7 +742,7 @@ fn skipped_finding(
                 "rerun repair plan after disambiguation".to_string(),
             ],
         ),
-        FindingBody::LinkIssue { .. } => (
+        "link-target-missing" | "link-anchor-missing" | "link-block-missing" => (
             "link repair requires an explicit path/link decision".to_string(),
             vec![
                 "create the missing target or target anchor".to_string(),
@@ -746,85 +750,90 @@ fn skipped_finding(
                 "rerun validate after resolving the link".to_string(),
             ],
         ),
-        FindingBody::RequiredFrontmatterMissing { field, .. } => (
+        "frontmatter-required-field-missing" => (
             "missing field has no configured deterministic default".to_string(),
             vec![
                 format!("add a repair rule that sets {field} when safe"),
                 "fill the field manually and rerun validate".to_string(),
             ],
         ),
-        FindingBody::DisallowedValue { field, .. }
-        | FindingBody::InvalidFieldType { field, .. }
-        | FindingBody::ExceedsMaxLength { field, .. }
-        | FindingBody::ForbiddenField { field, .. } => (
+        "value-not-allowed"
+        | "field-type-invalid"
+        | "frontmatter-exceeds-max-length"
+        | "frontmatter-forbidden-field" => (
             "no configured deterministic repair rule matched".to_string(),
             vec![
                 format!("add a repair rule for field {field}"),
                 "rerun repair plan after updating config".to_string(),
             ],
         ),
-        FindingBody::ReferenceType {
-            field,
-            allowed_types,
-            ..
-        } => (
+        "frontmatter-reference-type" => (
             "typed-reference violation cannot be repaired deterministically".to_string(),
             vec![
                 format!(
                     "repoint '{field}' at a document whose type is one of: {}",
-                    allowed_types.join(", ")
+                    finding.allowed_types.join(", ")
                 ),
                 "or change the target document's type if the reference is right".to_string(),
                 "rerun validate after fixing the reference".to_string(),
             ],
         ),
-        FindingBody::DocumentMisrouted { .. } => (
+        "document-misrouted" => (
             "no configured move_document repair rule matched this misrouted document".to_string(),
             vec![
                 "review allowed_paths and current document location".to_string(),
                 "add a move_document repair rule matching this finding's code".to_string(),
             ],
         ),
-        FindingBody::GraphDiagnostic { .. } => (
-            "graph diagnostic cannot be repaired deterministically".to_string(),
-            vec![
-                "inspect the diagnostic detail".to_string(),
-                "fix the document manually and rerun validate".to_string(),
-            ],
-        ),
-        FindingBody::AliasMalformed { field, .. } => (
+        "frontmatter-alias-malformed" => (
             "malformed alias entries cannot be repaired deterministically".to_string(),
             vec![
                 format!("edit the '{field}' frontmatter list to contain only scalar strings"),
                 "rerun validate after fixing the entries".to_string(),
             ],
         ),
-        FindingBody::AliasShadowedByStem {
-            alias_value,
-            shadowing_doc_path,
-        } => (
-            "alias shadowed by a doc stem cannot be repaired deterministically".to_string(),
-            vec![
-                format!(
-                    "remove or rename alias '{alias_value}' on this doc, or rename {shadowing_doc_path} to free the stem"
-                ),
-                "rerun validate after fixing the conflict".to_string(),
-            ],
-        ),
-        FindingBody::AliasDuplicateAcrossDocs { alias_value, .. } => (
-            "alias duplicated across docs cannot be repaired deterministically".to_string(),
-            vec![
-                format!(
-                    "pick a canonical doc for alias '{alias_value}', remove the alias from the others"
-                ),
-                "rerun validate after fixing the conflict".to_string(),
-            ],
-        ),
-        FindingBody::NonportableFilename { issues } => (
+        "frontmatter-alias-shadowed-by-stem" => {
+            let alias_value = finding.alias_value.as_deref().unwrap_or("");
+            let shadowing = finding
+                .shadowing_doc_path
+                .as_ref()
+                .map(|p| p.as_str())
+                .unwrap_or("");
+            (
+                "alias shadowed by a doc stem cannot be repaired deterministically".to_string(),
+                vec![
+                    format!(
+                        "remove or rename alias '{alias_value}' on this doc, or rename {shadowing} to free the stem"
+                    ),
+                    "rerun validate after fixing the conflict".to_string(),
+                ],
+            )
+        }
+        "frontmatter-alias-duplicate-across-docs" => {
+            let alias_value = finding.alias_value.as_deref().unwrap_or("");
+            (
+                "alias duplicated across docs cannot be repaired deterministically".to_string(),
+                vec![
+                    format!(
+                        "pick a canonical doc for alias '{alias_value}', remove the alias from the others"
+                    ),
+                    "rerun validate after fixing the conflict".to_string(),
+                ],
+            )
+        }
+        "nonportable-filename" => (
             "filename portability is diagnosed, not auto-repaired (a rename cascades every backlink; that is a move, out of repair's scope)".to_string(),
             vec![
-                format!("resolve manually: {}", issues.join("; ")),
+                format!("resolve manually: {}", finding.issues.join("; ")),
                 "rename the file, then rerun validate".to_string(),
+            ],
+        ),
+        // Graph diagnostics (open code set) and any unrecognized code.
+        _ => (
+            "graph diagnostic cannot be repaired deterministically".to_string(),
+            vec![
+                "inspect the diagnostic detail".to_string(),
+                "fix the document manually and rerun validate".to_string(),
             ],
         ),
     };
@@ -859,71 +868,23 @@ fn skipped_finding(
 }
 
 fn finding_rule(finding: &Finding) -> Option<String> {
-    match &finding.body {
-        FindingBody::RequiredFrontmatterMissing { rule, .. }
-        | FindingBody::DisallowedValue { rule, .. }
-        | FindingBody::InvalidFieldType { rule, .. }
-        | FindingBody::ExceedsMaxLength { rule, .. }
-        | FindingBody::ForbiddenField { rule, .. }
-        | FindingBody::DocumentMisrouted { rule, .. }
-        | FindingBody::ReferenceType { rule, .. } => rule.clone(),
-        FindingBody::GraphDiagnostic { .. }
-        | FindingBody::LinkIssue { .. }
-        | FindingBody::AliasMalformed { .. }
-        | FindingBody::AliasShadowedByStem { .. }
-        | FindingBody::AliasDuplicateAcrossDocs { .. }
-        | FindingBody::NonportableFilename { .. } => None,
-    }
+    finding.rule.clone()
 }
 
 fn finding_field(finding: &Finding) -> Option<String> {
-    match &finding.body {
-        FindingBody::RequiredFrontmatterMissing { field, .. }
-        | FindingBody::DisallowedValue { field, .. }
-        | FindingBody::InvalidFieldType { field, .. }
-        | FindingBody::ExceedsMaxLength { field, .. }
-        | FindingBody::ForbiddenField { field, .. }
-        | FindingBody::AliasMalformed { field, .. }
-        | FindingBody::ReferenceType { field, .. } => Some(field.clone()),
-        FindingBody::GraphDiagnostic { .. }
-        | FindingBody::LinkIssue { .. }
-        | FindingBody::DocumentMisrouted { .. }
-        | FindingBody::AliasShadowedByStem { .. }
-        | FindingBody::AliasDuplicateAcrossDocs { .. }
-        | FindingBody::NonportableFilename { .. } => None,
-    }
+    finding.field.clone()
 }
 
 fn finding_actual_value(finding: &Finding) -> Option<&Value> {
-    match &finding.body {
-        FindingBody::DisallowedValue { actual_value, .. }
-        | FindingBody::InvalidFieldType { actual_value, .. }
-        | FindingBody::ExceedsMaxLength { actual_value, .. }
-        | FindingBody::ForbiddenField { actual_value, .. } => Some(actual_value),
-        FindingBody::GraphDiagnostic { .. }
-        | FindingBody::LinkIssue { .. }
-        | FindingBody::RequiredFrontmatterMissing { .. }
-        | FindingBody::DocumentMisrouted { .. }
-        | FindingBody::ReferenceType { .. }
-        | FindingBody::AliasMalformed { .. }
-        | FindingBody::AliasShadowedByStem { .. }
-        | FindingBody::AliasDuplicateAcrossDocs { .. }
-        | FindingBody::NonportableFilename { .. } => None,
-    }
+    finding.actual_value.as_ref()
 }
 
 fn finding_target(finding: &Finding) -> Option<String> {
-    match &finding.body {
-        FindingBody::LinkIssue { link } => Some(link.target.clone()),
-        _ => None,
-    }
+    finding.target.clone()
 }
 
 fn finding_candidates(finding: &Finding) -> Vec<Utf8PathBuf> {
-    match &finding.body {
-        FindingBody::LinkIssue { link } => link.candidates.clone(),
-        _ => Vec::new(),
-    }
+    finding.candidates.clone()
 }
 
 #[cfg(test)]
@@ -931,7 +892,7 @@ mod tests {
     use super::*;
     use crate::domain::{Link, LinkKind, LinkStatus, Severity, UnresolvedReason};
     use crate::standards::config::{RepairAction, RepairRule, RepairRuleMatch};
-    use crate::standards::findings::{Finding, FindingBody};
+    use crate::standards::findings::Finding;
     use serde_json::json;
 
     fn vault_root() -> Utf8PathBuf {
@@ -939,18 +900,13 @@ mod tests {
     }
 
     fn finding_disallowed_value(path: &str, field: &str, value: serde_json::Value) -> Finding {
-        Finding {
-            code: "value-not-allowed".into(),
-            severity: Severity::Warning,
-            path: path.into(),
-            message: format!("frontmatter field has a disallowed value: {field}"),
-            body: FindingBody::DisallowedValue {
-                rule: Some("task-status".into()),
-                field: field.into(),
-                actual_value: value,
-                allowed_values: vec![json!("backlog"), json!("completed")],
-            },
-        }
+        Finding::frontmatter_disallowed_value(
+            path.into(),
+            Some("task-status".into()),
+            field.into(),
+            value,
+            vec![json!("backlog"), json!("completed")],
+        )
     }
 
     fn finding_link_ambiguous(path: &str, target: &str, candidates: Vec<&str>) -> Finding {
@@ -1294,16 +1250,7 @@ mod tests {
     }
 
     fn finding_required_missing(path: &str, field: &str, rule: Option<&str>) -> Finding {
-        Finding {
-            code: "frontmatter-required-field-missing".into(),
-            severity: Severity::Warning,
-            path: path.into(),
-            message: format!("required frontmatter field is missing: {field}"),
-            body: FindingBody::RequiredFrontmatterMissing {
-                rule: rule.map(Into::into),
-                field: field.into(),
-            },
-        }
+        Finding::frontmatter_required_missing(path.into(), rule.map(Into::into), field.into())
     }
 
     #[test]

@@ -12,7 +12,7 @@ use camino::Utf8PathBuf;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::standards::findings::{Finding, FindingBody};
+use crate::standards::findings::Finding;
 
 #[derive(Debug, Serialize)]
 pub struct Summary {
@@ -42,60 +42,32 @@ pub fn summarize(findings: &[Finding]) -> Summary {
         increment(&mut summary.codes, &finding.code);
         increment(&mut summary.severities, severity_key(&finding.severity));
 
-        match &finding.body {
-            FindingBody::RequiredFrontmatterMissing { rule, field } => {
-                if let Some(rule) = rule {
-                    increment(&mut summary.rules, rule);
-                }
-                increment(&mut summary.fields, field);
-            }
-            FindingBody::DisallowedValue {
-                rule,
-                field,
-                actual_value,
-                ..
-            } => {
-                if let Some(rule) = rule {
-                    increment(&mut summary.rules, rule);
-                }
-                increment(&mut summary.fields, field);
-                let value_counts = summary.disallowed_values.entry(field.clone()).or_default();
-                increment(value_counts, summary_value_key(actual_value));
-            }
-            FindingBody::InvalidFieldType {
-                rule,
-                field,
-                expected_type,
-                ..
-            } => {
-                if let Some(rule) = rule {
-                    increment(&mut summary.rules, rule);
-                }
-                increment(&mut summary.fields, field);
-                let type_counts = summary.invalid_types.entry(field.clone()).or_default();
-                increment(type_counts, expected_type);
-            }
-            FindingBody::ForbiddenField { rule, field, .. }
-            | FindingBody::ReferenceType { rule, field, .. }
-            | FindingBody::ExceedsMaxLength { rule, field, .. } => {
-                if let Some(rule) = rule {
-                    increment(&mut summary.rules, rule);
-                }
-                increment(&mut summary.fields, field);
-            }
-            FindingBody::DocumentMisrouted { rule, .. } => {
-                if let Some(rule) = rule {
-                    increment(&mut summary.rules, rule);
+        // Rule + field tallies are populated whenever the finding names them
+        // (rule-scoped frontmatter findings). The per-code branches add the
+        // value / type breakdowns that only certain codes carry. Link, graph,
+        // alias-collision, and nonportable findings name no rule/field, so they
+        // contribute only to the code / severity / path-prefix rollups.
+        if let Some(rule) = &finding.rule {
+            increment(&mut summary.rules, rule);
+        }
+        if let Some(field) = &finding.field {
+            increment(&mut summary.fields, field);
+        }
+        match finding.code.as_str() {
+            "value-not-allowed" => {
+                if let (Some(field), Some(actual_value)) = (&finding.field, &finding.actual_value) {
+                    let value_counts = summary.disallowed_values.entry(field.clone()).or_default();
+                    increment(value_counts, summary_value_key(actual_value));
                 }
             }
-            FindingBody::AliasMalformed { field, .. } => {
-                increment(&mut summary.fields, field);
+            "field-type-invalid" => {
+                if let (Some(field), Some(expected_type)) = (&finding.field, &finding.expected_type)
+                {
+                    let type_counts = summary.invalid_types.entry(field.clone()).or_default();
+                    increment(type_counts, expected_type);
+                }
             }
-            FindingBody::AliasShadowedByStem { .. }
-            | FindingBody::AliasDuplicateAcrossDocs { .. }
-            | FindingBody::LinkIssue { .. }
-            | FindingBody::GraphDiagnostic { .. }
-            | FindingBody::NonportableFilename { .. } => {}
+            _ => {}
         }
 
         increment(&mut summary.path_prefixes, path_prefix_key(&finding.path));

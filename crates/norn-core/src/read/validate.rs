@@ -79,28 +79,24 @@ pub fn execute(
         Err(e) => return Ok(Err(e.to_string())),
     };
 
-    // The summary is computed core-side (it needs the typed `Finding` model,
-    // which does not cross the wire) and carried as its final pretty-JSON string
-    // so `--format json --summary` is a verbatim passthrough with donor-exact
-    // field order. It is folded ONLY when the request set `--summary` — an
-    // unrequested summary is never computed. Each finding is carried as its
-    // compact struct-order JSON — the single source the CLI renders every other
-    // format from (jsonl verbatim; json / records / paths by parsing back).
+    // The summary is computed core-side (it folds the engine's richer internal
+    // finding, which does not cross the wire) and carried as its final
+    // pretty-JSON string so `--format json --summary` is a verbatim passthrough.
+    // It is folded ONLY when the request set `--summary`. The findings cross the
+    // wire as the typed flat [`norn_wire::Finding`] contract (ADR 0022) — the
+    // internal `Finding` projects onto it here, at the producer edge.
     let summary_json = if params.summary {
         Some(serde_json::to_string_pretty(&summarize(&findings))?)
     } else {
         None
     };
-    let finding_lines: Vec<String> = findings
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<_, serde_json::Error>>()?;
+    let wire_findings: Vec<norn_wire::Finding> = findings.iter().map(|f| f.to_wire()).collect();
 
     let rules_count = config.validate.rules.len() + config.validate.required_frontmatter.len();
     let total_docs = index.documents.len();
 
     Ok(Ok(ValidateReport {
-        findings: finding_lines,
+        findings: wire_findings,
         summary_json,
         total_docs,
         rules_count,
@@ -160,8 +156,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(report.findings.len(), 1);
-        let f0: Value = serde_json::from_str(&report.findings[0]).unwrap();
-        assert_eq!(f0["code"], "frontmatter-required-field-missing");
+        assert_eq!(
+            report.findings[0].code,
+            "frontmatter-required-field-missing"
+        );
         // rules_count counts required_frontmatter entries + rules.
         assert_eq!(report.rules_count, 1);
     }

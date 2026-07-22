@@ -305,7 +305,9 @@ const VALIDATE_CASES: &[Case] = &[
     // carries more than one finding. `frontmatter-required-field-missing`
     // matches at most once per document in the zoo fixture, so this stays
     // deterministic while still exercising the raw (non-summary) findings
-    // shape.
+    // shape. DIVERGES under PD-122 (ADR 0022): the oracle flattens an untagged
+    // per-variant body onto the finding; the rewrite emits the flat closed
+    // contract (`path`-first, absent optionals omitted, no leaked models).
     Case {
         id: "validate-code-filter-zoo",
         argv: &[
@@ -329,9 +331,10 @@ const VALIDATE_CASES: &[Case] = &[
     },
     Case {
         // `--format jsonl` over the same single-per-document code: one finding
-        // per line, in document (path) order — stable — and the per-line bytes
-        // pin the `Finding` struct's own field order (distinct from `--format
-        // json`'s alphabetical `json!` order).
+        // per line, in document (path) order — stable. DIVERGES under PD-122
+        // (ADR 0022): the per-line bytes are now the flat closed contract's field
+        // order (`path`-first, `rule` omitted when absent rather than `null`),
+        // not the oracle's untagged-body order.
         id: "validate-jsonl-code-zoo",
         argv: &[
             "validate",
@@ -1476,10 +1479,10 @@ const MCP_CASES: &[Case] = &[
         // class. The narrow is deliberate: a bare full-vault validate on the zoo
         // trips a finding-ORDER divergence between the oracle and the rewrite
         // (visible at the CLI level too — the reason bare `validate --format json`
-        // is not a gated CLI case either), which is out of this task's scope. The
-        // single-code filter yields a path-ordered, byte-identical finding set,
-        // proving the wire's pre-serialized finding strings re-parse into typed
-        // `structuredContent` correctly (verbose detail kept, PD-111-adjacent).
+        // is not a gated CLI case either), which is out of this task's scope.
+        // DIVERGES under PD-122 (ADR 0022): the structuredContent findings follow
+        // the flat closed contract, so the leaked internal link/diagnostic model
+        // and per-variant fields the oracle emitted are gone.
         id: "mcp-tools-call-validate-code-zoo",
         argv: &["mcp"],
         fixture: MCP_FIXTURE,
@@ -2770,6 +2773,100 @@ const APPLY_CASES: &[Case] = &[
   "vault_root": "{{VAULT_ROOT}}",
   "operations": [
     { "kind": "set_frontmatter", "fields": { "path": "notes/alpha.md", "field": "priority", "new_value": "high", "operation": 5 } }
+  ]
+}
+"##,
+        ),
+    },
+    // ── ADR 0022: strict op-payload decode (F5 — refuse coercion) ──────────────
+    // A structural op with a WRONG-TYPED boolean: `move_document` carrying
+    // `"force": "true"` (a string, not a bool). The oracle's `.and_then(as_bool)
+    // .unwrap_or(false)` silently coerces it to `false`, then proceeds to the
+    // apply-time destination check — `notes/beta.md` already exists and `force` is
+    // (silently) off, so it refuses `move destination already exists` (exit 2).
+    // The rewrite refuses the malformed field itself, at plan decode, before any
+    // dispatch: `op.fields for move_document could not be decoded: field `force`
+    // must be a boolean` (`malformed-plan`, exit 2). Both write nothing; the
+    // refusal reason (and message) diverges. Pinned by PD-121.
+    Case {
+        id: "apply-authored-wrong-typed-bool-refusal-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/beta.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "move_document", "fields": { "src": "notes/alpha.md", "dst": "notes/beta.md", "force": "true" } }
+  ]
+}
+"##,
+        ),
+    },
+    // A `delete_document` with a wrong-typed `rewrite_to` (`5`, a number). The
+    // oracle's `.and_then(as_str)` drops the malformed value indistinguishably from
+    // absent, so it deletes `notes/cycle-c.md` with NO redirect — silently applying
+    // a destructive op the author fat-fingered (exit 0, the file is gone, leaving
+    // `cycle-b`'s `[[cycle-c]]` backlink broken). The rewrite refuses the malformed
+    // field at plan decode — `op.fields for delete_document could not be decoded:
+    // field `rewrite_to` must be a string` (`malformed-plan`, exit 2), write-free.
+    // The starkest F5 case: silent coercion turns a typo into data loss on the
+    // oracle; the rewrite refuses. Exit codes AND the post-state tree diverge.
+    // Pinned by PD-121. TRACE_NORM for the oracle's confirmed-apply trace id.
+    Case {
+        id: "apply-authored-wrong-typed-rewrite-to-refusal-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/cycle-c.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "delete_document", "fields": { "path": "notes/cycle-c.md", "rewrite_to": 5 } }
+  ]
+}
+"##,
+        ),
+    },
+    // A section-edit op (`str_replace`) with a wrong-typed `document_hash` (`5`, a
+    // number). The oracle's `.and_then(as_str).unwrap_or("")` coerces it to the
+    // empty string (no compare-and-swap), then runs the replace — `old` names text
+    // absent from `notes/alpha.md`, so it refuses `string not found` (exit 2). The
+    // rewrite refuses the malformed field at plan decode — `op.fields for
+    // str_replace could not be decoded: invalid type: integer `5`, expected a
+    // string` (`malformed-plan`, exit 2), before the body is ever touched. Both
+    // write nothing; the refusal reason diverges. Pinned by PD-121.
+    Case {
+        id: "apply-authored-wrong-typed-document-hash-refusal-zoo",
+        argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: Some(
+            r##"{
+  "schema_version": 2,
+  "vault_root": "{{VAULT_ROOT}}",
+  "operations": [
+    { "kind": "str_replace", "fields": { "path": "notes/alpha.md", "old": "NONEXISTENT_ZZZ", "new": "x", "document_hash": 5 } }
   ]
 }
 "##,

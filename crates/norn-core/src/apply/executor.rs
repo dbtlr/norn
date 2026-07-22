@@ -659,6 +659,10 @@ fn build_refusal_report(
                 // A byte-identical refusal writes nothing and renders no records
                 // link-impact line — the coded error is the whole output.
                 link_impact: None,
+                // Finding linkage echoes on the ACTIONED report (build_report_ops);
+                // a refusal carries only its coded error, no provenance.
+                finding_code: None,
+                repair_rule: None,
             }
         })
         .collect();
@@ -742,6 +746,8 @@ fn build_plan_refusal_report(
                 footnote: op.footnote.clone(),
                 cascade: None,
                 link_impact: None,
+                finding_code: None,
+                repair_rule: None,
             }
         })
         .collect();
@@ -763,6 +769,8 @@ fn build_plan_refusal_report(
             footnote: None,
             cascade: None,
             link_impact: None,
+            finding_code: None,
+            repair_rule: None,
         });
     }
 
@@ -777,6 +785,23 @@ fn build_plan_refusal_report(
         ApplyOutcome::Refused,
         Vec::new(),
     )
+}
+
+/// Finding-provenance linkage echoed verbatim from an op onto its apply-report
+/// record (ADR 0022): `(finding_code, repair_rule)` read directly from the op's
+/// raw `fields` — the authoritative declaration of what the op is resolving.
+/// Repair-generated ops carry the real codes; verb-synthesized and authored ops
+/// declare none, yielding `(None, None)` so their report bytes are unchanged. The
+/// interior `PlannedChange`'s `operator-request` sentinel is deliberately NOT the
+/// source here — that fill is an adapter default, not declared provenance.
+fn op_finding_linkage(op: &MigrationOp) -> (Option<String>, Option<String>) {
+    let read = |key: &str| {
+        op.fields
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    (read("finding_code"), read("repair_rule"))
 }
 
 /// Best-effort display token for a raw `MigrationOp` (an expansion-phase refusal
@@ -863,6 +888,7 @@ fn build_partial_failure_report(
             } else {
                 (OpStatus::NotRun, None)
             };
+            let (finding_code, repair_rule) = op_finding_linkage(parent_op);
             ApplyReportOp {
                 op_id: i.to_string(),
                 kind: change.operation.clone(),
@@ -877,6 +903,8 @@ fn build_partial_failure_report(
                 // A partial-failure report is the abort/error surface, not the
                 // records success renderer; link-impact is unused here.
                 link_impact: None,
+                finding_code,
+                repair_rule,
             }
         })
         .collect();
@@ -1334,6 +1362,11 @@ fn build_report_ops(
             let link_impact = (change.operation == "delete_document")
                 .then(|| build_link_impact(change, parent_op, index));
 
+            // ADR 0022: echo the op's finding-provenance linkage verbatim. Absent
+            // on verb-synthesized/authored ops (→ None → omitted), present on
+            // repair-sourced ops; provenance only, never read for apply behavior.
+            let (finding_code, repair_rule) = op_finding_linkage(parent_op);
+
             ApplyReportOp {
                 op_id: i.to_string(),
                 kind: change.operation.clone(),
@@ -1346,6 +1379,8 @@ fn build_report_ops(
                 footnote: parent_op.footnote.clone(),
                 cascade,
                 link_impact,
+                finding_code,
+                repair_rule,
             }
         })
         .collect()
@@ -1459,6 +1494,74 @@ mod tests {
         // Apply: file moved
         assert!(!tmp.path().join("a.md").exists());
         assert!(tmp.path().join("renamed.md").exists());
+    }
+
+    #[test]
+    fn apply_report_echoes_finding_linkage_from_op_only_when_present() {
+        // ADR 0022: an op carrying finding-provenance linkage echoes it verbatim
+        // onto its report record; a sibling op without linkage leaves the fields
+        // absent (None), so verb-driven report bytes are unchanged.
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = MigrationPlan {
+            schema_version: 2,
+            vault_root,
+            generator: None,
+            generated_at: None,
+            preconditions: Vec::new(),
+            operations: vec![
+                MigrationOp {
+                    kind: "add_frontmatter".into(),
+                    id: None,
+                    requires: vec![],
+                    fields: serde_json::json!({
+                        "path": "a.md",
+                        "field": "priority",
+                        "new_value": "high",
+                        "finding_code": "missing-required-field",
+                        "repair_rule": "add-default"
+                    }),
+                    footnote: None,
+                },
+                MigrationOp {
+                    kind: "add_frontmatter".into(),
+                    id: None,
+                    requires: vec![],
+                    fields: serde_json::json!({
+                        "path": "b.md",
+                        "field": "priority",
+                        "new_value": "low"
+                    }),
+                    footnote: None,
+                },
+            ],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+        let ctx = ApplyContext {
+            dry_run: false,
+            parents: false,
+            verbose: false,
+            refuse_as_report: false,
+            owner_index_options: Default::default(),
+        };
+        let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
+        assert_eq!(report.operations.len(), 2);
+        // The repair-provenance op echoes the linkage verbatim.
+        assert_eq!(
+            report.operations[0].finding_code.as_deref(),
+            Some("missing-required-field")
+        );
+        assert_eq!(
+            report.operations[0].repair_rule.as_deref(),
+            Some("add-default")
+        );
+        // The linkage-free op carries None → the JSON omits the fields entirely.
+        assert_eq!(report.operations[1].finding_code, None);
+        assert_eq!(report.operations[1].repair_rule, None);
+        let op1_json = serde_json::to_value(&report.operations[1]).unwrap();
+        assert!(op1_json.get("finding_code").is_none());
+        assert!(op1_json.get("repair_rule").is_none());
     }
 
     #[test]

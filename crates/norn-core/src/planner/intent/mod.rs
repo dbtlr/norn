@@ -152,59 +152,55 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
             Ok(vec![change])
         }
 
-        TypedOp::Change(ChangeOp { kind, mut fields }) => {
+        TypedOp::Change(ChangeOp { kind, fields }) => {
             // `fields.operation` is the value that actually drives write dispatch
             // (executor content-class routing). If an authored plan supplies one
             // that disagrees with the op's `kind`, the reviewed `kind` is a lie:
             // the plan would execute a different operation than it declares.
             // Refuse rather than silently reinterpret. A repair-sourced op
             // (operation == kind) and an authored op omitting `operation` are
-            // both unaffected — the latter fills from `kind` below.
-            if let Some(operation) = fields.get("operation").and_then(|v| v.as_str()) {
-                if operation != kind {
+            // both unaffected — the latter fills from `kind` below. A wrong-TYPED
+            // `operation` (e.g. `5`) never reaches here: it fails the strict
+            // `ChangeFields` decode as `MalformedFields`.
+            if let Some(operation) = &fields.operation {
+                if operation != &kind {
                     return Err(anyhow::Error::new(TypedOpError::OperationKindMismatch {
                         kind: kind.clone(),
-                        operation: operation.to_string(),
+                        operation: operation.clone(),
                     }));
                 }
             }
-            // Deserialize the typed op's fields into a PlannedChange (the payload
-            // IS a PlannedChange shape). Insert required fields that have no
-            // #[serde(default)] if absent.
-            fields
-                .entry("operation")
-                .or_insert_with(|| serde_json::Value::String(kind.clone()));
-            let path_for_id = fields
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_owned();
-            let default_change_id = format!("{kind}-{path_for_id}");
-            fields
-                .entry("change_id")
-                .or_insert_with(|| serde_json::Value::String(default_change_id));
-            fields
-                .entry("document_hash")
-                .or_insert_with(|| serde_json::Value::String(String::new()));
-            fields
-                .entry("finding_code")
-                .or_insert_with(|| serde_json::Value::String("operator-request".into()));
-            fields
-                .entry("repair_rule")
-                .or_insert_with(|| serde_json::Value::String("operator-request".into()));
-
-            // A wrong-TYPED member (e.g. `"operation": 5`, a non-bool `"force"`)
-            // slips the object-shape and mismatch guards but fails the decode into
-            // the change model. Carry it as a typed malformed-plan error so the
-            // apply envelope codes it `malformed-plan`, not `internal-error` — a
-            // wrong-typed authored field is a USER error, not a norn bug.
-            let change: PlannedChange = serde_json::from_value(serde_json::Value::Object(fields))
-                .map_err(|e| {
-                anyhow::Error::new(TypedOpError::MalformedFields {
-                    kind: kind.clone(),
-                    message: e.to_string(),
-                })
-            })?;
+            // Adapt the wire-typed `ChangeFields` into `norn-core`'s `PlannedChange`.
+            // The `operator-request` sentinel for absent finding linkage is filled
+            // HERE (the interior model requires non-optional values) — not fabricated
+            // on the wire, where authored linkage stays `None` (ADR 0022). `link_risk`
+            // / `warnings` are planner-computed and never carried by a change op.
+            let change = PlannedChange {
+                change_id: fields
+                    .change_id
+                    .clone()
+                    .unwrap_or_else(|| format!("{kind}-{}", fields.path)),
+                path: fields.path.clone().into(),
+                document_hash: fields.document_hash.clone().unwrap_or_default(),
+                finding_code: fields
+                    .finding_code
+                    .clone()
+                    .unwrap_or_else(|| "operator-request".into()),
+                finding_rule: fields.finding_rule.clone(),
+                repair_rule: fields
+                    .repair_rule
+                    .clone()
+                    .unwrap_or_else(|| "operator-request".into()),
+                operation: kind,
+                field: fields.field.clone(),
+                expected_old_value: fields.expected_old_value.clone(),
+                new_value: fields.new_value.clone(),
+                destination: fields.destination.clone().map(Into::into),
+                link_risk: None,
+                warnings: Vec::new(),
+                force: fields.force,
+                parents: fields.parents,
+            };
             Ok(vec![change])
         }
 
@@ -212,37 +208,69 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<Planned
             kind,
             id,
             path,
-            document_hash,
-            mut fields,
+            fields,
         }) => {
-            // Section/body edit ops (NRN-98 / H1). The op fields ARE the `EditOp`
-            // (internally tagged on `op`); carry that payload in `new_value` so
-            // the applier can deserialize and apply it against the current body at
-            // apply time, under whole-doc CAS. Extra keys (`path`/`document_hash`)
-            // are ignored by `EditOp`'s deserializer.
-            fields.insert("op".into(), serde_json::Value::String(kind.clone()));
+            // Section/body edit ops (NRN-98 / H1). Reassemble the wire-typed
+            // `EditFields` into the `op`-tagged JSON the transform engine
+            // deserializes into its own `EditOp` at apply time (under whole-doc
+            // CAS), carried in `new_value`. `path`/`document_hash` ride along
+            // (ignored by that deserializer) so for a well-formed op the
+            // reconstructed payload — and the internal `change_id` span-correlation
+            // digest derived from it — matches the on-disk op. Unknown extra keys
+            // and a `document_hash: null` are dropped by the typed decode and so
+            // shift the digest; `change_id` never crosses a wire, so only telemetry
+            // correlation is affected. `Value::Object` is a `BTreeMap`, so member
+            // insertion order does not affect the serialized bytes.
+            let mut payload = serde_json::Map::new();
+            payload.insert("path".into(), serde_json::Value::String(path.clone()));
+            if let Some(dh) = &fields.document_hash {
+                payload.insert(
+                    "document_hash".into(),
+                    serde_json::Value::String(dh.clone()),
+                );
+            }
+            if let Some(v) = &fields.old {
+                payload.insert("old".into(), serde_json::Value::String(v.clone()));
+            }
+            if let Some(v) = &fields.new {
+                payload.insert("new".into(), serde_json::Value::String(v.clone()));
+            }
+            if let Some(v) = fields.replace_all {
+                payload.insert("replace_all".into(), serde_json::Value::Bool(v));
+            }
+            if let Some(v) = &fields.heading {
+                payload.insert("heading".into(), serde_json::Value::String(v.clone()));
+            }
+            if let Some(v) = &fields.content {
+                payload.insert("content".into(), serde_json::Value::String(v.clone()));
+            }
+            payload.insert("op".into(), serde_json::Value::String(kind.clone()));
 
             // change_id must be unique per op: two edits of the same kind on the
             // same document would otherwise collide and clobber each other's
             // telemetry span. Prefer the plan-supplied `op.id`; else discriminate
             // by a hash of the edit payload.
             let change_id = id.unwrap_or_else(|| {
-                let payload = serde_json::Value::Object(fields.clone()).to_string();
-                let digest = blake3::hash(payload.as_bytes()).to_hex();
+                let digest = blake3::hash(
+                    serde_json::Value::Object(payload.clone())
+                        .to_string()
+                        .as_bytes(),
+                )
+                .to_hex();
                 format!("{kind}-{path}-{}", &digest[..8])
             });
 
             let change = PlannedChange {
                 change_id,
                 path: path.into(),
-                document_hash,
+                document_hash: fields.document_hash.clone().unwrap_or_default(),
                 finding_code: "operator-request".into(),
                 finding_rule: None,
                 repair_rule: "operator-request".into(),
                 operation: kind,
                 field: None,
                 expected_old_value: None,
-                new_value: Some(serde_json::Value::Object(fields)),
+                new_value: Some(serde_json::Value::Object(payload)),
                 destination: None,
                 link_risk: None,
                 warnings: Vec::new(),
@@ -572,6 +600,77 @@ mod expansion_tests {
             matches!(typed, TypedOpError::MalformedFields { .. }),
             "expected MalformedFields, got {typed:?}"
         );
+    }
+
+    #[test]
+    fn dispatch_edit_op_reconstructs_op_tagged_payload() {
+        let tmp = synth_vault();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let index = crate::graph::build_index(root).unwrap();
+
+        let op = MigrationOp {
+            kind: "str_replace".into(),
+            id: None,
+            requires: vec![],
+            fields: serde_json::json!({
+                "path": "a.md",
+                "old": "foo",
+                "new": "bar",
+                "document_hash": "cafe"
+            }),
+            footnote: None,
+        };
+        let expanded = expand(&op, &index).unwrap();
+        assert_eq!(expanded.len(), 1);
+        let change = &expanded[0];
+        assert_eq!(change.operation, "str_replace");
+        assert_eq!(change.document_hash, "cafe");
+        // new_value carries the `op` discriminant plus the body, so the apply-time
+        // `EditOp` deserializer sees a valid op.
+        let nv = change.new_value.as_ref().unwrap();
+        assert_eq!(nv["op"], "str_replace");
+        assert_eq!(nv["old"], "foo");
+        assert_eq!(nv["new"], "bar");
+        // path/document_hash ride along (ignored by the EditOp deserializer) so the
+        // reconstructed payload matches the on-disk op the change_id derives from.
+        assert_eq!(nv["path"], "a.md");
+        assert_eq!(nv["document_hash"], "cafe");
+    }
+
+    #[test]
+    fn dispatch_change_op_echoes_finding_linkage_and_defaults_when_absent() {
+        let tmp = synth_vault();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let index = crate::graph::build_index(root).unwrap();
+
+        // A repair-sourced op carries real linkage → PlannedChange echoes it.
+        let repair_op = MigrationOp {
+            kind: "rewrite_link".into(),
+            id: None,
+            requires: vec![],
+            fields: serde_json::json!({
+                "path": "a.md",
+                "finding_code": "link-target-missing",
+                "repair_rule": "closest-match"
+            }),
+            footnote: None,
+        };
+        let change = expand(&repair_op, &index).unwrap().pop().unwrap();
+        assert_eq!(change.finding_code, "link-target-missing");
+        assert_eq!(change.repair_rule, "closest-match");
+
+        // An authored op omits linkage → the `operator-request` sentinel is filled
+        // at the adapter boundary (not on the wire).
+        let authored_op = MigrationOp {
+            kind: "set_frontmatter".into(),
+            id: None,
+            requires: vec![],
+            fields: serde_json::json!({"path": "a.md", "field": "title", "new_value": "T"}),
+            footnote: None,
+        };
+        let change = expand(&authored_op, &index).unwrap().pop().unwrap();
+        assert_eq!(change.finding_code, "operator-request");
+        assert_eq!(change.repair_rule, "operator-request");
     }
 
     #[test]

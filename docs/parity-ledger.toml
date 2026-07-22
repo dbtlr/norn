@@ -405,3 +405,51 @@ old = "a rename whose new target carries a `|`/`#`/`[`/`]` is emitted verbatim, 
 new = "the target is checked for representability first: the rewrite-wikilink verb REFUSES the whole op (exit 2, `unrepresentable-rewrite-target`, write-free) and the move cascade SKIPS the backlink (`would-corrupt-wikilink`), leaving `[[unrepr-target]]` intact and detectable by `validate` rather than corrupted"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# PD-121 — ADR 0022 (decided-better): strict op-payload decode. Every migration
+# op payload is a typed struct decoded ONCE, strictly — a present-but-wrong-typed
+# field refuses with a precise `malformed-plan` code, never coerces to a silent
+# default. The oracle indexes the raw `fields` map with lossy accessors
+# (`.and_then(as_bool).unwrap_or(false)`, `.and_then(as_str).unwrap_or("")`,
+# `.and_then(as_str)` dropping a non-string to `None`), so a fat-fingered field
+# type is swallowed and the op proceeds on a coerced value — in the
+# `delete_document` case, silently applying a destructive delete the author never
+# authorized. The rewrite refuses the malformed field at plan decode, before any
+# dispatch, so a reviewed plan cannot execute on a value its author did not write.
+# See `crates/norn-wire/src/plan.rs` (`TypedOp::try_from`, the `bool_field` /
+# `rewrite_to` decoders and the `ChangeFields` / `EditFields` structs).
+[[entry]]
+id = "PD-121"
+surface = "apply (authored plan: wrong-typed op field — strict decode)"
+cases = ["apply-authored-wrong-typed-bool-refusal-zoo", "apply-authored-wrong-typed-rewrite-to-refusal-zoo", "apply-authored-wrong-typed-document-hash-refusal-zoo"]
+old = "a present-but-wrong-typed op field is silently coerced to a default: `move_document`'s `\"force\": \"true\"` (a string) becomes `false` (then refusing `move destination already exists`, exit 2); `delete_document`'s `\"rewrite_to\": 5` (a number) is dropped to no-redirect, DELETING the document with its backlinks left broken (exit 0, mutating); `str_replace`'s `\"document_hash\": 5` becomes `\"\"` (no compare-and-swap), then refusing `string not found` (exit 2) — the malformed field is invisible in every case"
+new = "each wrong-typed field refuses at plan decode with `code: malformed-plan` and a message naming the field (`op.fields for <kind> could not be decoded: field \\`force\\` must be a boolean` / `field \\`rewrite_to\\` must be a string` / `invalid type: integer \\`5\\`, expected a string`), exit 2, write-free — a reviewed plan never executes on a coerced value, so the delete-with-typo data loss the oracle silently applies is refused"
+reason = "decided-better"
+decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
+
+# PD-122 — ADR 0022 (decided-better): the flat finding contract. Validation
+# findings serialize as one flat, closed struct — `{ path, code, severity,
+# message, rule?, field?, target?, candidates?, next_actions? }` — across the CLI
+# JSON path and the MCP tool. The oracle serialized an untagged per-variant body
+# flattened onto the finding, leaking the internal link-resolution model wholesale
+# (`link: { raw, kind, source_span, source_context, resolved_path,
+# unresolved_reason, candidates, status, … }`) and the variant-specific
+# frontmatter detail (`allowed_values`, `actual_value`, `max_length`,
+# `allowed_paths`, …) into user-facing output, with `path`/`target`/`candidates`
+# as internal path types. The rewrite projects onto the closed contract: the link
+# model collapses to plain-string `candidates` + a `target`, variant detail whose
+# decision value mattered folded into `message` at construction (e.g. the length
+# bounds `(7 > 5)`) and otherwise dropped, and field order is `path`-first with
+# absent optionals omitted (not serialized as `null`). No compatibility shim in
+# the pre-1.0 break window. Covers the CLI `--format json` and `--format jsonl`
+# single-code shapes and the MCP `vault.validate` structuredContent that follows
+# them. See `crates/norn-wire/src/finding.rs` (the flat `Finding` / `Severity`)
+# and `crates/norn-core/src/standards/findings.rs` (`Finding::to_wire`).
+[[entry]]
+id = "PD-122"
+surface = "validate --format json / jsonl + vault.validate (per-finding shape)"
+cases = ["validate-code-filter-zoo", "validate-jsonl-code-zoo", "mcp-tools-call-validate-code-zoo"]
+old = "each finding serializes an untagged per-variant body flattened onto `{code, severity, path, message}`: a link finding embeds the whole internal `link` model (raw, kind, spans, source_context, resolved_path, unresolved_reason, status, and `candidates` as path objects); a frontmatter finding emits its variant fields (`rule` even when `null`, `field`, plus `allowed_values` / `actual_value` / `max_length` / `allowed_paths` / … as applicable) — an output shape that is an accident of internal representation"
+new = "each finding serializes the flat closed contract `{ path, code, severity, message, rule?, field?, target?, candidates?, next_actions? }`: `path`-first field order, absent optionals omitted rather than `null`, `candidates` as plain vault-path strings, no internal `link` / diagnostic model and no variant-specific frontmatter fields — the detail that carried fix-vs-skip value folded into `message`, the rest dropped"
+reason = "decided-better"
+decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"

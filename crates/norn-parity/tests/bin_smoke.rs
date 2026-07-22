@@ -86,8 +86,12 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // NRN-424 (CodeRabbit round) adds two more (PD-120: a rewrite-wikilink refusal
     // and a move skip on an unrepresentable target), taking the total to 116;
     // self-check runs oracle vs. itself, so all 116 Match.
+    // NRN-406 (ADR 0022 strict decode) adds three `apply` cases exercising a
+    // wrong-typed op field (move `force`, delete `rewrite_to`, str_replace
+    // `document_hash`), taking the total to 119; self-check ignores the divergence
+    // (oracle vs. itself always Matches), so all 119 Match.
     assert!(
-        stdout.contains("116 cases: 116 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("119 cases: 119 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -199,8 +203,22 @@ fn default_mode_gates_help_cases_exit_0() {
     // (decided-better — refuse/skip a rename to an unrepresentable wikilink target:
     // a rewrite-wikilink refusal and a move cascade skip). The gated total grows to
     // 115 and the diverged count from 33 to 35; the match count stays 80.
+    // NRN-406 (ADR 0022 strict decode) adds three ported `apply` cases, all
+    // DIVERGING under one ledger entry (PD-121): a wrong-typed `force` bool, a
+    // wrong-typed `rewrite_to`, and a wrong-typed `document_hash` — the oracle
+    // silently coerces each (in the delete case, applying a destructive delete),
+    // the rewrite refuses `malformed-plan`. The gated total grows to 118 and the
+    // diverged count from 35 to 38; the match count stays 80.
+    // NRN-406 (ADR 0022 flat finding contract) RE-ANCHORS three already-gated
+    // cases from MATCH to DIVERGE under one ledger entry (PD-122): the two CLI
+    // finding shapes (`validate-code-filter-zoo` json, `validate-jsonl-code-zoo`
+    // jsonl) and the MCP `mcp-tools-call-validate-code-zoo` structuredContent that
+    // follows them — the oracle leaks the internal link/diagnostic model and
+    // per-variant fields; the rewrite emits the flat closed contract. The gated
+    // total stays 118; the match count drops from 80 to 77 and the diverged count
+    // grows from 38 to 41.
     assert!(
-        stdout.contains("115 cases: 80 match, 35 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("118 cases: 77 match, 41 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -226,6 +244,14 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-118",
         "PD-119",
         "PD-120",
+        "PD-121",
+        "PD-122",
+        "validate-code-filter-zoo",
+        "validate-jsonl-code-zoo",
+        "mcp-tools-call-validate-code-zoo",
+        "apply-authored-wrong-typed-bool-refusal-zoo",
+        "apply-authored-wrong-typed-rewrite-to-refusal-zoo",
+        "apply-authored-wrong-typed-document-hash-refusal-zoo",
         "edit-setext-replace-section-diverge",
         "edit-setext-insert-after-heading-diverge",
         "edit-eof-heading-replace-section-diverge",

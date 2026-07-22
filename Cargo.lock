@@ -853,6 +853,7 @@ version = "0.0.0"
 dependencies = [
  "blake3",
  "camino",
+ "schemars",
  "serde",
  "serde_json",
  "serde_yaml",
