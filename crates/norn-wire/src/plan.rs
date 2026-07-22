@@ -122,14 +122,14 @@ impl MigrationPlan {
 // AND the frontmatter/body change and section/body edit ops — resolves to a real
 // typed struct here; no `Map<String, Value>` payload rides on the plan path past
 // [`TypedOp::try_from`]. The interior crates (`planner::intent`) consume the typed
-// structs and adapt them into `norn-core`'s own `PlannedChange` at that boundary.
+// structs and adapt them into `norn-core`'s own `ApplyOp` at that boundary.
 //
 // The structs mirror the keys of the `fields` object the on-disk plan carries.
 // They are a construction-time view, never serialized — typing the vocabulary does
 // NOT change the parity-pinned plan JSON (`MigrationOp.fields` stays the raw
 // `Value` envelope). `Value` survives ONLY at genuinely-arbitrary-JSON leaves
 // (`ChangeFields::expected_old_value` / `new_value` — a frontmatter value is any
-// JSON, exactly as `PlannedChange` types it), never as an opaque whole-op map.
+// JSON, exactly as `ApplyOp` types it), never as an opaque whole-op map.
 
 use serde_json::{Map, Value};
 
@@ -236,7 +236,7 @@ pub struct ChangeFields {
 /// A frontmatter/body change op (`set_frontmatter` / `add_frontmatter` /
 /// `remove_frontmatter` / `rewrite_link` / `replace_body` / `create_document`)
 /// with its [`ChangeFields`] payload decoded. `planner::intent` adapts the typed
-/// payload into a `norn-core` `PlannedChange` at the execution boundary.
+/// payload into a `norn-core` `ApplyOp` at the execution boundary.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChangeOp {
     pub kind: String,

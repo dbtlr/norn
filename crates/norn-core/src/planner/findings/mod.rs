@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn plan_from_findings_skipped_finding_maps_to_migration_skipped() {
-        // An unresolved link with no closest-match candidate → skipped in RepairPlan.
+        // An unresolved link with no closest-match candidate → skipped in the RepairPlanResult.
         let finding = finding_link_unresolved("source.md", "xyzzy-zzz-completely-unknown");
         let index = index_with_stems(&[("source.md", "source"), ("norn-brand.md", "norn-brand")]);
         let repair_config = RepairConfig::default();

@@ -1,8 +1,18 @@
-//! The mutation apply engine.
+//! The one mutation apply engine (ADR 0024).
 //!
-//! This module owns the durable, surface-neutral substrate the mutation verbs
-//! and the plan applier build on:
+//! Every document-mutation source — the direct verbs (`set`/`new`/`edit`/`move`/
+//! `delete`/`rewrite-wikilink`) and repair-as-planner — builds a `MigrationPlan`
+//! and applies it through this one engine; there is no second applier. The
+//! surface-neutral substrate:
 //!
+//! - [`executor`] — the one applier's plan-level orchestration: schema gate,
+//!   op expansion, delete-hash + owner-set + `requires`-DAG validation, and
+//!   assembling the [`ApplyReport`](norn_wire::ApplyReport) from the per-op
+//!   outcomes the passes record. [`apply_migration_plan`] is the entry point.
+//! - [`passes`] — the ordered named passes (content → delete → create → move →
+//!   cascade → retry) that expand typed ops into file mutations, recording each
+//!   op's outcome into a tracker AS IT HAPPENS. Partial apply is the semantics:
+//!   an independent op still runs when a sibling fails.
 //! - [`envelope`] — the engine-local error → coded [`norn_wire::ApplyError`]
 //!   envelope conversions. The [`ApplyReport`](norn_wire::ApplyReport) output
 //!   vocabulary, the [`ApplyOutcome`](norn_wire::ApplyOutcome) → exit-code
@@ -18,10 +28,6 @@
 //! - [`transaction`] — the per-file fingerprint → shadow → verify → swap unit:
 //!   a file-bytes CAS and a swap re-read that catch external modification the
 //!   old two-phase applier could miss.
-//!
-//! The pass-based executor that expands typed ops into file mutations and drives
-//! the cache write-through lands with the mutation verbs (`set`/`new`/`move`/
-//! `delete`/`rewrite-wikilink`) that produce the plans it applies.
 
 pub mod envelope;
 pub mod executor;

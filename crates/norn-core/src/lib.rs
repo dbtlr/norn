@@ -8,10 +8,16 @@
 //! - [`domain`] — the serializable graph vocabulary: [`domain::Document`],
 //!   [`domain::GraphIndex`], the [`domain::Link`] model, and the diagnostic /
 //!   heading / span types re-exported from `norn-frontmatter`. Pure data, no I/O.
-//! - [`standards`] — the standards pack / rules model: the declarative
-//!   [`standards::VaultConfig`] surface, YAML parse + compile
+//! - [`standards`] — the standards pack / rules model AND both engines it feeds:
+//!   the declarative [`standards::VaultConfig`] surface, YAML parse + compile
 //!   ([`standards::parse_config`], [`standards::parse_config_compiled`]), path
-//!   pattern matching, and the field-type / predicate declaration semantics.
+//!   pattern matching, and the field-type / predicate declaration semantics; the
+//!   validate engine ([`standards::validate_with_compiled`], the [`standards::Finding`]
+//!   model, [`standards::filter_findings`]); the repair planner
+//!   ([`standards::plan_repairs`]); the interior typed applier op model
+//!   ([`standards::ApplyOp`] / [`standards::ApplyBatch`], the successors to the
+//!   deleted `PlannedChange`/`RepairPlan`); and the low-level file-mutation
+//!   primitives in [`standards::apply`].
 //! - [`target`] — target resolution and backlink lookup over a built graph.
 //! - [`env`] — the [`env::VaultEnv`] value-carrier: vault root plus injected
 //!   config, value-in / value-out with no ambient reads.
@@ -32,18 +38,44 @@
 //!   preconditions (ADR 0015), and the content-addressed canonical hash — lives
 //!   in norn-wire (the end-user plan contract). A surface-neutral, serializable
 //!   artifact that crosses the wire as plan bytes.
-//! - [`apply`] — the mutation apply substrate: applies the
-//!   [`norn_wire::ApplyReport`] output vocabulary and outcome→exit mapping, and
+//! - [`apply`] — the one apply engine (ADR 0024): the plan-load + schema-gate +
+//!   expansion + report-assembly orchestrator ([`apply::apply_migration_plan`] in
+//!   `apply::executor`) driving the ordered named passes (`apply::passes`) over the
+//!   narrow filesystem write primitives (`apply::fsops`) and the per-file
+//!   fingerprint→shadow→verify→swap unit (`apply::transaction`). Emits the
+//!   [`norn_wire::ApplyReport`] output vocabulary with per-op status and enforces
 //!   the ADR 0015 owner-set precondition barrier
-//!   ([`apply::evaluate_owner_preconditions`]).
+//!   ([`apply::evaluate_owner_preconditions`]). Partial apply is the semantics: an
+//!   independent op still runs when a sibling fails; only a plan-level barrier
+//!   refuses the whole plan pre-write.
+//! - [`planner`] — the shared planner that turns intent into a MigrationPlan: the
+//!   per-kind high-level op expanders (`planner::intent::expand`, consumed by the
+//!   applier) and the validate-`Finding`→plan adapter (`planner::findings`,
+//!   consumed by the `repair` verb).
+//! - [`read`] — the read verbs' execute seams (`find` / `count` / `get` /
+//!   `describe` / `validate` / `repair`), each a pure function of a warm
+//!   [`cache::Cache`] plus a wire `Params`, producing a wire `Report`.
+//! - [`mutate`] — the mutation verbs' execute seams (`set` / `new` / `edit` /
+//!   `move` / `delete` / `rewrite_wikilink`): each builds — and, when confirmed,
+//!   applies — a MigrationPlan against the warm cache.
+//! - [`edit`] — the section-edit ENGINE (the op vocabulary + the pure body
+//!   transform) the applier's compose path runs for section/body edit ops.
+//! - [`cache`] — the cache engine: an owner-opened SQLite projection of the vault
+//!   graph with predicate SQL emission over [`query::DocumentQuery`], paged find,
+//!   deep projection, and the freshness/refresh trust seam.
+//! - [`telemetry`] — the in-memory mutation event stream the applier emits
+//!   through and folds into an `ApplyReport` (the durable JSONL store + the
+//!   `norn audit` read verb are not here yet — see below).
 //! - [`seq_alloc`] — apply-time `{{seq}}` id allocation (filesystem max+1),
 //!   coupled to the writer boundary the owner holds.
 //!
-//! Deliberately NOT here yet (later port phases): the query/filter SQL emission
-//! (the cache-engine run side) and the post-validation finding filters (blocked
-//! on the validate engine's `Finding` model), the validate/repair engine, the
-//! pass-based apply executor (fused with the mutation verbs it serves), and the
-//! mutation verbs themselves — see `retired/CLAUDE.md`.
+//! Deliberately NOT here yet (later port phases, per `retired/CLAUDE.md`): the
+//! durable daily-file JSONL telemetry store and the `norn audit` read verb over
+//! it (only the in-memory event stream is ported); the `init` / `init_scan`
+//! vault-scaffolding and staging surface; on-disk config *resolution* (the
+//! central config home is `norn-config`'s job, injected as a value here); and the
+//! owner's warm-cache serve loop — held-open cache, generations, read pool,
+//! writer queue, per-request refresh — which lives in `norn-owner`, not here.
 
 pub mod apply;
 pub mod cache;

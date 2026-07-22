@@ -93,9 +93,12 @@ pub fn client_error_diagnostic(e: &ClientError) -> Diagnostic {
             Diagnostic::new(e.to_string())
                 .with_hint("the vault owner exited before replying — re-run the command")
         }
-        // Reachable but hung: a real diagnosis path exists via the service verbs.
+        // Reachable but hung: re-running is the honest next step (it re-attempts
+        // the summon against a fresh owner). The `norn service` supervision verbs
+        // that would add a status-check hint here are not yet ported, so no hint
+        // may point at them.
         ClientError::OwnerHealth(_) => Diagnostic::new(e.to_string())
-            .with_hint("the vault owner is not responding — check `norn service status`, or retry"),
+            .with_hint("the vault owner is not responding — re-run the command, or retry"),
         // The remaining variants (runtime-dir security, foreign owner, spawn,
         // protocol, raw IO) are self-explanatory headlines with no honest next
         // step to add — a hint here would be noise.

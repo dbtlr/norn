@@ -5,7 +5,7 @@
 //! create-document materialization, and the vault-root containment gate every
 //! op target must pass before any of them run. They are deliberately kept
 //! separate from the pure content transforms (`standards::apply`) and from the
-//! orchestration that sequences them (`apply::repair_apply`): a filesystem
+//! orchestration that sequences them (`apply::passes::run_apply_passes`): a filesystem
 //! effect lives here, a byte transform lives there, and the pass structure
 //! decides which runs when.
 //!
