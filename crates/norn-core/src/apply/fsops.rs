@@ -14,6 +14,7 @@
 
 use std::fs;
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -222,13 +223,30 @@ pub fn apply_delete(cwd: &Utf8Path, change: &PlannedChange) -> Result<DeleteResu
     })
 }
 
-/// The sibling temp path (`.{stem}.tmp`) an atomic write stages into before the
-/// rename. A dotfile beside the target so it lands on the same filesystem (a
-/// cross-device rename would not be atomic) and is skipped by the vault scan.
+/// Process-static, monotonically increasing suffix source for temp names. Never
+/// resets within a process, so no two temp names collide even for the same
+/// target stem written back-to-back.
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// The sibling temp path (`.{stem}.{pid}-{seq}.tmp`) an atomic write stages into
+/// before the rename. A dotfile beside the target so it lands on the same
+/// filesystem (a cross-device rename would not be atomic) and is skipped by the
+/// vault scan.
+///
+/// The `{pid}-{seq}` suffix makes every temp name UNIQUE (NRN-406 review):
+/// a deterministic `.{stem}.tmp` could be reused by a later write for the same
+/// stem, and if a prior write's best-effort temp cleanup had failed leaving that
+/// name hard-linked to the LIVE inode, the reusing `File::create` would open it
+/// `O_TRUNC` and truncate the live document through the shared inode. A
+/// per-process monotonic sequence (plus the pid, to disambiguate cross-process
+/// leftovers) closes that: a temp name is never handed out twice, so a leaked
+/// temp is inert — nothing ever reopens it.
 fn temp_sibling(full: &Utf8Path) -> Utf8PathBuf {
     let mut p = full.to_path_buf();
     let stem = p.file_name().unwrap_or("doc").to_string();
-    p.set_file_name(format!(".{stem}.tmp"));
+    let pid = std::process::id();
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    p.set_file_name(format!(".{stem}.{pid}-{seq}.tmp"));
     p
 }
 
@@ -305,7 +323,9 @@ pub(crate) fn atomic_write(full: &Utf8Path, contents: &str) -> std::io::Result<(
         let _ = fs::set_permissions(tmp_path.as_std_path(), existing.permissions());
     }
     if let Err(e) = fs::rename(tmp_path.as_std_path(), full.as_std_path()) {
-        // Best-effort cleanup on rename failure.
+        // Best-effort cleanup on rename failure. Swallowing the cleanup error is
+        // safe ONLY because temp names are never reused (see `temp_sibling`): a
+        // leaked temp is inert, so it can never be reopened and truncated.
         let _ = fs::remove_file(tmp_path.as_std_path());
         return Err(e);
     }
@@ -353,13 +373,18 @@ pub(crate) fn create_document_file(
     }
     match fs::hard_link(tmp_path.as_std_path(), full.as_std_path()) {
         Ok(()) => {
+            // Swallowing this cleanup error is safe ONLY because temp names are
+            // never reused (see `temp_sibling`): were a leaked temp reopened by a
+            // later same-stem write, `File::create`'s O_TRUNC would truncate the
+            // live document through the shared inode. Unique names make it inert.
             let _ = fs::remove_file(tmp_path.as_std_path());
             sync_parent_dir(full);
             Ok(())
         }
         Err(e) => {
             // AlreadyExists is the no-clobber refusal; anything else is a real IO
-            // failure. Either way the temp is throwaway — clean it up.
+            // failure. Either way the temp is throwaway — clean it up (same
+            // never-reused-so-safe-to-swallow reasoning as the success arm).
             let _ = fs::remove_file(tmp_path.as_std_path());
             Err(e)
         }
@@ -495,6 +520,43 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "refusal must clean its temp: {leftovers:?}"
+        );
+    }
+
+    /// Regression (NRN-406 review): a LEAKED temp from a prior write — one whose
+    /// best-effort cleanup failed, leaving it hard-linked to the LIVE inode — must
+    /// never be reopened by a later same-stem write. With the old deterministic
+    /// `.{stem}.tmp` name, `create_document_file`'s `File::create` would reopen
+    /// that leftover `O_TRUNC` and truncate the live document through the shared
+    /// inode (then refuse "destination already exists" on top). Unique temp names
+    /// make the leftover inert. This test manually reconstructs the OLD name and
+    /// asserts the live bytes survive — it FAILS against deterministic naming.
+    #[test]
+    #[cfg(unix)]
+    fn create_does_not_truncate_live_doc_through_a_stale_deterministic_temp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let full = root.join("doc.md");
+        fs::write(full.as_std_path(), "live bytes\n").unwrap();
+
+        // Simulate the leaked temp: the OLD deterministic name, hard-linked to the
+        // live inode (exactly the shape a failed post-write cleanup would leave).
+        let stale_tmp = root.join(".doc.md.tmp");
+        fs::hard_link(full.as_std_path(), stale_tmp.as_std_path()).unwrap();
+
+        // A fresh no-force create for the same stem. It must refuse (destination
+        // exists) WITHOUT touching the live inode.
+        let err = create_document_file(&full, "would clobber\n", false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read_to_string(full.as_std_path()).unwrap(),
+            "live bytes\n",
+            "a stale same-name temp must never be reopened and truncate the live doc"
+        );
+        // The stale leftover is still inert, still hard-linked to the live bytes.
+        assert_eq!(
+            fs::read_to_string(stale_tmp.as_std_path()).unwrap(),
+            "live bytes\n"
         );
     }
 

@@ -102,9 +102,17 @@ fn ensure_known_path(
     Ok(())
 }
 
-/// The plan `document_hash` shared by every content op for one path
-/// (`changes_by_path` already rejects divergent same-path hashes, so any op's
-/// hash represents them all). Empty string when operator-originated (no CAS).
+/// The plan `document_hash` for one path, taken from its first content op.
+/// Empty string when operator-originated (no CAS).
+///
+/// `changes_by_path`'s ConflictingHashes check only covers FRONTMATTER ops
+/// (set/add/remove) — strip_bom, rewrite_link, replace_body, and the section
+/// edit ops are skipped by it. So a divergent same-path hash is guaranteed
+/// impossible only across frontmatter ops; a hand-authored plan mixing content
+/// classes with different hashes on one path would CAS against whichever op is
+/// first here. That is acceptable: any wrong hash refuses as stale, and
+/// verb-synthesized plans (the only ones with real hashes) always carry one
+/// uniform hash per path.
 fn content_plan_hash<'a>(ops: &ContentOps<'a>) -> &'a str {
     ops.strip_bom
         .iter()
