@@ -2,7 +2,7 @@
 //! passes (ADR 0024).
 //!
 //! This module owns the plan-level orchestration — schema gate, expansion,
-//! hash hydration, owner-set + `requires`-DAG validation, and assembling the
+//! delete-hash + owner-set + `requires`-DAG validation, and assembling the
 //! [`ApplyReport`] from the per-op outcomes the passes record — while the named
 //! passes ([`crate::apply::passes::run_apply_passes`]) own the ordered
 //! disk-touching work. Every document-mutation command (move, delete,
@@ -77,25 +77,18 @@ pub struct ApplyContext {
 /// `ApplyOp`s; low-level ops expand to exactly one. Provenance is
 /// tracked so the report can surface which parent op each change came from.
 ///
-/// # Phase 2 — Hash hydration
+/// # Phase 2 — Passes
 ///
-/// The intent expander sets `document_hash = ""` for operator-originated
-/// move/delete ops (it has no index at that layer). Before delegating to the
-/// existing apply orchestrator (which hash-checks delete/rewrite/frontmatter ops),
-/// we fill in the real hash from the index for any change that has an empty hash
-/// and whose operation is hash-checked (delete_document, rewrite_link,
-/// replace_body, set/add/remove_frontmatter).
+/// Compare-and-swap hashes arrive in the plan or not at all (ADR 0024): the
+/// move/delete verbs and repair stamp `document_hash` from the index at plan
+/// synthesis, content ops carry their own, and a hash-less delete is refused
+/// (`delete-hash-required`) by a plan-level barrier before any write. There is no
+/// apply-time live-index hydration — filling an empty hash from the same index
+/// the file was read into was a tautological CAS. An `ApplyBatch` is built from
+/// the expanded changes and handed to [`run_apply_passes`], which runs the named
+/// passes and records each op's outcome into a tracker.
 ///
-/// move_document hashes are NOT checked by the existing orchestrator, so an
-/// empty hash there is fine.
-///
-/// # Phase 3 — Passes
-///
-/// An `ApplyBatch` is built from the expanded changes and handed to
-/// [`run_apply_passes`], which runs the named passes and records each op's
-/// outcome into a tracker.
-///
-/// # Phase 4 — Conversion
+/// # Phase 3 — Conversion
 ///
 /// The recorded [`ApplyOutcomes`] are assembled into an `ApplyReport` with per-op status,
 /// provenance (`from`), footnote propagation, and summary lines.
@@ -156,6 +149,24 @@ pub fn apply_migration_plan(
             cwd: index.root.clone(),
         });
         return refuse_plan_level(plan, ctx.dry_run, ctx.refuse_as_report, error);
+    }
+
+    // Delete-hash REQUIRED (NRN-151, ADR 0024): a `delete_document` op with no
+    // plan-time `document_hash` cannot compare-and-swap the file before removing
+    // it — a delete without a CAS is a fail-open removal. Refuse it whole-plan
+    // before any write (`delete-hash-required`, exit 2), keyed at the offending
+    // op so the report names it. The verbs and repair always stamp a hash, so
+    // only a hand-authored hash-less delete newly refuses. Move stays optional.
+    if let Some((op_idx, error)) = first_delete_missing_hash(plan) {
+        if ctx.refuse_as_report {
+            return Ok(build_plan_refusal_report(
+                plan,
+                ctx.dry_run,
+                op_idx,
+                crate::apply::envelope::from_anyhow(&error),
+            ));
+        }
+        return Err(error);
     }
 
     // ------------------------------------------------------------------
@@ -273,10 +284,7 @@ pub fn apply_migration_plan(
         })
         .collect();
 
-    // change_id -> op span id. `hydrated` is `all_changes` mapped 1:1 (same
-    // length and order — hydration only fills empty hashes, never adds/removes
-    // changes), so its `change_id`s align with `span_ids` built from
-    // `all_changes`. We zip `all_changes` (the span_ids source) with span_ids.
+    // change_id -> op span id, zipped 1:1 from `all_changes` (the span_ids source).
     let spans: std::collections::HashMap<String, String> = all_changes
         .iter()
         .zip(span_ids.iter())
@@ -284,46 +292,25 @@ pub fn apply_migration_plan(
         .collect();
 
     // ------------------------------------------------------------------
-    // Phase 2: hash hydration
+    // Phase 2: the one applier (ADR 0024)
     // ------------------------------------------------------------------
-    // The intent expander emits empty document_hash for move_document and
-    // delete_document (operator-driven ops have no hash at expansion time).
-    // The apply orchestrator hash-checks delete_document, rewrite_link,
-    // replace_body, and frontmatter changes — fill those in from the index.
-
-    let index_hashes: std::collections::BTreeMap<Utf8PathBuf, String> = index
-        .documents
-        .iter()
-        .map(|d| (d.path.clone(), d.hash.clone()))
-        .collect();
-
-    let hydrated: Vec<ApplyOp> = all_changes
-        .iter()
-        .map(|c| {
-            if c.document_hash.is_empty() && needs_hash_check(&c.operation) {
-                if let Some(hash) = index_hashes.get(&c.path) {
-                    let mut c2 = c.clone();
-                    c2.document_hash = hash.clone();
-                    return c2;
-                }
-            }
-            c.clone()
-        })
-        .collect();
-
-    // ------------------------------------------------------------------
-    // Phase 3: the one applier (ADR 0024)
-    // ------------------------------------------------------------------
+    // Compare-and-swap hashes arrive IN THE PLAN or not at all (ADR 0024): the
+    // move/delete verbs and the repair planner stamp `document_hash` from the
+    // index at plan-synthesis time, and content ops carry their own. There is no
+    // apply-time live-index hydration — filling an empty hash from the very index
+    // the file was just read into was a tautological CAS (it could never detect
+    // drift within a single command). A hash-less delete is refused above
+    // (`delete-hash-required`); a hash-less move / content op simply skips the CAS.
 
     let batch = ApplyBatch {
         schema_version: REPAIR_PLAN_SCHEMA_VERSION,
         vault_root: vault_root.clone(),
         summary: RepairPlanSummary {
-            findings: hydrated.len(),
-            planned_changes: hydrated.len(),
+            findings: all_changes.len(),
+            planned_changes: all_changes.len(),
             skipped: SkippedSummary::default(),
         },
-        changes: hydrated.clone(),
+        changes: all_changes.clone(),
     };
 
     let create_ctx = CreateApplyContext {
@@ -341,7 +328,7 @@ pub fn apply_migration_plan(
     };
 
     // The `requires` DAG, projected onto the expanded interior change ids.
-    let deps = build_dependency_map(plan, &hydrated, &provenance);
+    let deps = build_dependency_map(plan, &all_changes, &provenance);
 
     // Run the one applier. Per-op failures are recorded in `outcomes.tracker`;
     // an `Err` here is a plan-level barrier (schema, vault-root, vacate,
@@ -370,7 +357,7 @@ pub fn apply_migration_plan(
                 let error_path = rich.and_then(|r| r.path().map(|p| p.to_path_buf()));
                 return Ok(build_refusal_report(
                     plan,
-                    &hydrated,
+                    &all_changes,
                     &provenance,
                     ctx.dry_run,
                     envelope,
@@ -403,7 +390,7 @@ pub fn apply_migration_plan(
         if ctx.refuse_as_report {
             return Ok(build_refusal_report(
                 plan,
-                &hydrated,
+                &all_changes,
                 &provenance,
                 ctx.dry_run,
                 envelope,
@@ -424,7 +411,7 @@ pub fn apply_migration_plan(
     // ------------------------------------------------------------------
 
     let ops = build_report_ops(
-        &hydrated,
+        &all_changes,
         &provenance,
         &plan.operations,
         &outcomes,
@@ -821,25 +808,27 @@ fn build_plan_refusal_report(
 }
 
 /// Finding-provenance linkage echoed verbatim from an op onto its apply-report
-/// record (ADR 0022): `(finding_code, repair_rule)` read directly from the op's
-/// raw `fields` — the authoritative per-op declaration of what the op is
-/// resolving. Repair-generated ops carry the real codes; verb-synthesized and
-/// authored ops declare none, yielding `(None, None)` so their report bytes are
-/// unchanged. The read stays on the wire op, NOT the interior [`ApplyOp`]: a
-/// repair-emitted structural op (`move_document` / `delete_document`) carries its
-/// linkage in the raw `fields`, but the typed
-/// [`MoveDocumentFields`](norn_wire::MoveDocumentFields) /
-/// [`DeleteDocumentFields`](norn_wire::DeleteDocumentFields) vocabulary the interior
-/// op is built from does not carry linkage — so reading the wire op is the only
-/// source that echoes those ops' declared codes faithfully.
+/// record (ADR 0022): `(finding_code, repair_rule)` read from the resolved
+/// [`TypedOp`] — the authoritative per-op declaration of what the op is resolving.
+/// Repair-generated ops carry the real codes; verb-synthesized and authored ops
+/// declare none, yielding `(None, None)` so their report bytes are unchanged.
+///
+/// Every op kind that can carry linkage now models it in the typed vocabulary —
+/// change ops in [`ChangeFields`](norn_wire::ChangeFields) and, since ADR 0024,
+/// the structural [`MoveDocumentFields`](norn_wire::MoveDocumentFields) /
+/// [`DeleteDocumentFields`](norn_wire::DeleteDocumentFields) — so the report reads
+/// the TYPED op uniformly rather than indexing raw `fields`. A decode failure
+/// (an op refused at expansion) never reaches the report path; the defensive
+/// `Err` arm yields no linkage. Edit / move-folder / rewrite-wikilink ops carry
+/// no linkage.
 fn op_finding_linkage(op: &MigrationOp) -> (Option<String>, Option<String>) {
-    let read = |key: &str| {
-        op.fields
-            .get(key)
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-    };
-    (read("finding_code"), read("repair_rule"))
+    use norn_wire::TypedOp;
+    match TypedOp::try_from(op) {
+        Ok(TypedOp::Change(c)) => (c.fields.finding_code, c.fields.repair_rule),
+        Ok(TypedOp::MoveDocument(f)) => (f.finding_code, f.repair_rule),
+        Ok(TypedOp::DeleteDocument(f)) => (f.finding_code, f.repair_rule),
+        _ => (None, None),
+    }
 }
 
 /// Best-effort display token for a raw `MigrationOp` (an expansion-phase refusal
@@ -854,6 +843,35 @@ fn op_display_path(op: &MigrationOp) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("<unknown>")
         .to_string()
+}
+
+/// The first `delete_document` op (by plan order) carrying no plan-time
+/// `document_hash`, paired with the `delete-hash-required` refusal (NRN-151, ADR
+/// 0024). A delete's hash is the compare-and-swap precondition that guarantees the
+/// file removed is the file reviewed; without it the delete is fail-open, so the
+/// whole plan is refused before any write. A `null`, absent, OR empty-string hash
+/// all count as missing — an empty hash would silently skip the CAS
+/// (`fingerprint_vacate` treats `""` as "no check"), the exact fail-open hole this
+/// barrier closes. An op whose `fields` do not even decode is left for the
+/// expansion phase to refuse with its own coded error.
+fn first_delete_missing_hash(plan: &MigrationPlan) -> Option<(usize, anyhow::Error)> {
+    use norn_wire::TypedOp;
+    for (i, op) in plan.operations.iter().enumerate() {
+        if op.kind != "delete_document" {
+            continue;
+        }
+        if let Ok(TypedOp::DeleteDocument(f)) = TypedOp::try_from(op) {
+            if f.document_hash.as_deref().unwrap_or("").is_empty() {
+                let error = anyhow::Error::from(
+                    crate::standards::apply::PlanStructureError::DeleteHashRequired {
+                        path: Utf8PathBuf::from(f.path),
+                    },
+                );
+                return Some((i, error));
+            }
+        }
+    }
+    None
 }
 
 /// Validate the plan's `requires` DAG (ADR 0024) before any write: every edge
@@ -950,30 +968,6 @@ fn build_dependency_map(
         }
     }
     DependencyMap::new(change_requires, op_changes)
-}
-
-/// Returns true for operation kinds that the apply passes hash-check. Operations
-/// not listed here (e.g. move_document, create_document) are not subject to hash
-/// checks and can safely have an empty document_hash.
-fn needs_hash_check(operation: &str) -> bool {
-    matches!(
-        operation,
-        "delete_document"
-            | "rewrite_link"
-            | "replace_body"
-            | "set_frontmatter"
-            | "add_frontmatter"
-            | "remove_frontmatter"
-            // Section/body edit ops (NRN-98) are hash-checked in Pass 1d2, so an
-            // omitted document_hash must be hydrated from the index just like
-            // replace_body — otherwise a plan without a hash aborts spuriously.
-            | "str_replace"
-            | "replace_section"
-            | "append_to_section"
-            | "delete_section"
-            | "insert_before_heading"
-            | "insert_after_heading"
-    )
 }
 
 /// Build a one-liner summary for an `ApplyReportOp`.
@@ -1621,6 +1615,15 @@ mod tests {
         let index = crate::graph::build_index(utf8_root).unwrap();
 
         let vault_root = root.to_string_lossy().to_string();
+        // Delete now requires a plan-time hash (NRN-151); stamp the real one so
+        // the barrier + CAS pass and the link_impact assertions are exercised.
+        let bhash = index
+            .documents
+            .iter()
+            .find(|d| d.path == "x/b.md")
+            .unwrap()
+            .hash
+            .clone();
         let plan = MigrationPlan {
             schema_version: 2,
             vault_root,
@@ -1635,6 +1638,7 @@ mod tests {
                     "path": "x/b.md",
                     "rewrite_to": "c.md",
                     "allow_broken_links": false,
+                    "document_hash": bhash,
                 }),
                 footnote: None,
             }],
@@ -1907,10 +1911,11 @@ mod tests {
     ///   `applied` (X was written), op1 is `failed` carrying `error.code`, and the
     ///   report never implies a byte-identical vault.
     ///
-    /// (A hydrated apply `delete` cannot carry a *stale* hash — hydration fills
-    /// its empty hash from the index, and Phase B checks against that same index
-    /// snapshot — so `unknown-path` is the reachable Phase-B `is_precondition`
-    /// failure that reproduces the exact re-raise-after-write shape.)
+    /// (The delete targets an UNTRACKED path — `ghost.md` — which fails Phase B's
+    /// `ensure_known_path` (`unknown-path`) BEFORE its bytes are fingerprinted, so
+    /// a barrier-satisfying placeholder hash never gets CAS'd. `unknown-path` is
+    /// the reachable Phase-B `is_precondition` failure that reproduces the exact
+    /// re-raise-after-write shape.)
     #[test]
     fn partial_apply_reports_failed_not_refused_when_a_write_landed() {
         let (tmp, index) = synth_vault();
@@ -1939,7 +1944,7 @@ mod tests {
                     kind: "delete_document".into(),
                     id: None,
                     requires: vec![],
-                    fields: serde_json::json!({ "path": "ghost.md" }),
+                    fields: serde_json::json!({ "path": "ghost.md", "document_hash": "0000000000000000000000000000000000000000000000000000000000000000" }),
                     footnote: None,
                 },
             ],
@@ -2648,7 +2653,7 @@ mod tests {
                     kind: "delete_document".into(),
                     id: Some("del".into()),
                     requires: vec![],
-                    fields: serde_json::json!({ "path": "ghost.md" }), // unknown-path → fails
+                    fields: serde_json::json!({ "path": "ghost.md", "document_hash": "0000000000000000000000000000000000000000000000000000000000000000" }), // unknown-path → fails
                     footnote: None,
                 },
                 create_op("dependent.md", None, &["del"]), // requires the failed delete
@@ -2690,7 +2695,7 @@ mod tests {
                     kind: "delete_document".into(),
                     id: Some("del".into()),
                     requires: vec!["mk".into()],
-                    fields: serde_json::json!({ "path": "alpha.md" }),
+                    fields: serde_json::json!({ "path": "alpha.md", "document_hash": "0000000000000000000000000000000000000000000000000000000000000000" }),
                     footnote: None,
                 },
                 create_op("later.md", Some("mk"), &[]),
@@ -2790,5 +2795,206 @@ mod tests {
         );
         assert!(!tmp.path().join("dup-a.md").exists());
         assert!(!tmp.path().join("dup-b.md").exists());
+    }
+
+    // ── delete-hash required + structural CAS (NRN-151, ADR 0024) ──────────────
+
+    fn hash_of(index: &GraphIndex, path: &str) -> String {
+        index
+            .documents
+            .iter()
+            .find(|d| d.path == path)
+            .unwrap_or_else(|| panic!("{path} not in index"))
+            .hash
+            .clone()
+    }
+
+    fn move_op(src: &str, dst: &str, document_hash: Option<&str>) -> MigrationOp {
+        let mut fields = serde_json::Map::new();
+        fields.insert("src".into(), serde_json::Value::String(src.into()));
+        fields.insert("dst".into(), serde_json::Value::String(dst.into()));
+        if let Some(h) = document_hash {
+            fields.insert("document_hash".into(), serde_json::Value::String(h.into()));
+        }
+        MigrationOp {
+            kind: "move_document".into(),
+            id: None,
+            requires: vec![],
+            fields: serde_json::Value::Object(fields),
+            footnote: None,
+        }
+    }
+
+    /// A hand-authored `delete_document` op with NO `document_hash` is refused
+    /// whole-plan before any write: `delete-hash-required`, exit 2, file untouched.
+    #[test]
+    fn delete_without_document_hash_refuses_delete_hash_required() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = plan_of(
+            &vault_root,
+            vec![MigrationOp {
+                kind: "delete_document".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({ "path": "a.md" }),
+                footnote: None,
+            }],
+        );
+        let report = apply_migration_plan(&plan, &index, confirm_ctx(), &mut test_sink()).unwrap();
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Refused);
+        assert_eq!(report.exit_code(), 2);
+        let err = report
+            .operations
+            .iter()
+            .find_map(|o| o.error.as_ref())
+            .expect("refusal carries a coded error");
+        assert_eq!(err.code, "delete-hash-required");
+        assert_eq!(err.path.as_deref(), Some("a.md"));
+        assert!(tmp.path().join("a.md").exists(), "refusal writes nothing");
+    }
+
+    /// An explicit empty-string `document_hash` counts as missing (it would
+    /// silently skip the CAS), so it refuses `delete-hash-required` too.
+    #[test]
+    fn delete_with_empty_document_hash_also_refuses() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = plan_of(
+            &vault_root,
+            vec![MigrationOp {
+                kind: "delete_document".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({ "path": "a.md", "document_hash": "" }),
+                footnote: None,
+            }],
+        );
+        let report = apply_migration_plan(&plan, &index, confirm_ctx(), &mut test_sink()).unwrap();
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Refused);
+        assert_eq!(
+            report
+                .operations
+                .iter()
+                .find_map(|o| o.error.as_ref())
+                .map(|e| e.code.as_str()),
+            Some("delete-hash-required")
+        );
+        assert!(tmp.path().join("a.md").exists());
+    }
+
+    /// A delete carrying the correct plan-time hash applies (b.md has no
+    /// incoming links, so no cascade). Proves the barrier + CAS accept a match.
+    #[test]
+    fn delete_with_matching_hash_applies() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = plan_of(
+            &vault_root,
+            vec![MigrationOp {
+                kind: "delete_document".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({
+                    "path": "b.md",
+                    "document_hash": hash_of(&index, "b.md"),
+                }),
+                footnote: None,
+            }],
+        );
+        let report = apply_migration_plan(&plan, &index, confirm_ctx(), &mut test_sink()).unwrap();
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Applied);
+        assert!(!tmp.path().join("b.md").exists(), "b.md was deleted");
+    }
+
+    /// Move CAS is OPTIONAL: a move op with NO `document_hash` applies (no check).
+    #[test]
+    fn move_without_hash_applies() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = plan_of(&vault_root, vec![move_op("b.md", "moved.md", None)]);
+        let report = apply_migration_plan(&plan, &index, confirm_ctx(), &mut test_sink()).unwrap();
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Applied);
+        assert!(tmp.path().join("moved.md").exists());
+        assert!(!tmp.path().join("b.md").exists());
+    }
+
+    /// Move CAS present-and-matching applies (pre-rename fingerprint check passes).
+    #[test]
+    fn move_with_matching_hash_applies() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let hash = hash_of(&index, "b.md");
+        let plan = plan_of(&vault_root, vec![move_op("b.md", "moved.md", Some(&hash))]);
+        let report = apply_migration_plan(&plan, &index, confirm_ctx(), &mut test_sink()).unwrap();
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Applied);
+        assert!(tmp.path().join("moved.md").exists());
+    }
+
+    /// Move CAS present-but-stale refuses `stale-document-hash` before the rename —
+    /// where the pre-0024 applier (and the donor) proceeded (move was unchecked).
+    /// A pre-write single-op failure surfaces as a clean refusal (exit 2).
+    #[test]
+    fn move_with_stale_hash_refuses() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let stale = "0000000000000000000000000000000000000000000000000000000000000000";
+        let plan = plan_of(&vault_root, vec![move_op("b.md", "moved.md", Some(stale))]);
+        let report = apply_migration_plan(&plan, &index, confirm_ctx(), &mut test_sink()).unwrap();
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Refused);
+        assert_eq!(report.exit_code(), 2);
+        assert_eq!(
+            report
+                .operations
+                .iter()
+                .find_map(|o| o.error.as_ref())
+                .map(|e| e.code.as_str()),
+            Some("stale-document-hash")
+        );
+        assert!(tmp.path().join("b.md").exists(), "refusal writes nothing");
+        assert!(!tmp.path().join("moved.md").exists());
+    }
+
+    /// A repair-emitted structural op's finding linkage decodes through the typed
+    /// vocabulary and echoes onto the report op — read uniformly from the TYPED
+    /// op, exactly like a change op (ADR 0024 item 5). A verb-synthesized move
+    /// (no linkage) echoes `None`, so its report bytes are unchanged.
+    #[test]
+    fn structural_op_linkage_echoes_through_typed_path() {
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        // A move op carrying linkage (as repair emits it); no hash → CAS opt-out.
+        let mut linked = move_op("b.md", "moved.md", None);
+        let obj = linked.fields.as_object_mut().unwrap();
+        obj.insert(
+            "finding_code".into(),
+            serde_json::Value::String("frontmatter-required-field-missing".into()),
+        );
+        obj.insert(
+            "repair_rule".into(),
+            serde_json::Value::String("set-default".into()),
+        );
+        let plan = plan_of(&vault_root, vec![linked]);
+        let ctx = ApplyContext {
+            dry_run: true,
+            ..confirm_ctx()
+        };
+        let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
+        let op = &report.operations[0];
+        assert_eq!(
+            op.finding_code.as_deref(),
+            Some("frontmatter-required-field-missing")
+        );
+        assert_eq!(op.repair_rule.as_deref(), Some("set-default"));
+
+        // A verb-shaped move omits linkage → None (omitted, not fabricated).
+        let plan2 = plan_of(&vault_root, vec![move_op("a.md", "moved-a.md", None)]);
+        let ctx2 = ApplyContext {
+            dry_run: true,
+            ..confirm_ctx()
+        };
+        let report2 = apply_migration_plan(&plan2, &index, ctx2, &mut test_sink()).unwrap();
+        assert_eq!(report2.operations[0].finding_code, None);
+        assert_eq!(report2.operations[0].repair_rule, None);
     }
 }
