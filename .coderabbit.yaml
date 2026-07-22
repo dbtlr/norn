@@ -1,0 +1,12 @@
+# CodeRabbit configuration.
+#
+# docs/parity-ledger.toml is excluded from review: its comment-block-above-
+# [[entry]] layout has drawn the identical "duplicate [[entry]] header" false
+# positive on seven consecutive PRs (once escalated to Critical). The file is
+# structurally guarded where it matters — the parity ledger loader rejects
+# duplicate ids, empty entries, and unknown case references, and
+# crates/norn-parity/tests/ledger.rs pins the entry count — so review of this
+# file adds noise, not safety.
+reviews:
+  path_filters:
+    - "!docs/parity-ledger.toml"
