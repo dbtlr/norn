@@ -1564,6 +1564,15 @@ const SECTION_EDGE_1: Fixture = Fixture {
     seed: 1,
 };
 
+/// The wikilink-edge fixture (NRN-424): the valid zoo plus the embed /
+/// code-fence-shadow / caret-stem backlink probes (`wl/*.md`), isolated on the
+/// `wikilink-edge` profile so the decided wikilink-rewriter corruption fixes
+/// never touch a shared zoo/clean case (the section-edge discipline).
+const WIKILINK_EDGE_1: Fixture = Fixture {
+    profile_name: "wikilink-edge",
+    seed: 1,
+};
+
 /// The trace-id normalization every CONFIRMED-apply case appends: the pinned
 /// oracle mints a random `trace:`/`trace_id` on apply, the rewrite emits an empty
 /// one by contract, so without this an otherwise byte-equal apply would diverge
@@ -1973,6 +1982,184 @@ const MUTATE_CASES: &[Case] = &[
         ported: true,
         expect_oracle_exit: 0,
         requires_doc: Some("notes/cycle-b.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // ── NRN-424: the wikilink-rewriter unification divergences ────────────────
+    // Confirmed applies against the wikilink-edge fixture. The oracle shares all
+    // three rewriter bugs, so on these backlink shapes it writes DIFFERENT bytes
+    // than the fix — the post-state tree diverges (stdout matches: the plan/report
+    // is computed the same on both sides). Each exits 0, so TRACE_NORM collapses
+    // the oracle's random applied `trace:` id to the rewrite's empty one, isolating
+    // the divergence to the corrected content. Grouped by mechanism: PD-116
+    // (embed marker), PD-117 (code opacity, both engines), PD-118 (caret target).
+    //
+    // NRN-431 — move cascade drops an embed's `!` and `|alias`. The oracle rewrites
+    // `![[embed-target|Display]]` → `[[embed-moved]]`; the rewrite keeps
+    // `![[embed-moved|Display]]`.
+    Case {
+        id: "wl-move-embed-backlink-diverge",
+        argv: &["move", "embed-target", "wl/embed-moved.md", "--yes"],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/embed-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // NRN-432 (cascade) — the move cascade's first-occurrence `replacen` rewrites
+    // the code-fenced `[[fence-target]]` sample and leaves the real prose backlink
+    // dangling; the span-based rewrite skips the fence and rewrites the prose link.
+    Case {
+        id: "wl-move-code-fence-shadow-diverge",
+        argv: &["move", "fence-target", "wl/fence-moved.md", "--yes"],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/fence-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // NRN-432 (verb) — the rewrite-wikilink whole-file scan rewrites BOTH the
+    // fenced sample and the prose link; the code-aware rewrite touches only prose.
+    Case {
+        id: "wl-rewrite-wikilink-code-fence-shadow-diverge",
+        argv: &["rewrite-wikilink", "fence-target", "fence-renamed", "--yes"],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/fence-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // NRN-433 — a bare `^` is an ordinary target char. The oracle splits `[[a^b]]`
+    // on `^`, so the rewrite never matches and the file is left untouched (while
+    // success is reported); the rewrite splits on `#` only and rewrites `[[a^b]]`.
+    Case {
+        id: "wl-rewrite-wikilink-caret-stem-diverge",
+        argv: &["rewrite-wikilink", "a^b", "caret-renamed", "--yes"],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/caret-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // NRN-431 (delete variant, PD-116) — `delete --rewrite-to` redirects the embed
+    // backlink through the SAME cascade helpers as the move case. The oracle
+    // collapses `![[embed-target|Display]]` → `[[redirect-target]]`; the rewrite
+    // preserves `![[redirect-target|Display]]`. Pins the delete engine of PD-116's
+    // mechanism (mirroring how PD-117 pins both the cascade and the verb).
+    Case {
+        id: "wl-delete-embed-backlink-diverge",
+        argv: &[
+            "delete",
+            "embed-target",
+            "--rewrite-to",
+            "redirect-target",
+            "--yes",
+        ],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/embed-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // PD-119 (decided-better) — interior-whitespace canonicalization on rewrite.
+    // The reconstructed link emits the parser-trimmed target/alias, so a backlink
+    // with whitespace around the pipe or padding inside the brackets is rewritten
+    // to its canonical (tight) form. Byte-parity would require replicating the
+    // oracle's own inconsistency (it drops the target-side space but keeps the
+    // alias-side space); the padded-target match additionally fixes the oracle's
+    // phantom no-op (its untrimmed bare_target defeats its own match).
+    //
+    // Cascade move over a spaced-pipe aliased backlink: the oracle keeps the
+    // alias-side space (`[[spaced-moved| Display Name]]`), the rewrite trims it
+    // (`[[spaced-moved|Display Name]]`).
+    Case {
+        id: "wl-move-spaced-alias-diverge",
+        argv: &["move", "spaced-target", "wl/spaced-moved.md", "--yes"],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/spaced-alias-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // rewrite-wikilink over a padded (leading/trailing-whitespace) target link:
+    // the oracle phantom-no-ops (`[[ padded-target ]]` untouched), the rewrite
+    // matches on the trimmed target and rewrites it (`[[padded-renamed]]`).
+    Case {
+        id: "wl-rewrite-wikilink-padded-target-diverge",
+        argv: &[
+            "rewrite-wikilink",
+            "padded-target",
+            "padded-renamed",
+            "--yes",
+        ],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/padded-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // PD-120 (decided-better) — a rename to an UNREPRESENTABLE wikilink target (a
+    // name carrying `|`/`#`/`[`/`]`) would re-parse as a different link shape and
+    // corrupt the backlink. The oracle emits `[[a|b]]` (target `a`, alias `b`);
+    // the rewrite refuses/skips, leaving the link intact. Both surfaces are
+    // reachable (no upstream filename-portability refusal on the destination).
+    //
+    // rewrite-wikilink verb: the oracle applies (exit 0) and corrupts; the rewrite
+    // refuses the whole op (exit 2, `unrepresentable-rewrite-target`), write-free.
+    Case {
+        id: "wl-rewrite-wikilink-unrepresentable-refusal",
+        argv: &["rewrite-wikilink", "unrepr-target", "a|b", "--yes"],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/unrepr-src.md"),
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
+    // move cascade: both exit 0 (the file moves to `wl/a|b.md`), but the oracle
+    // corrupts the backlink to `[[a|b]]` while the rewrite skips it
+    // (`would-corrupt-wikilink`), leaving `[[unrepr-target]]` stale-but-intact.
+    Case {
+        id: "wl-move-unrepresentable-skip-diverge",
+        argv: &["move", "unrepr-target", "wl/a|b.md", "--yes"],
+        fixture: WIKILINK_EDGE_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("wl/unrepr-src.md"),
         requires_code: None,
         normalize: TRACE_NORM,
         plan: None,

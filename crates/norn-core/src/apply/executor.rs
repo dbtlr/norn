@@ -1462,6 +1462,66 @@ mod tests {
     }
 
     #[test]
+    fn deserialized_plan_still_skips_unrepresentable_target_backlink() {
+        // NRN-424 serialization-trust: the cascade's `link_risk` (and its
+        // `#[serde(skip)]` `unrepresentable` flag) is NEVER carried on the wire —
+        // the MigrationPlan's move_document op holds only src/dst, and `expand()`
+        // RE-DERIVES `link_risk` via `classify_link_risk` against the live index at
+        // apply time (cascades are DERIVED at apply, NRN-406). So even a plan that
+        // is serialized to JSON and read back must still skip an unrepresentable
+        // rename rather than corrupt the backlink. Round-trip the plan to prove the
+        // recompute path holds and the persisted flag is irrelevant.
+        let (tmp, index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        let plan = MigrationPlan {
+            schema_version: 2,
+            vault_root: vault_root.clone(),
+            generator: None,
+            generated_at: None,
+            preconditions: Vec::new(),
+            operations: vec![MigrationOp {
+                kind: "move_document".into(),
+                id: None,
+                requires: vec![],
+                // `a|b` is not a representable wikilink target (the `|` begins an
+                // alias), so rewriting `[[a]]` to it would corrupt the backlink.
+                fields: serde_json::json!({"src": "a.md", "dst": "a|b.md"}),
+                footnote: None,
+            }],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+        // The round-trip: serialize to the wire JSON and read it back. If the
+        // `unrepresentable` decision rode on the (skipped) serialized flag, it
+        // would be lost here and the backlink would be corrupted below.
+        let wire = serde_json::to_string(&plan).unwrap();
+        let plan: MigrationPlan = serde_json::from_str(&wire).unwrap();
+        assert!(
+            !wire.contains("unrepresentable") && !wire.contains("link_risk"),
+            "cascade link data must not appear on the wire plan"
+        );
+
+        let ctx = ApplyContext {
+            dry_run: false,
+            parents: false,
+            verbose: false,
+            refuse_as_report: false,
+            owner_index_options: Default::default(),
+        };
+        let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
+        assert_eq!(report.applied, 1, "the move itself still applies");
+        // The file moved to the (odd but legal) destination.
+        assert!(!tmp.path().join("a.md").exists());
+        assert!(tmp.path().join("a|b.md").exists());
+        // The backlink is left INTACT (`[[a]]`), NOT corrupted to `[[a|b]]`.
+        let b = std::fs::read_to_string(tmp.path().join("b.md")).unwrap();
+        assert!(
+            b.contains("[[a]]") && !b.contains("[[a|b]]"),
+            "the unrepresentable-target backlink must be skipped, not corrupted: {b}"
+        );
+    }
+
+    #[test]
     fn applier_preresolves_seq_create_before_delegate() {
         // NRN-265: the MigrationPlan applier resolves `{{seq}}` in
         // `resolve_create_paths` and rewrites `change.path` before delegating,

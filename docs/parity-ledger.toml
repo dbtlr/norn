@@ -314,3 +314,94 @@ old = "the section body start is the byte after the heading marker's first newli
 new = "the body start is the parser's heading-construct end (past the SETEXT underline), and an op inserting body content after a heading with no trailing newline emits the missing line terminator first (NRN-437): the SETEXT underline is preserved (`Alpha\\n-----\\nREPLACED.` / the inserted line lands below the underline) and the EOF heading stays a heading (`## Tail\\nNEW.` / `## Tail\\n- item`) — a valid CommonMark heading survives the edit"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-424 (one span-based wikilink rewriter): three independent `[[..]]`
+# rewriters disagreed with the authoritative parser (`parse_wikilinks`, which is
+# code-opaque per ADR 0019 and splits a block ref only on `#^`). The rewrite
+# unifies them onto a single span-based engine driven by the parser's tokens, so
+# only real parsed links rewrite and the embed marker / alias / anchor survive by
+# construction. The oracle shares all three bugs, so each fix diverges on its
+# backlink shape (post-state tree; stdout matches — the plan/report is computed
+# the same on both sides). Grouped by mechanism below. See
+# `crates/norn-frontmatter/src/wikilink.rs` (`splice_wikilinks` /
+# `reconstruct_wikilink`), `crates/norn-core/src/standards/repair/link_risk.rs`
+# (the cascade rewrite), and `crates/norn-core/src/standards/apply.rs`
+# (`apply_rewrite_link` / `rewrite_one_backlink`).
+
+# PD-116 — NRN-431: the move/delete cascade dropped an embed's `!` and `|alias`.
+# Both cascade entry points are pinned: a `move` (the stem-only rewrite) and a
+# `delete --rewrite-to` (the redirect), which share the same cascade helpers.
+[[entry]]
+id = "PD-116"
+surface = "move / delete --rewrite-to (backlink cascade over an embed reference)"
+cases = ["wl-move-embed-backlink-diverge", "wl-delete-embed-backlink-diverge"]
+old = "the cascade rewrites an embed backlink with a `raw.strip_prefix(\"[[\")` that misses the leading `!` of `![[…]]`: the inner collapses and the whole embed is replaced by a bare wikilink, dropping the `!` AND the `|alias` (`![[embed-target|Display]]` → `[[embed-moved]]` on a move; → `[[redirect-target]]` on a delete redirect)"
+new = "the cascade rebuilds the link through the parser (`reconstruct_wikilink`), preserving the embed marker and the alias: `![[embed-target|Display]]` → `![[embed-moved|Display]]` (move) / `![[redirect-target|Display]]` (delete redirect)"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# PD-117 — NRN-432: neither applier respected code opacity. Same mechanism (a
+# code-fenced `[[old]]` is literal sample text), two engines: the move cascade's
+# first-occurrence `replacen` and the rewrite-wikilink verb's whole-file scan.
+[[entry]]
+id = "PD-117"
+surface = "move / rewrite-wikilink (a code-fence-shadowed backlink)"
+cases = ["wl-move-code-fence-shadow-diverge", "wl-rewrite-wikilink-code-fence-shadow-diverge"]
+old = "the rewriters are not code-opaque: with a fenced `[[fence-target]]` sample ABOVE the real prose backlink, the move cascade's `replacen(raw, .., 1)` rewrites the FIRST file occurrence (the fenced sample) and leaves the real prose link dangling, and the rewrite-wikilink verb's whole-file `find(\"[[\")` scan rewrites BOTH the fenced sample and the prose link"
+new = "both route through the code-aware parser (`parse_wikilinks`), which excludes fenced / inline-code ranges (ADR 0019): the fenced sample is never touched and only the real prose backlink is rewritten"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# PD-118 — NRN-433: the rewrite-wikilink verb split the target on a bare `^`.
+[[entry]]
+id = "PD-118"
+surface = "rewrite-wikilink (a target stem carrying a bare `^`)"
+cases = ["wl-rewrite-wikilink-caret-stem-diverge"]
+old = "`split_target_suffix` splits the target at the first `#` OR `^`, but a bare `^` is an ordinary filename character per the parser (a block ref is `#^id`). So `rewrite-wikilink 'a^b' caret-renamed` matches the pre-`^` fragment `a` against the target `a^b`, never rewrites, and leaves `[[a^b]]` untouched while reporting success"
+new = "matching uses the parser's decomposition (split on `#` only), so the whole `a^b` target matches and `[[a^b]]` is rewritten to `[[caret-renamed]]`"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# PD-119 — NRN-424 (decided-better): interior-whitespace canonicalization on
+# rewrite. The unified rewriter reconstructs a link from the parser's decomposed
+# (trimmed) target and alias, so a backlink carrying interior whitespace — space
+# around the `|` pipe, or leading/trailing padding inside the `[[ ]]` — is
+# rewritten to its canonical tight form. This is DECIDED-BETTER, not a bug to
+# preserve: byte-parity would require replicating the oracle's OWN inconsistency
+# (its ad-hoc rewriters drop the target-side space but keep the alias-side space),
+# and the padded-target case additionally FIXES a phantom no-op — the oracle's
+# `rewrite-wikilink` compares an untrimmed `bare_target` (` padded-target `)
+# against the trimmed plan target (`padded-target`), never matches, and leaves the
+# file untouched while reporting success (the same family as the caret bug,
+# PD-118). Both cases exit 0 on both sides; the plan/report matches, the
+# post-state tree diverges. See `crates/norn-frontmatter/src/wikilink.rs`
+# (`reconstruct_wikilink`).
+[[entry]]
+id = "PD-119"
+surface = "move / rewrite-wikilink (a backlink with interior whitespace)"
+cases = ["wl-move-spaced-alias-diverge", "wl-rewrite-wikilink-padded-target-diverge"]
+old = "the ad-hoc rewriters preserve a link's interior whitespace verbatim, inconsistently: a move cascade over `[[spaced-target | Display Name]]` drops the target-side space but keeps the alias-side space (`[[spaced-moved| Display Name]]`), and `rewrite-wikilink` over `[[ padded-target ]]` matches its untrimmed `bare_target` against the trimmed plan target, so it never rewrites and leaves the link untouched while reporting success"
+new = "the reconstructed link emits the parser-trimmed target and alias, canonicalizing interior whitespace: `[[spaced-target | Display Name]]` → `[[spaced-moved|Display Name]]`, and `[[ padded-target ]]` matches on the trimmed target and rewrites to `[[padded-renamed]]` (the phantom no-op is fixed)"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# PD-120 — NRN-424 (decided-better): refuse/skip a rename to an UNREPRESENTABLE
+# wikilink target. A target carrying a wikilink delimiter (`|`/`#`/`[`/`]`) cannot
+# be emitted as `[[target]]` without re-parsing as a DIFFERENT link — `[[a|b]]`
+# reads as target `a`, alias `b` — silently corrupting the backlink on a rename to
+# such a filename. Neither move nor rewrite-wikilink refuses such a destination
+# upstream (a `|` is a legal POSIX filename byte), so this is REACHABLE, not
+# defense-in-depth. The oracle emits the corrupt link; the rewrite refuses (the
+# verb, exit 2, `unrepresentable-rewrite-target`) or skips (the cascade,
+# `would-corrupt-wikilink`, leaving the link stale-but-intact and detectable by
+# `validate`) — the same recoverable posture as would-corrupt-frontmatter. See
+# `crates/norn-frontmatter/src/wikilink.rs` (`wikilink_target_is_representable` /
+# `reconstruct_wikilink`) and `crates/norn-core/src/standards/apply.rs`.
+[[entry]]
+id = "PD-120"
+surface = "rewrite-wikilink / move (rename to an unrepresentable wikilink target)"
+cases = ["wl-rewrite-wikilink-unrepresentable-refusal", "wl-move-unrepresentable-skip-diverge"]
+old = "a rename whose new target carries a `|`/`#`/`[`/`]` is emitted verbatim, so the backlink re-parses as a different link and is silently corrupted: `[[unrepr-target]]` becomes `[[a|b]]` (which reads as target `a`, alias `b`) on both the rewrite-wikilink verb (exit 0) and the move cascade (exit 0)"
+new = "the target is checked for representability first: the rewrite-wikilink verb REFUSES the whole op (exit 2, `unrepresentable-rewrite-target`, write-free) and the move cascade SKIPS the backlink (`would-corrupt-wikilink`), leaving `[[unrepr-target]]` intact and detectable by `validate` rather than corrupted"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

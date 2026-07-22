@@ -119,6 +119,90 @@ pub fn split_anchor_or_block_ref(raw: &str) -> (String, Option<String>, Option<S
     }
 }
 
+/// Whether `target` can be represented as a wikilink target — i.e. reconstructing
+/// a link with it and re-parsing yields the SAME target. The delimiter bytes a
+/// target must not contain: `|` (begins the alias), `#` (begins the anchor /
+/// block ref), and `[` / `]` (the `[[ ]]` fences). A target carrying any of them
+/// would silently re-parse as a different link shape — e.g. `a|b` becomes target
+/// `a` with alias `b` — so a rewrite to such a name must be refused, not emitted
+/// (a rename to a filename with these bytes is where this bites). Newlines and
+/// other bytes round-trip and are permitted.
+pub fn wikilink_target_is_representable(target: &str) -> bool {
+    !target.contains(['|', '#', '[', ']'])
+}
+
+/// Reconstruct a wikilink's text with `new_target` in place of its target,
+/// preserving the embed marker (`!`), the heading anchor / block-reference
+/// suffix, and the display alias. The inverse of [`parse_wikilinks`]'s
+/// decomposition: given a parsed [`Wikilink`] plus a replacement target, emit
+/// canonical `[[…]]` text. The alias and anchor are re-emitted from their parsed
+/// (trimmed) forms, and a block reference re-emits as `#^id` — the authoritative
+/// round-trip, so a rewriter can never drop the `!` or the `|alias` the way a
+/// `strip_prefix("[[")` hand-roll does (NRN-431), and the `#`/`^` split follows
+/// the parser (a bare `^` stays in the target — NRN-433).
+///
+/// Returns `None` when `new_target` is not representable (see
+/// [`wikilink_target_is_representable`]): emitting it would corrupt the link into
+/// a different shape, so the caller must refuse/skip the rewrite instead.
+pub fn reconstruct_wikilink(link: &Wikilink, new_target: &str) -> Option<String> {
+    if !wikilink_target_is_representable(new_target) {
+        return None;
+    }
+    let mut out = String::new();
+    if link.embed {
+        out.push('!');
+    }
+    out.push_str("[[");
+    out.push_str(new_target);
+    if let Some(block_ref) = &link.block_ref {
+        out.push_str("#^");
+        out.push_str(block_ref);
+    } else if let Some(anchor) = &link.anchor {
+        out.push('#');
+        out.push_str(anchor);
+    }
+    if let Some(alias) = &link.alias {
+        out.push('|');
+        out.push_str(alias);
+    }
+    out.push_str("]]");
+    Some(out)
+}
+
+/// The single span-based wikilink rewriter (NRN-424/NRN-412). Rewrite selected
+/// `[[…]]` references in `text` by splicing a replacement at each parsed link's
+/// exact byte span. `parse` chooses code-awareness — [`parse_wikilinks`] for a
+/// Markdown body (fenced / inline-code links are opaque per ADR 0019, so they
+/// are never touched — NRN-432) or [`parse_wikilinks_in_text`] for a raw
+/// frontmatter value. `replace(link)` returns `Some(text)` to substitute for
+/// `link` verbatim at its span, or `None` to leave it untouched; it is `FnMut`
+/// so a caller can rewrite only the first matching link. Because every
+/// substitution lands on a parser-recognized span, the embed marker, alias, and
+/// anchor survive by construction and code-fenced samples are structurally
+/// excluded — the three ways the ad-hoc rewriters diverged from the parser.
+pub fn splice_wikilinks(
+    text: &str,
+    parse: impl Fn(&str) -> Vec<Wikilink>,
+    mut replace: impl FnMut(&Wikilink) -> Option<String>,
+) -> String {
+    let links = parse(text);
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for link in &links {
+        let start = link.span.byte_offset;
+        let Some(replacement) = replace(link) else {
+            continue;
+        };
+        // captures_iter yields non-overlapping matches left-to-right, so spans
+        // are ascending and the cursor advances monotonically.
+        out.push_str(&text[cursor..start]);
+        out.push_str(&replacement);
+        cursor = start + link.raw.len();
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
 static BLOCK_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?:^|\s)\^([A-Za-z0-9_-]+)\s*$").expect("valid block id regex"));
 
@@ -286,6 +370,131 @@ mod tests {
             split_anchor("#Heading"),
             ("".into(), Some("Heading".into()))
         );
+    }
+
+    // ---- Reconstruction + span-based rewrite (NRN-424).
+
+    fn only(text: &str) -> Wikilink {
+        parse_wikilinks_in_text(text)
+            .into_iter()
+            .next()
+            .expect("one link")
+    }
+
+    #[test]
+    fn reconstruct_is_identity_for_tight_links() {
+        // Emission fidelity: for a TIGHT link (no interior whitespace),
+        // reconstructing with its own target round-trips to the exact raw across
+        // every embed / alias / anchor / block-ref combination. (Padded links do
+        // NOT round-trip — that canonicalization is the decided PD-119 behavior.)
+        for raw in [
+            "[[Target]]",
+            "![[Target]]",
+            "[[Target|Alias]]",
+            "![[Target|Alias]]",
+            "[[Target#Heading]]",
+            "![[Target#Heading]]",
+            "[[Target#Heading|Alias]]",
+            "[[Target#^blk]]",
+            "![[Target#^blk|Alias]]",
+        ] {
+            let link = only(raw);
+            assert_eq!(
+                reconstruct_wikilink(&link, &link.target).as_deref(),
+                Some(raw),
+                "tight link must round-trip: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn reconstruct_preserves_embed_and_alias() {
+        // NRN-431: an embed's `!` and its `|alias` survive a target rewrite.
+        assert_eq!(
+            reconstruct_wikilink(&only("![[old|Display]]"), "new").as_deref(),
+            Some("![[new|Display]]")
+        );
+    }
+
+    #[test]
+    fn reconstruct_preserves_anchor_and_block_ref() {
+        assert_eq!(
+            reconstruct_wikilink(&only("[[old#Heading]]"), "new").as_deref(),
+            Some("[[new#Heading]]")
+        );
+        assert_eq!(
+            reconstruct_wikilink(&only("[[old#^blk]]"), "new").as_deref(),
+            Some("[[new#^blk]]")
+        );
+    }
+
+    #[test]
+    fn reconstruct_keeps_caret_in_target() {
+        // NRN-433: a bare `^` is an ordinary target char, not a block sigil, so
+        // it round-trips inside the target rather than being split off.
+        let link = only("[[a^b]]");
+        assert_eq!(link.target, "a^b");
+        assert_eq!(
+            reconstruct_wikilink(&link, "renamed").as_deref(),
+            Some("[[renamed]]")
+        );
+    }
+
+    #[test]
+    fn reconstruct_refuses_unrepresentable_targets() {
+        // A `new_target` carrying a wikilink delimiter would re-parse as a
+        // different link shape (`a|b` → target `a`, alias `b`), so reconstruction
+        // refuses it rather than silently corrupt the backlink.
+        let link = only("[[old]]");
+        for bad in ["a|b", "a#b", "a]]b", "a[[b", "a]b", "a[b"] {
+            assert!(
+                reconstruct_wikilink(&link, bad).is_none(),
+                "unrepresentable target must be refused: {bad}"
+            );
+            assert!(!wikilink_target_is_representable(bad));
+        }
+        // A caret-bearing name is representable (a bare `^` is an ordinary char).
+        assert!(wikilink_target_is_representable("a^b"));
+        assert!(reconstruct_wikilink(&link, "a^b").is_some());
+    }
+
+    #[test]
+    fn splice_rewrites_only_matching_targets() {
+        let body = "[[keep]] and [[old]] and [[old|Alias]]\n";
+        let out = splice_wikilinks(body, parse_wikilinks, |link| {
+            (link.target == "old")
+                .then(|| reconstruct_wikilink(link, "new"))
+                .flatten()
+        });
+        assert_eq!(out, "[[keep]] and [[new]] and [[new|Alias]]\n");
+    }
+
+    #[test]
+    fn splice_body_is_opaque_to_code_fences() {
+        // NRN-432: a fenced `[[old]]` is literal sample text and must not be
+        // rewritten, even though it is the first file occurrence.
+        let body = "```\n[[old]]\n```\n\nprose [[old]]\n";
+        let out = splice_wikilinks(body, parse_wikilinks, |link| {
+            (link.target == "old")
+                .then(|| reconstruct_wikilink(link, "new"))
+                .flatten()
+        });
+        assert_eq!(out, "```\n[[old]]\n```\n\nprose [[new]]\n");
+    }
+
+    #[test]
+    fn splice_can_rewrite_first_match_only() {
+        let body = "[[old]] then [[old]]\n";
+        let mut done = false;
+        let out = splice_wikilinks(body, parse_wikilinks, |link| {
+            if !done && link.target == "old" {
+                done = true;
+                reconstruct_wikilink(link, "new")
+            } else {
+                None
+            }
+        });
+        assert_eq!(out, "[[new]] then [[old]]\n");
     }
 
     #[test]

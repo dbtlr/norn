@@ -44,11 +44,15 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // mismatch refusal) and PD-114 (the malformed authored-plan refusal codes —
     // `unknown-operation-kind` / `malformed-plan` in place of `internal-error`,
     // two cases). NRN-437 added PD-115 (the SETEXT / heading-at-EOF section-op
-    // corruption fix, five cases).
+    // corruption fix, five cases). NRN-424 added PD-116/117/118 (the
+    // wikilink-rewriter unification: embed-marker, code-opacity, and caret-target
+    // corruptions) and, on review, PD-119 (decided-better interior-whitespace
+    // canonicalization on rewrite) and PD-120 (decided-better refuse/skip on a
+    // rename to an unrepresentable wikilink target).
     assert_eq!(
         ledger.entries.len(),
-        15,
-        "expected exactly PD-101..PD-115, found {}",
+        20,
+        "expected exactly PD-101..PD-120, found {}",
         ledger.entries.len()
     );
 
@@ -191,6 +195,52 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         pd115.reason,
         norn_parity::ledger::Reason::DiscoveredInconsistency
     );
+
+    // The NRN-424 wikilink-rewriter divergences: grouped by mechanism — PD-116
+    // the embed-marker drop (a move case AND a delete --rewrite-to variant, same
+    // cascade helpers), PD-117 the code-opacity fix (move cascade + rewrite-wikilink
+    // verb), PD-118 the caret-target split, and PD-119 (decided-better) the
+    // interior-whitespace canonicalization (a spaced-pipe move + a padded-target
+    // rewrite-wikilink).
+    for (case, entry) in [
+        ("wl-move-embed-backlink-diverge", "PD-116"),
+        ("wl-delete-embed-backlink-diverge", "PD-116"),
+        ("wl-move-code-fence-shadow-diverge", "PD-117"),
+        ("wl-rewrite-wikilink-code-fence-shadow-diverge", "PD-117"),
+        ("wl-rewrite-wikilink-caret-stem-diverge", "PD-118"),
+        ("wl-move-spaced-alias-diverge", "PD-119"),
+        ("wl-rewrite-wikilink-padded-target-diverge", "PD-119"),
+        ("wl-rewrite-wikilink-unrepresentable-refusal", "PD-120"),
+        ("wl-move-unrepresentable-skip-diverge", "PD-120"),
+    ] {
+        assert_eq!(
+            ledger.entry_for_case(case).map(|e| e.id.as_str()),
+            Some(entry),
+            "{case} is gated by {entry}"
+        );
+    }
+    for case in [
+        "wl-move-embed-backlink-diverge",
+        "wl-move-code-fence-shadow-diverge",
+        "wl-rewrite-wikilink-caret-stem-diverge",
+    ] {
+        assert_eq!(
+            ledger.entry_for_case(case).unwrap().reason,
+            norn_parity::ledger::Reason::DiscoveredInconsistency,
+            "{case}'s entry is a discovered-inconsistency"
+        );
+    }
+    // PD-119 and PD-120 are the branch's decided-better wikilink entries.
+    for case in [
+        "wl-move-spaced-alias-diverge",
+        "wl-rewrite-wikilink-unrepresentable-refusal",
+    ] {
+        assert_eq!(
+            ledger.entry_for_case(case).unwrap().reason,
+            norn_parity::ledger::Reason::DecidedBetter,
+            "{case}'s entry is decided-better"
+        );
+    }
 }
 
 #[test]

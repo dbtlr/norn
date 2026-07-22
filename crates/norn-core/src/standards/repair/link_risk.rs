@@ -47,6 +47,15 @@ pub struct AffectedLink {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_span: Option<crate::domain::SourceSpan>,
     pub rewritten: String,
+    /// The new target cannot be represented as a wikilink (it carries a
+    /// `|`/`#`/`[`/`]` delimiter), so rewriting `raw` would corrupt the link into
+    /// a different shape (NRN-424). Apply SKIPS such a link (leaving it stale and
+    /// detectable by `validate`) rather than corrupt it — the same recoverable
+    /// posture as `would-corrupt-frontmatter`. Never serialized (a purely
+    /// apply-time decision; `rewritten` holds the unchanged `raw` as a
+    /// placeholder), so it stays out of the plan hash.
+    #[serde(skip, default)]
+    pub unrepresentable: bool,
 }
 
 /// Walk the index and classify every link to `old_path` against the `new_path`.
@@ -86,20 +95,34 @@ pub fn classify(
                 LinkKind::Wikilink | LinkKind::Embed => {
                     let is_path_qualified = link.target.contains('/');
                     if is_path_qualified {
+                        // `None` = the new target is not a representable wikilink
+                        // target; record it so apply can skip (not corrupt) it.
+                        let (rewritten, unrepresentable) =
+                            match rewrite_path_qualified_wikilink(&link.raw, new_path) {
+                                Some(s) => (s, false),
+                                None => (link.raw.clone(), true),
+                            };
                         risk.path_qualified_wikilinks.push(AffectedLink {
                             source_path,
                             raw: link.raw.clone(),
                             kind: link.kind.clone(),
                             source_span: link.source_span,
-                            rewritten: rewrite_path_qualified_wikilink(&link.raw, new_path),
+                            rewritten,
+                            unrepresentable,
                         });
                     } else if risk.stem_changed {
+                        let (rewritten, unrepresentable) =
+                            match rewrite_stem_only_wikilink(&link.raw, new_stem) {
+                                Some(s) => (s, false),
+                                None => (link.raw.clone(), true),
+                            };
                         risk.stem_links.push(AffectedLink {
                             source_path,
                             raw: link.raw.clone(),
                             kind: link.kind.clone(),
                             source_span: link.source_span,
-                            rewritten: rewrite_stem_only_wikilink(&link.raw, new_stem),
+                            rewritten,
+                            unrepresentable,
                         });
                     }
                 }
@@ -116,6 +139,7 @@ pub fn classify(
                         kind: link.kind.clone(),
                         source_span: link.source_span,
                         rewritten,
+                        unrepresentable: false,
                     });
                 }
             }
@@ -137,29 +161,31 @@ fn link_targets_path(link: &Link, target: &Utf8Path) -> bool {
         || link.target.trim_end_matches(".md") == target_str.trim_end_matches(".md")
 }
 
-fn rewrite_stem_only_wikilink(raw: &str, new_stem: &str) -> String {
-    let inner = raw
-        .strip_prefix("[[")
-        .and_then(|s| s.strip_suffix("]]"))
-        .unwrap_or("");
-    let (_target_part, rest) = match inner.find(['|', '#']) {
-        Some(idx) => inner.split_at(idx),
-        None => (inner, ""),
-    };
-    format!("[[{new_stem}{rest}]]")
+fn rewrite_stem_only_wikilink(raw: &str, new_stem: &str) -> Option<String> {
+    rewrite_wikilink_target(raw, new_stem)
 }
 
-fn rewrite_path_qualified_wikilink(raw: &str, new: &Utf8Path) -> String {
-    let inner = raw
-        .strip_prefix("[[")
-        .and_then(|s| s.strip_suffix("]]"))
-        .unwrap_or("");
-    let (_target_part, rest) = match inner.find(['|', '#']) {
-        Some(idx) => inner.split_at(idx),
-        None => (inner, ""),
-    };
-    let new_target = new.as_str().trim_end_matches(".md").to_string();
-    format!("[[{new_target}{rest}]]")
+fn rewrite_path_qualified_wikilink(raw: &str, new: &Utf8Path) -> Option<String> {
+    rewrite_wikilink_target(raw, new.as_str().trim_end_matches(".md"))
+}
+
+/// Rebuild a wikilink's text with `new_target` in place of its target, through
+/// the authoritative parser (NRN-424): parse `raw` as a lone link and
+/// reconstruct it, preserving the embed marker, `|alias`, and `#anchor`/`#^block`
+/// suffix. This closes the embed corruption (NRN-431: a `strip_prefix("[[")`
+/// missed the leading `!` of `![[…]]`, collapsing it to `[[…]]` and dropping the
+/// alias) and follows the parser's `#`-only split so a bare `^` stays in the
+/// target (NRN-433).
+///
+/// Returns `None` when `new_target` cannot be represented as a wikilink target
+/// (it carries a `|`/`#`/`[`/`]` delimiter) — the caller records the link as
+/// unrepresentable so apply skips it instead of corrupting it. A `raw` that is
+/// not a wikilink is returned unchanged (`Some(raw)`).
+fn rewrite_wikilink_target(raw: &str, new_target: &str) -> Option<String> {
+    match norn_frontmatter::wikilink::parse_wikilinks_in_text(raw).first() {
+        Some(link) => norn_frontmatter::wikilink::reconstruct_wikilink(link, new_target),
+        None => Some(raw.to_string()),
+    }
 }
 
 fn rewrite_markdown_link(raw: &str, source_file: &Utf8Path, new: &Utf8Path) -> String {
@@ -470,6 +496,67 @@ mod tests {
         assert_eq!(
             affected.rewritten, "[](task.md)",
             "sibling self-link should stay sibling-relative after move"
+        );
+    }
+
+    #[test]
+    fn embed_backlink_rewrite_preserves_bang_and_alias() {
+        // NRN-431: an embed's raw is `![[old|Display]]`. The old strip_prefix("[[")
+        // missed the leading `!`, collapsing the whole embed to `[[new]]` and
+        // dropping the alias. The parser-driven rewrite preserves both.
+        let old = Utf8PathBuf::from("Notes/task.md");
+        let new = Utf8PathBuf::from("Notes/next-task.md");
+        let mut idx_doc = make_doc("Notes/index.md");
+        let mut embed = wikilink("Notes/index.md", "task");
+        embed.kind = LinkKind::Embed;
+        embed.raw = "![[task|Display]]".into();
+        embed.label = Some("Display".into());
+        idx_doc.links.push(embed);
+
+        let documents = vec![idx_doc];
+        let files = vec![];
+        let risk = classify(&old, &new, &documents, &files);
+
+        assert_eq!(risk.stem_links.len(), 1);
+        assert_eq!(risk.stem_links[0].rewritten, "![[next-task|Display]]");
+    }
+
+    #[test]
+    fn caret_stem_wikilink_rewrite_keeps_caret_in_target() {
+        // NRN-433: a bare `^` is an ordinary filename char. `[[a^b]]` targets the
+        // whole `a^b`; a rename rewrites the entire target, never splitting at `^`.
+        let old = Utf8PathBuf::from("a^b.md");
+        let new = Utf8PathBuf::from("renamed.md");
+        let mut idx_doc = make_doc("index.md");
+        let mut link = wikilink("index.md", "a^b");
+        link.raw = "[[a^b]]".into();
+        idx_doc.links.push(link);
+
+        let documents = vec![idx_doc];
+        let files = vec![];
+        let risk = classify(&old, &new, &documents, &files);
+
+        assert_eq!(risk.stem_links.len(), 1);
+        assert_eq!(risk.stem_links[0].rewritten, "[[renamed]]");
+    }
+
+    #[test]
+    fn classify_marks_unrepresentable_target_for_skip() {
+        // NRN-424: a move whose destination stem is not a valid wikilink target
+        // (`a|b`) can't be rewritten without corrupting the backlink, so classify
+        // flags it unrepresentable (rewritten holds the unchanged raw) for apply
+        // to skip rather than corrupt.
+        let old = Utf8PathBuf::from("old.md");
+        let new = Utf8PathBuf::from("a|b.md");
+        let mut idx_doc = make_doc("index.md");
+        idx_doc.links.push(wikilink("index.md", "old"));
+
+        let risk = classify(&old, &new, &[idx_doc], &[]);
+        assert_eq!(risk.stem_links.len(), 1);
+        assert!(risk.stem_links[0].unrepresentable);
+        assert_eq!(
+            risk.stem_links[0].rewritten, "[[old]]",
+            "raw kept as placeholder"
         );
     }
 

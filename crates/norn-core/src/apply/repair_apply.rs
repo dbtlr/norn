@@ -1028,7 +1028,26 @@ pub fn apply_repair_plan_with_context(
         // (and added latency). Per-round events are a future refinement.
         let failed_before: usize = report.cascades.iter().map(|c| c.failed.len()).sum();
         let recovered = retry_failed_cascades(&mut report.cascades, &backoff, |f| {
-            crate::standards::apply::rewrite_one_backlink(cwd.as_path(), &f.file, &f.from, &f.to)
+            // The retried failure carries only the raw link text, not its kind.
+            // Recover the kind from the parser (authoritative): a raw the wikilink
+            // parser recognizes whole is a `[[…]]` reference (the splice path
+            // treats Wikilink/Embed identically); anything else is a Markdown
+            // destination that rewrites by literal replace.
+            let kind = if norn_frontmatter::wikilink::parse_wikilinks_in_text(&f.from)
+                .first()
+                .is_some_and(|link| link.raw == f.from)
+            {
+                crate::domain::LinkKind::Wikilink
+            } else {
+                crate::domain::LinkKind::Markdown
+            };
+            crate::standards::apply::rewrite_one_backlink(
+                cwd.as_path(),
+                &f.file,
+                &f.from,
+                &f.to,
+                &kind,
+            )
         });
         if !recovered.is_empty() {
             mark_wrote!();
@@ -2806,6 +2825,7 @@ mod tests {
                 kind: crate::domain::LinkKind::Wikilink,
                 source_span: None,
                 rewritten: "[[new]]".into(),
+                unrepresentable: false,
             }],
             path_qualified_wikilinks: vec![],
             markdown_links: vec![],
