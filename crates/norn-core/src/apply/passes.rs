@@ -47,7 +47,7 @@ pub struct CreateApplyContext {
     pub parents: bool,
     /// `files.ignore` glob patterns (from `VaultConfig`), re-checked against the
     /// RESOLVED `create_document` path (post `{{seq}}` resolution) before any
-    /// write (NRN-138). `synth::build_plan`'s NRN-131 guard only sees the
+    /// write (NRN-138). `mutate::new::build_create`'s NRN-131 guard only sees the
     /// literal template path (e.g. `logs/{{seq}}.md`) at plan time, so a pattern
     /// that only matches the resolved filename (e.g. `logs/1.md`) would
     /// otherwise slip through. Empty for callers that don't populate it (their
@@ -2231,7 +2231,7 @@ mod tests {
     #[test]
     fn apply_create_document_refuses_ignored_resolved_seq_path() {
         // `files.ignore` constrains the RESOLVED seq filename (`logs/1.md`),
-        // not the literal template (`logs/{{seq}}.md`) synth-time saw. The
+        // not the literal template (`logs/{{seq}}.md`) plan-time saw. The
         // applier must re-check post-resolution and refuse before any write.
         let (_tmp, root, index) = make_empty_vault("vault-apply-seq-ignored-");
         let mut fm = serde_json::Map::new();

@@ -6,7 +6,7 @@
 //! This is the engine half of `norn edit`; the `edit` VERB surface (route,
 //! report, sugar/desugar, synth) ports later with that command. Kept here — not
 //! deferred — because the executor structurally requires the transform primitive
-//! to apply the section-edit ops a `MigrationPlan`/`RepairPlan` can carry, and
+//! to apply the section-edit ops a `MigrationPlan`/`ApplyBatch` can carry, and
 //! the ported orchestrator tests exercise it.
 
 pub mod ops;

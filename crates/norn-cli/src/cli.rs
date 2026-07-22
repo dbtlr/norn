@@ -40,9 +40,10 @@ pub struct Cli {
     pub command: Command,
 }
 
-// Flags accepted before or after the subcommand (`global = true`). Parsed but
-// not yet wired to behavior — vault resolution lands with the summoner
-// (`norn-client`), which will consume these to pick the target vault.
+// Flags accepted before or after the subcommand (`global = true`). Now wired to
+// behavior: `-C/--cwd` grounds the effective cwd every vault path resolves
+// against (`effective_cwd`), and `--vault NAME` is consumed by the summoner
+// (`norn-client`, via `routed::open_session`) to pick the target registered vault.
 //
 // A plain comment, NOT a doc comment: clap adopts a flattened struct's doc
 // comment as the parent command's `long_about`, which would leak into the

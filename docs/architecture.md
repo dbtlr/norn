@@ -47,7 +47,7 @@ Read it before adding a surface, a crate edge, or a mutation path. The point is 
 
 ## 10. One plan, many planners, one applier
 
-**`MigrationPlan` is the only plan vocabulary, and one applier executes it.** Repair — and any future source of change — is a *planner*: it composes a `MigrationPlan`, it does not apply one. A single orchestrator applies plans with per-file atomicity, routing through the same primitives the direct mutation verbs use. There is never a second mutation engine (ADR [0015](./decisions/0015-plan-preconditions-owner-sets.md)).
+**`MigrationPlan` is the only plan vocabulary, and one applier executes it.** Repair — and any future source of change — is a *planner*: it composes a `MigrationPlan`, it does not apply one. A single orchestrator (the plan-load + schema-gate + expansion + report-assembly executor driving the ordered named passes) applies every plan with per-file atomicity, routing through the same filesystem primitives the direct mutation verbs use; a per-op failure records against that op while independent ops still run, and only a plan-level barrier refuses the whole plan pre-write. There is never a second mutation engine (ADR [0015](./decisions/0015-plan-preconditions-owner-sets.md), [0024](./decisions/0024-one-applier-repair-as-planner.md)).
 
 ## 11. The substrate bears the trust burden
 

@@ -2,10 +2,10 @@
 //! into a MigrationPlan that the applier can execute.
 //!
 //! Two intent sources:
-//! - `findings`: refactored home for today's repair plan generators (populated
-//!   in Plan Task 17).
-//! - `intent`: per-kind expanders for user-authored high-level ops (Plan Tasks
-//!   4, 5, 6).
+//! - `findings`: the repair plan generator adapter (`plan_from_findings`), live
+//!   via the `repair` verb.
+//! - `intent`: the per-kind expanders for user-authored high-level ops, live via
+//!   the applier.
 //!
 //! # Port note (ADR 0018)
 //!
