@@ -67,6 +67,9 @@ pub enum ApplyError {
     #[error("refusing write for {path}: post-edit frontmatter failed verification ({detail})")]
     PostImageVerificationFailed { path: Utf8PathBuf, detail: String },
 
+    #[error("refusing write for {path}: the file changed on disk during apply (concurrent external modification); re-read the document and re-plan")]
+    ConcurrentModification { path: Utf8PathBuf },
+
     #[error("edit op failed for {path}: {message}")]
     EditFailed {
         path: camino::Utf8PathBuf,
@@ -128,6 +131,7 @@ impl ApplyError {
             ApplyError::CannotMinimalEdit { .. } => "cannot-minimal-edit",
             ApplyError::FrontmatterParseFailed { .. } => "frontmatter-parse-failed",
             ApplyError::PostImageVerificationFailed { .. } => "post-image-verification-failed",
+            ApplyError::ConcurrentModification { .. } => "concurrent-modification",
             ApplyError::EditFailed { .. } => "edit-failed",
             ApplyError::MissingNewValue { .. } => "missing-new-value",
             ApplyError::FieldAlreadyPresent { .. } => "field-already-present",
@@ -155,6 +159,7 @@ impl ApplyError {
             | ApplyError::CannotMinimalEdit { path, .. }
             | ApplyError::FrontmatterParseFailed { path, .. }
             | ApplyError::PostImageVerificationFailed { path, .. }
+            | ApplyError::ConcurrentModification { path }
             | ApplyError::EditFailed { path, .. }
             | ApplyError::MissingNewValue { path }
             | ApplyError::FieldAlreadyPresent { path, .. }
@@ -205,7 +210,9 @@ impl ApplyError {
             | ApplyError::MoveSourceIsSymlink { .. }
             | ApplyError::MoveDestinationExists { .. }
             | ApplyError::DeleteSourceMissing { .. }
-            | ApplyError::DeleteSourceIsSymlink { .. } => false,
+            | ApplyError::DeleteSourceIsSymlink { .. }
+            // A runtime drift caught mid-apply, not a static plan precondition.
+            | ApplyError::ConcurrentModification { .. } => false,
         }
     }
 }
@@ -252,104 +259,10 @@ impl ContainmentError {
     }
 }
 
-/// (NRN-145) Refuse an op target that would resolve outside the vault root. The
-/// shared containment gate for the mutation stack (create / move / delete / edit
-/// / backlink-cascade targets) and `norn new`'s path validation — one
-/// implementation, no parallel logic.
-///
-/// The check is lexical first (cheap): an absolute path or any `..` component is
-/// refused up front. Then:
-///
-/// - If the target ALREADY EXISTS (a backlink-cascade rewrite source, a
-///   move/delete source — these always exist), the target ITSELF is
-///   canonicalized and confirmed prefix-contained in `canonical_root`. This is
-///   the F1 fix (NRN-145 follow-up): a symlink FILE inside the vault whose
-///   PARENT is legitimately in-vault but which itself resolves outside would
-///   pass a parent-only check, then a bare `fs::write`/`fs::read_to_string`
-///   would follow it straight through to the outside file. Canonicalizing the
-///   target closes that.
-/// - Otherwise (a create/move destination that does not yet exist, so there is
-///   nothing to canonicalize at the target itself), the op target's PARENT
-///   directory is resolved and its nearest EXISTING ancestor is canonicalized
-///   and confirmed prefix-contained in `canonical_root`. Canonicalizing the
-///   parent resolves a directory symlinked out of the vault — the case the
-///   lexical check alone bypasses. Canonicalizing the nearest existing
-///   ancestor means `-p`/`--parents` creation of a not-yet-existing subtree
-///   cannot be used to sidestep the gate.
-///
-/// `canonical_root` is the caller's canonicalization of the vault root; it is
-/// canonicalized ONCE per apply (not per op) and never on a read path.
-pub fn ensure_within_vault(
-    vault_root: &Utf8Path,
-    canonical_root: &std::path::Path,
-    target: &Utf8Path,
-) -> Result<(), ContainmentError> {
-    if target.is_absolute() {
-        return Err(ContainmentError::AbsolutePath {
-            target: target.to_owned(),
-        });
-    }
-    if target
-        .components()
-        .any(|c| matches!(c, camino::Utf8Component::ParentDir))
-    {
-        return Err(ContainmentError::ParentTraversal {
-            target: target.to_owned(),
-        });
-    }
-
-    let joined = vault_root.join(target);
-
-    if joined.as_std_path().exists() {
-        let canonical_target =
-            joined
-                .as_std_path()
-                .canonicalize()
-                .map_err(|e| ContainmentError::Unresolvable {
-                    target: target.to_owned(),
-                    detail: e.to_string(),
-                })?;
-        if !canonical_target.starts_with(canonical_root) {
-            return Err(ContainmentError::EscapesVault {
-                target: target.to_owned(),
-            });
-        }
-        return Ok(());
-    }
-
-    let parent = joined.parent().unwrap_or(vault_root);
-    let existing = nearest_existing_ancestor(parent);
-    let canonical_parent =
-        existing
-            .as_std_path()
-            .canonicalize()
-            .map_err(|e| ContainmentError::Unresolvable {
-                target: target.to_owned(),
-                detail: e.to_string(),
-            })?;
-    if !canonical_parent.starts_with(canonical_root) {
-        return Err(ContainmentError::EscapesVault {
-            target: target.to_owned(),
-        });
-    }
-    Ok(())
-}
-
-/// The nearest ancestor of `path` (inclusive) that exists on disk, following
-/// symlinks. Terminates because the vault root — an ancestor of every
-/// lexically-contained target — always exists.
-fn nearest_existing_ancestor(path: &Utf8Path) -> &Utf8Path {
-    let mut cur = path;
-    loop {
-        if cur.as_std_path().exists() {
-            return cur;
-        }
-        match cur.parent() {
-            Some(p) => cur = p,
-            None => return cur,
-        }
-    }
-}
+// (NRN-145) `ensure_within_vault` — the shared vault-root containment gate —
+// and its `nearest_existing_ancestor` helper moved to `crate::apply::fsops`
+// alongside the filesystem write primitives it guards (NRN-406 step 3). The
+// `ContainmentError` type it returns stays here with the `ApplyError` family.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveResult {
@@ -1238,81 +1151,7 @@ fn check_expected_old_value(
     }
 }
 
-/// Performs the filesystem move for a `move_document` PlannedChange.
-/// Refuses with precondition errors if source is missing/symlink or
-/// destination exists. Falls back to copy+remove if rename fails
-/// (typically cross-device).
-pub fn apply_move(cwd: &Utf8Path, change: &PlannedChange) -> Result<MoveResult, ApplyError> {
-    let source_rel = &change.path;
-    let dest_rel = change
-        .destination
-        .as_ref()
-        .ok_or_else(|| ApplyError::UnsupportedOperation {
-            path: source_rel.clone(),
-            operation: "move_document missing destination".to_string(),
-        })?;
-
-    let source_abs = cwd.join(source_rel);
-    let dest_abs = cwd.join(dest_rel);
-
-    let metadata = fs::symlink_metadata(source_abs.as_std_path()).map_err(|_| {
-        ApplyError::MoveSourceMissing {
-            path: source_rel.clone(),
-        }
-    })?;
-    if metadata.file_type().is_symlink() {
-        return Err(ApplyError::MoveSourceIsSymlink {
-            path: source_rel.clone(),
-        });
-    }
-    if dest_abs.as_std_path().exists() {
-        if change.force {
-            // Best-effort atomicity: remove destination, then attempt rename.
-            // If rename fails after this, destination is gone with no rollback.
-            // Future improvement: snapshot-and-restore for true atomicity.
-            fs::remove_file(dest_abs.as_std_path()).map_err(|e| ApplyError::CannotMinimalEdit {
-                path: dest_rel.clone(),
-                reason: format!("force-remove destination failed: {e}"),
-            })?;
-        } else {
-            return Err(ApplyError::MoveDestinationExists {
-                destination: dest_rel.clone(),
-            });
-        }
-    }
-    if let Some(parent) = dest_abs.parent() {
-        fs::create_dir_all(parent.as_std_path()).map_err(|e| ApplyError::CannotMinimalEdit {
-            path: dest_rel.clone(),
-            reason: format!("create parent dir failed: {e}"),
-        })?;
-    }
-
-    match fs::rename(source_abs.as_std_path(), dest_abs.as_std_path()) {
-        Ok(()) => Ok(MoveResult {
-            from: source_rel.clone(),
-            to: dest_rel.clone(),
-        }),
-        Err(_) => {
-            // Cross-device fallback
-            fs::copy(source_abs.as_std_path(), dest_abs.as_std_path()).map_err(|e| {
-                ApplyError::CannotMinimalEdit {
-                    path: dest_rel.clone(),
-                    reason: format!("copy failed: {e}"),
-                }
-            })?;
-            fs::remove_file(source_abs.as_std_path()).map_err(|e| {
-                ApplyError::CannotMinimalEdit {
-                    path: source_rel.clone(),
-                    reason: format!("remove source after copy failed: {e}"),
-                }
-            })?;
-            Ok(MoveResult {
-                from: source_rel.clone(),
-                to: dest_rel.clone(),
-            })
-        }
-    }
-}
+// `apply_move` moved to `crate::apply::fsops` (NRN-406 step 3).
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteResult {
@@ -1324,77 +1163,11 @@ pub struct CreateDocumentResult {
     pub path: Utf8PathBuf,
 }
 
-/// Performs the filesystem removal for a `delete_document` PlannedChange.
-/// Refuses with precondition errors if source is missing or is a symlink.
-pub fn apply_delete(cwd: &Utf8Path, change: &PlannedChange) -> Result<DeleteResult, ApplyError> {
-    let source_rel = &change.path;
-    let source_abs = cwd.join(source_rel);
+// `apply_delete` moved to `crate::apply::fsops` (NRN-406 step 3).
 
-    let metadata = fs::symlink_metadata(source_abs.as_std_path()).map_err(|_| {
-        ApplyError::DeleteSourceMissing {
-            path: source_rel.clone(),
-        }
-    })?;
-    if metadata.file_type().is_symlink() {
-        return Err(ApplyError::DeleteSourceIsSymlink {
-            path: source_rel.clone(),
-        });
-    }
-
-    fs::remove_file(source_abs.as_std_path()).map_err(|e| ApplyError::CannotMinimalEdit {
-        path: source_rel.clone(),
-        reason: format!("delete failed: {e}"),
-    })?;
-
-    Ok(DeleteResult {
-        path: source_rel.clone(),
-    })
-}
-
-/// Crash-atomic write: serialize `contents` to a sibling temp file
-/// (`.{stem}.tmp`) then `fs::rename` it into place (atomic on POSIX). A SIGKILL /
-/// power loss / `ENOSPC` mid-write truncates only the throwaway temp, never the
-/// live document — which is exactly the half-mutation NRN-139 exists to prevent.
-/// Best-effort temp cleanup on rename failure. Shared by the Phase A2 content
-/// write, the `create_document` pass, and (NRN-146) backlink-cascade rewrites
-/// in `rewrite_one_backlink` so there is a single implementation for every
-/// document write path. A side effect for cascade callers: renaming into place
-/// REPLACES a symlink at `full` rather than writing through it, closing the
-/// symlink-file cascade class NRN-145 could otherwise only gate at preflight.
-///
-/// Mode preservation: renaming a temp file over `full` replaces its inode, so
-/// the replacement would otherwise pick up fresh umask-based permissions
-/// rather than inheriting whatever mode the file it replaces had — silently
-/// downgrading a permission-hardened document (e.g. `chmod 600`, see
-/// docs/cache.md) on every incidental content rewrite or cascade touch. When
-/// `full` already exists, stat it first and carry its mode over to the temp
-/// file before the rename so the replacement's mode matches the original.
-/// When `full` does not exist (a fresh `create_document`), there is nothing to
-/// preserve — the temp file's default (umask-based) permissions are correct.
-/// Best-effort only: a metadata-read or chmod failure falls back to the
-/// unmodified temp permissions rather than failing the write — preserving
-/// mode is hardening, not a new way for a rewrite to fail. Ownership/ACLs are
-/// out of scope: unlike mode bits, they cannot be portably preserved without
-/// root, so this covers the meaningful, portable subset.
-pub(crate) fn atomic_write(full: &Utf8Path, contents: &str) -> std::io::Result<()> {
-    let tmp_path = {
-        let mut p = full.to_path_buf();
-        let stem = p.file_name().unwrap_or("doc").to_string();
-        p.set_file_name(format!(".{stem}.tmp"));
-        p
-    };
-    fs::write(tmp_path.as_std_path(), contents)?;
-    #[cfg(unix)]
-    if let Ok(existing) = fs::metadata(full.as_std_path()) {
-        let _ = fs::set_permissions(tmp_path.as_std_path(), existing.permissions());
-    }
-    if let Err(e) = fs::rename(tmp_path.as_std_path(), full.as_std_path()) {
-        // Best-effort cleanup on rename failure.
-        let _ = fs::remove_file(tmp_path.as_std_path());
-        return Err(e);
-    }
-    Ok(())
-}
+// `atomic_write` — the crash-atomic, durable document write — moved to
+// `crate::apply::fsops` (NRN-406 step 3), where it gained the NRN-159 fsync
+// durability. `rewrite_one_backlink` below routes its write through it.
 
 /// Outcome of attempting one backlink rewrite. The caller sorts these into
 /// the `LinkRewriteOutcome` buckets and the retry pass re-runs this on failures.
@@ -1467,7 +1240,7 @@ pub(crate) fn rewrite_one_backlink(
     if verify_frontmatter_not_degraded(source_path, &original, &updated).is_err() {
         return LinkAttempt::Skipped(LinkSkipReason::WouldCorruptFrontmatter);
     }
-    match atomic_write(&abs, &updated) {
+    match crate::apply::fsops::atomic_write(&abs, &updated) {
         Ok(()) => LinkAttempt::Rewritten,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             LinkAttempt::Skipped(LinkSkipReason::SourceMissing)
@@ -3064,194 +2837,6 @@ mod tests {
             parents: false,
         };
         assert!(apply_replace_body(content, &change).is_err());
-    }
-
-    #[test]
-    fn apply_delete_removes_file() {
-        let tmp = tempfile::Builder::new()
-            .prefix("norn-apply-delete-")
-            .tempdir()
-            .unwrap();
-        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
-        let doc_rel = camino::Utf8PathBuf::from("foo.md");
-        std::fs::write(root.join(&doc_rel), "---\ntype: note\n---\n# Foo\n").unwrap();
-
-        let change = PlannedChange {
-            change_id: "delete-foo".into(),
-            path: doc_rel.clone(),
-            document_hash: "irrelevant".into(),
-            finding_code: "operator-request".into(),
-            finding_rule: None,
-            repair_rule: "operator-request".into(),
-            operation: "delete_document".into(),
-            field: None,
-            expected_old_value: None,
-            new_value: None,
-            destination: None,
-            link_risk: None,
-            warnings: Vec::new(),
-            force: false,
-            parents: false,
-        };
-
-        let result = apply_delete(root, &change).unwrap();
-        assert_eq!(result.path, doc_rel);
-        assert!(!root.join(&doc_rel).as_std_path().exists());
-    }
-
-    #[test]
-    fn apply_delete_missing_source_errors() {
-        let tmp = tempfile::Builder::new()
-            .prefix("norn-apply-delete-missing-")
-            .tempdir()
-            .unwrap();
-        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
-        let doc_rel = camino::Utf8PathBuf::from("missing.md");
-
-        let change = PlannedChange {
-            change_id: "delete-missing".into(),
-            path: doc_rel.clone(),
-            document_hash: "irrelevant".into(),
-            finding_code: "operator-request".into(),
-            finding_rule: None,
-            repair_rule: "operator-request".into(),
-            operation: "delete_document".into(),
-            field: None,
-            expected_old_value: None,
-            new_value: None,
-            destination: None,
-            link_risk: None,
-            warnings: Vec::new(),
-            force: false,
-            parents: false,
-        };
-
-        let err = apply_delete(root, &change).unwrap_err();
-        match err {
-            ApplyError::DeleteSourceMissing { path } => assert_eq!(path, doc_rel),
-            other => panic!("expected DeleteSourceMissing, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn apply_delete_refuses_symlink() {
-        let tmp = tempfile::Builder::new()
-            .prefix("norn-apply-delete-symlink-")
-            .tempdir()
-            .unwrap();
-        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
-        let real_rel = camino::Utf8PathBuf::from("real.md");
-        let link_rel = camino::Utf8PathBuf::from("link.md");
-        std::fs::write(root.join(&real_rel), "real").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(root.join(&real_rel), root.join(&link_rel)).unwrap();
-
-        #[cfg(unix)]
-        {
-            let change = PlannedChange {
-                change_id: "delete-symlink".into(),
-                path: link_rel.clone(),
-                document_hash: "irrelevant".into(),
-                finding_code: "operator-request".into(),
-                finding_rule: None,
-                repair_rule: "operator-request".into(),
-                operation: "delete_document".into(),
-                field: None,
-                expected_old_value: None,
-                new_value: None,
-                destination: None,
-                link_risk: None,
-                warnings: Vec::new(),
-                force: false,
-                parents: false,
-            };
-
-            let err = apply_delete(root, &change).unwrap_err();
-            match err {
-                ApplyError::DeleteSourceIsSymlink { path } => assert_eq!(path, link_rel),
-                other => panic!("expected DeleteSourceIsSymlink, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn apply_move_with_force_overwrites_destination() {
-        let tmp = tempfile::Builder::new()
-            .prefix("norn-apply-move-force-")
-            .tempdir()
-            .unwrap();
-        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
-        let src_rel = camino::Utf8PathBuf::from("src.md");
-        let dst_rel = camino::Utf8PathBuf::from("dst.md");
-        std::fs::write(root.join(&src_rel), "src content").unwrap();
-        std::fs::write(root.join(&dst_rel), "dst content").unwrap();
-
-        let change = PlannedChange {
-            change_id: "force-test".into(),
-            path: src_rel.clone(),
-            document_hash: "irrelevant".into(),
-            finding_code: "operator-request".into(),
-            finding_rule: None,
-            repair_rule: "operator-request".into(),
-            operation: "move_document".into(),
-            field: None,
-            expected_old_value: None,
-            new_value: None,
-            destination: Some(dst_rel.clone()),
-            link_risk: None,
-            warnings: Vec::new(),
-            force: true,
-            parents: false,
-        };
-
-        let result = apply_move(root, &change).unwrap();
-        assert_eq!(result.from, src_rel);
-        assert_eq!(result.to, dst_rel);
-        // dst now has src's content; src is gone.
-        assert_eq!(
-            std::fs::read_to_string(root.join(&dst_rel)).unwrap(),
-            "src content"
-        );
-        assert!(!root.join(&src_rel).as_std_path().exists());
-    }
-
-    #[test]
-    fn apply_move_without_force_refuses_existing_destination() {
-        let tmp = tempfile::Builder::new()
-            .prefix("norn-apply-move-noforce-")
-            .tempdir()
-            .unwrap();
-        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
-        let src_rel = camino::Utf8PathBuf::from("src.md");
-        let dst_rel = camino::Utf8PathBuf::from("dst.md");
-        std::fs::write(root.join(&src_rel), "src").unwrap();
-        std::fs::write(root.join(&dst_rel), "dst").unwrap();
-
-        let change = PlannedChange {
-            change_id: "noforce-test".into(),
-            path: src_rel.clone(),
-            document_hash: "irrelevant".into(),
-            finding_code: "operator-request".into(),
-            finding_rule: None,
-            repair_rule: "operator-request".into(),
-            operation: "move_document".into(),
-            field: None,
-            expected_old_value: None,
-            new_value: None,
-            destination: Some(dst_rel.clone()),
-            link_risk: None,
-            warnings: Vec::new(),
-            force: false,
-            parents: false,
-        };
-
-        let err = apply_move(root, &change).unwrap_err();
-        match err {
-            ApplyError::MoveDestinationExists { destination } => {
-                assert_eq!(destination, dst_rel)
-            }
-            other => panic!("expected MoveDestinationExists, got {other:?}"),
-        }
     }
 
     #[test]
