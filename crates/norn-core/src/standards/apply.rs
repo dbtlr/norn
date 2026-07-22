@@ -22,6 +22,13 @@ pub enum ApplyError {
     #[error("unsupported repair plan schema version: expected {expected}, got {got}; regenerate with `norn repair --plan`")]
     UnsupportedSchemaVersion { expected: u32, got: u32 },
 
+    // The MIGRATION-plan schema gate (audit-F3), promoted from the `norn-cli`
+    // apply preamble into the shared engine. Message preserved byte-for-byte from
+    // that preamble so the refusal is unchanged; shares the `unsupported-schema-version`
+    // code with the repair-plan variant above.
+    #[error("unsupported plan schema_version {got}; this norn build supports v{expected}")]
+    UnsupportedMigrationPlanSchemaVersion { expected: u32, got: u32 },
+
     #[error("repair plan vault root does not match effective cwd: plan {plan}, cwd {cwd}")]
     VaultRootMismatch { plan: Utf8PathBuf, cwd: Utf8PathBuf },
 
@@ -144,7 +151,10 @@ impl ApplyError {
     /// rename an existing code without a CHANGELOG breaking-change entry.
     pub fn code(&self) -> &'static str {
         match self {
-            ApplyError::UnsupportedSchemaVersion { .. } => "unsupported-schema-version",
+            ApplyError::UnsupportedSchemaVersion { .. }
+            | ApplyError::UnsupportedMigrationPlanSchemaVersion { .. } => {
+                "unsupported-schema-version"
+            }
             ApplyError::VaultRootMismatch { .. } => "vault-root-mismatch",
             ApplyError::UnknownPath { .. } => "unknown-path",
             ApplyError::StaleDocumentHash { .. } => "stale-document-hash",
@@ -209,6 +219,7 @@ impl ApplyError {
             ApplyError::CreateFrontmatterMalformed
             | ApplyError::CreateSerializeFailed { .. }
             | ApplyError::UnsupportedSchemaVersion { .. }
+            | ApplyError::UnsupportedMigrationPlanSchemaVersion { .. }
             | ApplyError::VaultRootMismatch { .. } => None,
         }
     }
@@ -227,6 +238,7 @@ impl ApplyError {
     pub fn is_precondition(&self) -> bool {
         match self {
             ApplyError::UnsupportedSchemaVersion { .. }
+            | ApplyError::UnsupportedMigrationPlanSchemaVersion { .. }
             | ApplyError::VaultRootMismatch { .. }
             | ApplyError::UnknownPath { .. }
             | ApplyError::StaleDocumentHash { .. }

@@ -3,15 +3,17 @@
 //! Ported from the donor `apply::{run_direct, route}` (ADR 0018). Unlike the
 //! other cascade verbs, `apply` does NOT synthesize a plan from a handful of
 //! arguments — the CLI has already read the plan source (file or stdin), detected
-//! its format, parsed it into a `MigrationPlan`, and validated its
-//! `schema_version` in the client-side preamble (a malformed plan or a schema
-//! mismatch refuses BEFORE the wire, byte-identical to the donor). The parsed plan
-//! crosses TYPED in [`norn_wire::ApplyParams::plan`] (the `MigrationPlan` contract
-//! type now lives in `norn-wire`); here the owner hands it straight to the shared
+//! its format, and parsed it into a `MigrationPlan` in the client-side preamble (a
+//! malformed or unreadable source is a client diagnostic). The parsed plan crosses
+//! TYPED in [`norn_wire::ApplyParams::plan`] (the `MigrationPlan` contract type now
+//! lives in `norn-wire`); here the owner hands it straight to the shared
 //! [`apply_migration_plan`] executor under `refuse_as_report` — so a clean
-//! pre-write decline (an owner-set precondition mismatch, a containment violation,
-//! a bad create path) returns a coded `outcome = refused` [`ApplyReport`], never a
-//! bare `Err`. ADR 0011: the plan bytes reviewed are the plan bytes applied.
+//! pre-write decline (an unsupported `schema_version`, an owner-set precondition
+//! mismatch, a containment violation, a bad create path) returns a coded
+//! `outcome = refused` [`ApplyReport`], never a bare `Err`. The `schema_version`
+//! gate lives in that shared engine (audit-F3), not the CLI preamble, so the
+//! routed/MCP surface is guarded too. ADR 0011: the plan bytes reviewed are the
+//! plan bytes applied.
 
 use super::{owner_index_options, MutationExecution};
 use crate::apply::{apply_migration_plan, ApplyContext};
@@ -191,6 +193,56 @@ mod tests {
     /// existing `task-000`, the two creates resolve to `task-1` and `task-2`
     /// (max+1, then folding in the just-allocated id). Proves NRN-101 sequential
     /// allocation across ops in a single plan.
+    /// The engine schema gate (audit-F3): a plan whose `schema_version` this build
+    /// does not support refuses `unsupported-schema-version` (exit 2) before any
+    /// work — zero operations examined, nothing written — on both an under- and
+    /// over-version. The refusal now originates engine-side (the CLI preamble no
+    /// longer checks), so this is where it is asserted; the refused report's
+    /// `dry_run` tracks `confirm` (a forecast unless a real apply was requested)
+    /// exactly as a successful apply's would.
+    #[test]
+    fn unsupported_schema_version_refuses_with_zero_ops_examined() {
+        let (_t, root) = synth_vault(&[("a.md", "---\ntype: note\n---\n# A\n")]);
+        let cache = built(&root);
+        for bad_version in [0u32, 99u32] {
+            for confirm in [false, true] {
+                // A one-op plan whose op WOULD move a real doc if it ran — but the
+                // schema gate refuses before expansion, so nothing is examined.
+                let mut plan = move_plan(&root, "a.md", "renamed.md");
+                plan.schema_version = bad_version;
+                let exec =
+                    execute(&cache, None, &params(&plan, confirm), TODAY, &mut sink()).unwrap();
+                assert_eq!(
+                    exec.report.outcome,
+                    ApplyOutcome::Refused,
+                    "schema_version {bad_version} must refuse"
+                );
+                assert_eq!(exec.report.exit_code(), 2);
+                assert_eq!(exec.report.applied, 0);
+                // The refused report is a forecast unless a real apply was confirmed.
+                assert_eq!(exec.report.dry_run, !confirm);
+                let err = exec
+                    .report
+                    .operations
+                    .iter()
+                    .find_map(|o| o.error.as_ref())
+                    .expect("refused report carries a coded error");
+                assert_eq!(err.code, "unsupported-schema-version");
+                assert_eq!(
+                    err.message,
+                    format!(
+                        "unsupported plan schema_version {bad_version}; this norn build supports v{}",
+                        MIGRATION_PLAN_SCHEMA_VERSION
+                    )
+                );
+                // Zero ops examined: nothing written, the doc is untouched.
+                assert!(exec.touched_paths.is_empty());
+                assert!(root.join("a.md").as_std_path().exists());
+                assert!(!root.join("renamed.md").as_std_path().exists());
+            }
+        }
+    }
+
     #[test]
     fn sequenced_seq_creates_allocate_in_order() {
         let (_t, root) = synth_vault(&[("tasks/task-000.md", "---\ntype: task\n---\n# T0\n")]);

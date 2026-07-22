@@ -39,7 +39,7 @@ use norn_wire::{
     CascadeRewrite, CascadeSkip, CascadeSummary, LinkImpact, OpStatus, PreconditionStatus,
     APPLY_REPORT_SCHEMA_VERSION,
 };
-use norn_wire::{MigrationOp, MigrationPlan};
+use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
 use std::collections::{BTreeSet, HashMap};
 
 /// Context for `apply_migration_plan`.
@@ -116,6 +116,22 @@ pub fn apply_migration_plan(
     ctx: ApplyContext,
     sink: &mut crate::telemetry::EventSink,
 ) -> Result<ApplyReport> {
+    // Schema gate (audit-F3): the ENGINE is the single owner of the plan-schema
+    // contract. A plan whose `schema_version` this build does not support is
+    // refused here, before any work — vault-root canonicalization, expansion,
+    // owner-set evaluation, or a write — so zero operations are examined. This was
+    // formerly a client-side preamble check in `norn-cli`; promoting it engine-side
+    // means the routed/MCP surface (which never ran the CLI preamble) is guarded
+    // too, and the check exists exactly once. `unsupported-schema-version`, exit 2.
+    if plan.schema_version != MIGRATION_PLAN_SCHEMA_VERSION {
+        let error = anyhow::Error::from(
+            crate::standards::apply::ApplyError::UnsupportedMigrationPlanSchemaVersion {
+                expected: MIGRATION_PLAN_SCHEMA_VERSION,
+                got: plan.schema_version,
+            },
+        );
+        return refuse_plan_level(plan, ctx.dry_run, ctx.refuse_as_report, error);
+    }
     let vault_root = Utf8PathBuf::from(&plan.vault_root);
     // The index root is the vault actually being operated on, so it always
     // exists; a canonicalize failure here is a genuine internal error. Like every
