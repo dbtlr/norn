@@ -128,7 +128,7 @@ pub(crate) fn render_new(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::display::format::FormatSpec;
+    use crate::display::format::{FormatChoice, FormatSpec};
     use crate::display::Presenter;
     use crate::output::palette::Palette;
     use norn_wire::{FrontmatterCreated, NewReport};
@@ -137,7 +137,7 @@ mod tests {
     /// Drive `render_new` through the same resolution `emit` performs — `new` is
     /// unstyled, so a no-op palette sink.
     fn drive<O: Write, E: Write>(view: NewMutationView, presenter: &mut Presenter<O, E>) -> i32 {
-        let format = view.spec.resolve(view.explicit, false);
+        let format = view.format.resolve(false);
         let palette = Palette::off();
         let (out, err) = presenter.streams();
         let mut sink = Sink::new(out, &palette, 80);
@@ -207,10 +207,12 @@ mod tests {
             drive(
                 NewMutationView {
                     report,
-                    explicit: Some(Format::Records),
-                    spec: FormatSpec {
-                        tty: Format::Records,
-                        piped: Format::Records,
+                    format: FormatChoice {
+                        explicit: Some(Format::Records),
+                        spec: FormatSpec {
+                            tty: Format::Records,
+                            piped: Format::Records,
+                        },
                     },
                 },
                 &mut presenter,

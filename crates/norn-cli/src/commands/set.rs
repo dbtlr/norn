@@ -17,7 +17,7 @@
 use std::io::Read;
 
 use crate::cli::{GlobalArgs, SetArgs, SetFormat};
-use crate::display::{Diagnostic, Format, FormatSpec, Output, SetMutationView};
+use crate::display::{Diagnostic, Format, FormatChoice, FormatSpec, Output, SetMutationView};
 use norn_wire::SetParams;
 
 impl From<SetFormat> for Format {
@@ -79,12 +79,14 @@ pub(crate) fn run_confirm(
 
     Ok(Output::Set(SetMutationView {
         report,
-        explicit: Some(args.format.into()),
-        // Mutations do not switch format on isatty — the mode ladder decides
-        // apply-vs-forecast, and `--format` (default records) decides shape.
-        spec: FormatSpec {
-            tty: Format::Records,
-            piped: Format::Records,
+        format: FormatChoice {
+            explicit: Some(args.format.into()),
+            // Mutations do not switch format on isatty — the mode ladder decides
+            // apply-vs-forecast, and `--format` (default records) decides shape.
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
         },
     }))
 }

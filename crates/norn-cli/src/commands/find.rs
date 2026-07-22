@@ -18,7 +18,7 @@ use norn_wire::{FindParams, SortPaginateParams};
 
 use crate::cli::GlobalArgs;
 use crate::commands::args::{FilterArgs, SortPaginateArgs};
-use crate::display::{Diagnostic, FindView, Format, FormatSpec, Output};
+use crate::display::{Diagnostic, FindView, Format, FormatChoice, FormatSpec, Output};
 use crate::output::projection::split_cols;
 
 /// The deep connection facets that require a per-match connection load. When any
@@ -163,11 +163,13 @@ pub fn run(args: &FindArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
         cols: args.col.clone(),
         all_cols: args.all_cols,
         sort_field: args.paging.sort.clone(),
-        explicit: args.format.map(Format::from),
-        // The one tty-sensitive default pair: records on a terminal, paths piped.
-        spec: FormatSpec {
-            tty: Format::Records,
-            piped: Format::Paths,
+        format: FormatChoice {
+            explicit: args.format.map(Format::from),
+            // The one tty-sensitive default pair: records on a terminal, paths piped.
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Paths,
+            },
         },
     }))
 }

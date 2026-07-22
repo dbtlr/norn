@@ -15,6 +15,7 @@ use crate::display::conversation::Conversation;
 use crate::display::emit::render_outcome;
 use crate::display::output::MoveMutationView;
 use crate::display::sink::Sink;
+use crate::display::Format;
 use crate::output::glyphs::{self, Glyph};
 
 use super::shared::{
@@ -23,19 +24,21 @@ use super::shared::{
 
 pub(crate) fn render_move(
     view: MoveMutationView,
+    format: Format,
     sink: &mut Sink<'_>,
     conv: &mut Conversation<'_>,
 ) -> i32 {
     let report = &view.report;
+    let json = matches!(format, Format::Json);
 
     if report.outcome == ApplyOutcome::Refused {
-        return render_apply_refusal(report, view.json, sink.writer(), conv);
+        return render_apply_refusal(report, format, sink.writer(), conv);
     }
 
     conv.cascade_failure_warnings(report);
     let exit = apply_report_exit(report);
 
-    if view.json {
+    if json {
         let result: io::Result<i32> = (|| {
             write_report_json(sink.writer(), report)?;
             Ok(exit)

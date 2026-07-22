@@ -7,9 +7,18 @@
 //! single-writer lock, and answers with the shared typed `ApplyReport` the
 //! display layer renders. `--out` writes the JSON report to a file.
 
-use crate::cli::{GlobalArgs, RewriteWikilinkArgs};
-use crate::display::{Diagnostic, Output, RewriteWikilinkView};
+use crate::cli::{GlobalArgs, RewriteWikilinkArgs, RewriteWikilinkFormat};
+use crate::display::{Diagnostic, Format, FormatChoice, FormatSpec, Output, RewriteWikilinkView};
 use norn_wire::RewriteWikilinkParams;
+
+impl From<RewriteWikilinkFormat> for Format {
+    fn from(f: RewriteWikilinkFormat) -> Self {
+        match f {
+            RewriteWikilinkFormat::Records => Format::Records,
+            RewriteWikilinkFormat::Json => Format::Json,
+        }
+    }
+}
 
 /// Run a `rewrite-wikilink` mutation and return its report as an [`Output`], or a
 /// soft-landing [`Diagnostic`] on a connection/owner failure. An unresolvable
@@ -45,7 +54,13 @@ pub(crate) fn run_confirm(
         report,
         old: args.old.clone(),
         new: args.new.clone(),
-        json: matches!(args.format, crate::cli::RewriteWikilinkFormat::Json),
+        format: FormatChoice {
+            explicit: Some(args.format.into()),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
+        },
         out: args.out.clone(),
     }))
 }

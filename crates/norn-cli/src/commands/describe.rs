@@ -10,7 +10,7 @@
 use norn_wire::DescribeParams;
 
 use crate::cli::{DescribeArgs, DescribeFormat, GlobalArgs};
-use crate::display::{DescribeView, Diagnostic, Format, FormatSpec, Output};
+use crate::display::{DescribeView, Diagnostic, Format, FormatChoice, FormatSpec, Output};
 
 impl From<DescribeFormat> for Format {
     fn from(f: DescribeFormat) -> Self {
@@ -45,10 +45,12 @@ pub fn run(args: &DescribeArgs, global: &GlobalArgs) -> Result<Output, Diagnosti
     Ok(Output::Describe(DescribeView {
         report,
         by: args.by.clone(),
-        explicit: Some(Format::from(args.format.unwrap_or(DescribeFormat::Text))),
-        spec: FormatSpec {
-            tty: Format::Records,
-            piped: Format::Records,
+        format: FormatChoice {
+            explicit: Some(Format::from(args.format.unwrap_or(DescribeFormat::Text))),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
         },
     }))
 }

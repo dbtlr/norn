@@ -15,6 +15,7 @@ use crate::display::conversation::Conversation;
 use crate::display::emit::render_outcome;
 use crate::display::output::RewriteWikilinkView;
 use crate::display::sink::Sink;
+use crate::display::Format;
 
 use super::shared::{
     apply_report_exit, render_apply_refusal, render_cascade_failed, write_report_json,
@@ -23,16 +24,18 @@ use super::shared::{
 
 pub(crate) fn render_rewrite_wikilink(
     view: RewriteWikilinkView,
+    format: Format,
     sink: &mut Sink<'_>,
     conv: &mut Conversation<'_>,
 ) -> i32 {
     let report = &view.report;
+    let json = matches!(format, Format::Json);
 
     if report.outcome == ApplyOutcome::Refused {
         // `--out` is a write-to-file projection of the report; a refusal never
         // reaches it (the donor refuses before rendering), so the envelope path
         // is unconditional here.
-        return render_apply_refusal(report, view.json, sink.writer(), conv);
+        return render_apply_refusal(report, format, sink.writer(), conv);
     }
 
     conv.cascade_failure_warnings(report);
@@ -47,7 +50,7 @@ pub(crate) fn render_rewrite_wikilink(
         return render_outcome(result, conv.writer());
     }
 
-    if view.json {
+    if json {
         let result: io::Result<i32> = (|| {
             write_report_json(sink.writer(), report)?;
             Ok(exit)

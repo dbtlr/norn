@@ -15,7 +15,7 @@ use norn_wire::{
     ValidateReport,
 };
 
-use super::format::{Format, FormatSpec};
+use super::format::FormatChoice;
 
 /// A command's renderable outcome. Each report-bearing variant wraps the wire
 /// report unchanged and carries the presentation parameters the renderer needs;
@@ -65,8 +65,7 @@ pub struct FindView {
     /// The `--sort` field, if any — the record renderer highlights a matching
     /// frontmatter row.
     pub sort_field: Option<String>,
-    pub explicit: Option<Format>,
-    pub spec: FormatSpec,
+    pub format: FormatChoice,
 }
 
 /// `get`'s renderable report plus projection parameters.
@@ -77,15 +76,13 @@ pub struct GetView {
     /// The `--sort` field, if any (NRN-374: drives the unknown-sort-field
     /// warning, the `get` counterpart to `FindView::sort_field`).
     pub sort_field: Option<String>,
-    pub explicit: Option<Format>,
-    pub spec: FormatSpec,
+    pub format: FormatChoice,
 }
 
 /// `count`'s renderable report.
 pub struct CountView {
     pub report: CountReport,
-    pub explicit: Option<Format>,
-    pub spec: FormatSpec,
+    pub format: FormatChoice,
 }
 
 /// `describe`'s renderable report.
@@ -95,8 +92,7 @@ pub struct DescribeView {
     /// unknown-`--by`-field warning — `report.data.fields` already carries the
     /// normalized, occurrence-filtered set to compare against).
     pub by: Vec<String>,
-    pub explicit: Option<Format>,
-    pub spec: FormatSpec,
+    pub format: FormatChoice,
 }
 
 /// `validate`'s renderable report plus the `--summary` view toggle. The findings
@@ -107,8 +103,7 @@ pub struct ValidateView {
     /// `--summary`: emit grouped counts instead of per-finding blocks (records)
     /// or the full findings array (json).
     pub summary: bool,
-    pub explicit: Option<Format>,
-    pub spec: FormatSpec,
+    pub format: FormatChoice,
 }
 
 /// `repair`'s renderable report plus the surface knobs. Bare `norn repair`
@@ -134,8 +129,7 @@ pub struct RepairView {
 /// `vault list`'s registered vaults.
 pub struct VaultListView {
     pub vaults: Vec<RegisteredVault>,
-    pub explicit: Option<Format>,
-    pub spec: FormatSpec,
+    pub format: FormatChoice,
 }
 
 /// `set`'s renderable report. Only `records` and `json` are valid; the renderer
@@ -143,16 +137,14 @@ pub struct VaultListView {
 /// envelope, and an applied/forecast report to exit 0.
 pub struct SetMutationView {
     pub report: SetReport,
-    pub explicit: Option<Format>,
-    pub spec: FormatSpec,
+    pub format: FormatChoice,
 }
 
 /// `new`'s renderable report. Same records/json + exit-code contract as
 /// [`SetMutationView`].
 pub struct NewMutationView {
     pub report: NewReport,
-    pub explicit: Option<Format>,
-    pub spec: FormatSpec,
+    pub format: FormatChoice,
 }
 
 /// `edit`'s renderable report. Only `records` and `json` are valid. A refused
@@ -162,8 +154,7 @@ pub struct NewMutationView {
 /// applied/forecast report renders at exit 0.
 pub struct EditMutationView {
     pub report: EditReport,
-    pub explicit: Option<Format>,
-    pub spec: FormatSpec,
+    pub format: FormatChoice,
 }
 
 /// `move`'s renderable report. The cascade verbs render the shared
@@ -176,8 +167,7 @@ pub struct MoveMutationView {
     pub src: String,
     /// The raw destination argument, echoed in the records summary.
     pub dst: String,
-    /// `true` for `--format json`.
-    pub json: bool,
+    pub format: FormatChoice,
 }
 
 /// `delete`'s renderable report.
@@ -185,7 +175,7 @@ pub struct DeleteMutationView {
     pub report: ApplyReport,
     /// The raw target argument, echoed in the records summary.
     pub doc: String,
-    pub json: bool,
+    pub format: FormatChoice,
 }
 
 /// `rewrite-wikilink`'s renderable report.
@@ -193,7 +183,7 @@ pub struct RewriteWikilinkView {
     pub report: ApplyReport,
     pub old: String,
     pub new: String,
-    pub json: bool,
+    pub format: FormatChoice,
     /// `--out`: write the (always-JSON) report to this file, silencing stdout.
     pub out: Option<String>,
 }
@@ -206,8 +196,7 @@ pub struct RewriteWikilinkView {
 /// mismatch, the full summary with the preconditions block — both at exit 2.
 pub struct ApplyMutationView {
     pub report: ApplyReport,
-    /// `true` for `--format json`.
-    pub json: bool,
+    pub format: FormatChoice,
     /// `--out`: write the (always-JSON) report to this file, silencing stdout.
     pub out: Option<String>,
 }

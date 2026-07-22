@@ -11,7 +11,7 @@
 use std::io::Read;
 
 use crate::cli::{GlobalArgs, NewArgs, NewFormat};
-use crate::display::{Diagnostic, Format, FormatSpec, NewMutationView, Output};
+use crate::display::{Diagnostic, Format, FormatChoice, FormatSpec, NewMutationView, Output};
 use norn_wire::NewParams;
 
 impl From<NewFormat> for Format {
@@ -68,10 +68,12 @@ pub(crate) fn run_confirm(
 
     Ok(Output::New(NewMutationView {
         report,
-        explicit: Some(args.format.into()),
-        spec: FormatSpec {
-            tty: Format::Records,
-            piped: Format::Records,
+        format: FormatChoice {
+            explicit: Some(args.format.into()),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
         },
     }))
 }

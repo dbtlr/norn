@@ -9,7 +9,7 @@
 use norn_wire::CountParams;
 
 use crate::cli::{CountArgs, CountFormat, GlobalArgs};
-use crate::display::{CountView, Diagnostic, Format, FormatSpec, Output};
+use crate::display::{CountView, Diagnostic, Format, FormatChoice, FormatSpec, Output};
 
 impl From<CountFormat> for Format {
     fn from(f: CountFormat) -> Self {
@@ -40,10 +40,12 @@ pub fn run(args: &CountArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> 
 
     Ok(Output::Count(CountView {
         report,
-        explicit: Some(args.format.into()),
-        spec: FormatSpec {
-            tty: Format::Records,
-            piped: Format::Records,
+        format: FormatChoice {
+            explicit: Some(args.format.into()),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
         },
     }))
 }

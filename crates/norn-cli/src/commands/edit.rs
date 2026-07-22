@@ -26,7 +26,7 @@
 use std::io::Read;
 
 use crate::cli::{EditArgs, EditFormat, GlobalArgs};
-use crate::display::{Diagnostic, EditMutationView, Format, FormatSpec, Output};
+use crate::display::{Diagnostic, EditMutationView, Format, FormatChoice, FormatSpec, Output};
 use norn_core::edit::ops::EditOp;
 use norn_wire::{CodedError, EditParams, EditReport, MutationOutcome, EDIT_REPORT_SCHEMA_VERSION};
 
@@ -255,12 +255,14 @@ fn require_content(args: &EditArgs, flag: &str) -> Result<String, String> {
 fn edit_output(args: &EditArgs, report: EditReport) -> Output {
     Output::Edit(EditMutationView {
         report,
-        explicit: Some(args.format.into()),
-        // Mutations do not switch format on isatty — the mode ladder decides
-        // apply-vs-forecast, and `--format` (default records) decides shape.
-        spec: FormatSpec {
-            tty: Format::Records,
-            piped: Format::Records,
+        format: FormatChoice {
+            explicit: Some(args.format.into()),
+            // Mutations do not switch format on isatty — the mode ladder decides
+            // apply-vs-forecast, and `--format` (default records) decides shape.
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
         },
     })
 }

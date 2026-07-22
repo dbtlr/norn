@@ -17,9 +17,18 @@
 use std::io::Read;
 
 use crate::cli::{ApplyArgs, ApplyFormat, GlobalArgs, InputFormat};
-use crate::display::{ApplyMutationView, Diagnostic, Output};
+use crate::display::{ApplyMutationView, Diagnostic, Format, FormatChoice, FormatSpec, Output};
 use norn_wire::ApplyParams;
 use norn_wire::MigrationPlan;
+
+impl From<ApplyFormat> for Format {
+    fn from(f: ApplyFormat) -> Self {
+        match f {
+            ApplyFormat::Records => Format::Records,
+            ApplyFormat::Json => Format::Json,
+        }
+    }
+}
 
 /// Run an `apply` and return its report as an [`Output`], or a soft-landing
 /// [`Diagnostic`] on a bad/unreadable plan or a connection/owner failure. A
@@ -43,8 +52,6 @@ pub(crate) fn run_confirm(
     global: &GlobalArgs,
     confirm: bool,
 ) -> Result<Output, Diagnostic> {
-    let json = matches!(args.format, ApplyFormat::Json);
-
     // ── Preamble: read + format-detect + parse (client-side) ──
     // The `schema_version` gate lives ONCE in the shared engine
     // (`apply_migration_plan`, audit-F3), so the routed/MCP surface is guarded too;
@@ -67,7 +74,13 @@ pub(crate) fn run_confirm(
 
     Ok(Output::Apply(ApplyMutationView {
         report,
-        json,
+        format: FormatChoice {
+            explicit: Some(args.format.into()),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
+        },
         out: args.out.clone(),
     }))
 }

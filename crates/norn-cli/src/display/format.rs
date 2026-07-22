@@ -51,6 +51,29 @@ impl FormatSpec {
     }
 }
 
+/// A view's format choice: the (optional) explicit `--format` a verb parsed,
+/// paired with that Output kind's `{ tty, piped }` default policy. This is the
+/// ONE representation every view carries — the read verbs, the frontmatter
+/// mutation verbs, AND the cascade verbs (which previously carried a bespoke
+/// `json: bool`, ADR 0021's forbidden third format representation). The single
+/// [`emit`](crate::display::emit) resolution point calls [`resolve`](Self::resolve).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatChoice {
+    /// The explicit `--format`, if the verb parsed one; `None` falls back to the
+    /// `spec` default pair.
+    pub explicit: Option<Format>,
+    /// This Output kind's tty/piped default policy.
+    pub spec: FormatSpec,
+}
+
+impl FormatChoice {
+    /// Resolve the effective [`Format`], delegating to [`FormatSpec::resolve`]:
+    /// an explicit `--format` always wins; otherwise pick by `is_tty`.
+    pub fn resolve(&self, is_tty: bool) -> Format {
+        self.spec.resolve(self.explicit, is_tty)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

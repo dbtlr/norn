@@ -8,7 +8,7 @@
 //! records human view composes from the severity-tally + by-code primitives.
 
 use crate::cli::{GlobalArgs, ValidateArgs, ValidateFormat};
-use crate::display::{Diagnostic, Format, FormatSpec, Output, ValidateView};
+use crate::display::{Diagnostic, Format, FormatChoice, FormatSpec, Output, ValidateView};
 use norn_wire::ValidateParams;
 
 impl From<ValidateFormat> for Format {
@@ -46,11 +46,13 @@ pub fn run(args: &ValidateArgs, global: &GlobalArgs) -> Result<Output, Diagnosti
     Ok(Output::Validate(ValidateView {
         report,
         summary: args.summary,
-        explicit: args.format.map(Format::from),
-        // Donor default: records on a tty, jsonl when piped.
-        spec: FormatSpec {
-            tty: Format::Records,
-            piped: Format::Jsonl,
+        format: FormatChoice {
+            explicit: args.format.map(Format::from),
+            // Donor default: records on a tty, jsonl when piped.
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Jsonl,
+            },
         },
     }))
 }

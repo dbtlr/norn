@@ -7,9 +7,18 @@
 //! answers with the shared typed `ApplyReport`; the display layer renders it
 //! (records summary / pretty json) and derives the exit code.
 
-use crate::cli::{GlobalArgs, MoveArgs};
-use crate::display::{Diagnostic, MoveMutationView, Output};
+use crate::cli::{GlobalArgs, MoveArgs, MoveFormat};
+use crate::display::{Diagnostic, Format, FormatChoice, FormatSpec, MoveMutationView, Output};
 use norn_wire::MoveParams;
+
+impl From<MoveFormat> for Format {
+    fn from(f: MoveFormat) -> Self {
+        match f {
+            MoveFormat::Records => Format::Records,
+            MoveFormat::Json => Format::Json,
+        }
+    }
+}
 
 /// Run a `move` mutation and return its report as an [`Output`], or a
 /// soft-landing [`Diagnostic`] on a connection/owner failure. A clean pre-write
@@ -49,7 +58,13 @@ pub(crate) fn run_confirm(
         report,
         src: args.src.clone(),
         dst: args.dst.clone(),
-        json: matches!(args.format, crate::cli::MoveFormat::Json),
+        format: FormatChoice {
+            explicit: Some(args.format.into()),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
+        },
     }))
 }
 

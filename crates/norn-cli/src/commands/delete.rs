@@ -6,9 +6,18 @@
 //! redirect under its single-writer lock, and answers with the shared typed
 //! `ApplyReport` the display layer renders.
 
-use crate::cli::{DeleteArgs, GlobalArgs};
-use crate::display::{DeleteMutationView, Diagnostic, Output};
+use crate::cli::{DeleteArgs, DeleteFormat, GlobalArgs};
+use crate::display::{DeleteMutationView, Diagnostic, Format, FormatChoice, FormatSpec, Output};
 use norn_wire::DeleteParams;
+
+impl From<DeleteFormat> for Format {
+    fn from(f: DeleteFormat) -> Self {
+        match f {
+            DeleteFormat::Records => Format::Records,
+            DeleteFormat::Json => Format::Json,
+        }
+    }
+}
 
 /// Run a `delete` mutation and return its report as an [`Output`], or a
 /// soft-landing [`Diagnostic`] on a connection/owner failure. A clean pre-write
@@ -44,7 +53,13 @@ pub(crate) fn run_confirm(
     Ok(Output::Delete(DeleteMutationView {
         report,
         doc: args.doc.clone(),
-        json: matches!(args.format, crate::cli::DeleteFormat::Json),
+        format: FormatChoice {
+            explicit: Some(args.format.into()),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
+        },
     }))
 }
 

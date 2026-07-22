@@ -132,7 +132,7 @@ fn describe_text(report: &DescribeReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::display::format::FormatSpec;
+    use crate::display::format::{FormatChoice, FormatSpec};
     use crate::display::Presenter;
     use crate::display::EXIT_OPERATIONAL;
     use crate::output::palette::Palette;
@@ -143,7 +143,7 @@ mod tests {
     /// Drive `render_describe` through the same resolution `emit` performs —
     /// describe is unstyled, so a no-op palette sink.
     fn drive<O: Write, E: Write>(view: DescribeView, presenter: &mut Presenter<O, E>) -> i32 {
-        let format = view.spec.resolve(view.explicit, false);
+        let format = view.format.resolve(false);
         let palette = Palette::off();
         let (out, err) = presenter.streams();
         let mut sink = Sink::new(out, &palette, 80);
@@ -220,10 +220,12 @@ mod tests {
         DescribeView {
             report: describe_sample(),
             by: vec![],
-            explicit: Some(Format::Json),
-            spec: FormatSpec {
-                tty: Format::Records,
-                piped: Format::Records,
+            format: FormatChoice {
+                explicit: Some(Format::Json),
+                spec: FormatSpec {
+                    tty: Format::Records,
+                    piped: Format::Records,
+                },
             },
         }
     }
