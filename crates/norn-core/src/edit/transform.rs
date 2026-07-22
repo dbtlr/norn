@@ -667,4 +667,60 @@ mod tests {
         let out = apply_edits(EOF_HEADING, &[op]).unwrap();
         assert_eq!(out.new_body, "intro\n\n## Tail\nLEAD\n");
     }
+
+    // ── NRN-164: forgiving ATX-prefixed heading anchors on the edit-op path ───
+    // The plan/CLI edit ops inherit the shared resolver's exact-first-then-ATX
+    // forgiveness: an anchor passed in its natural markdown form (`## Alpha`)
+    // resolves the `Alpha` section without the caller stripping the prefix.
+
+    #[test]
+    fn atx_prefixed_anchor_resolves_replace_section() {
+        let op = EditOp::ReplaceSection {
+            heading: "## Alpha".into(),
+            content: "new alpha".into(),
+        };
+        let out = apply_edits(DOC, &[op]).unwrap();
+        assert_eq!(out.new_body, "intro\n\n## Alpha\nnew alpha\n## Beta\nb1\n");
+    }
+
+    #[test]
+    fn atx_prefixed_anchor_level_is_syntax_noise() {
+        // A `## Sub` anchor resolves a `### Sub` heading — level is ignored.
+        let doc = "## Parent\np\n### Sub\ns\n";
+        let op = EditOp::AppendToSection {
+            heading: "## Sub".into(),
+            content: "tail".into(),
+        };
+        let out = apply_edits(doc, &[op]).unwrap();
+        assert_eq!(out.new_body, "## Parent\np\n### Sub\ns\ntail\n");
+    }
+
+    #[test]
+    fn atx_prefixed_anchor_trailing_closer_stripped_insert_before() {
+        let op = EditOp::InsertBeforeHeading {
+            heading: "## Beta ##".into(),
+            content: "BRIDGE".into(),
+        };
+        let out = apply_edits(DOC, &[op]).unwrap();
+        assert_eq!(
+            out.new_body,
+            "intro\n\n## Alpha\na1\na2\n\nBRIDGE\n## Beta\nb1\n"
+        );
+    }
+
+    #[test]
+    fn atx_prefixed_missing_heading_still_refuses_unchanged() {
+        let op = EditOp::DeleteSection {
+            heading: "## Gamma".into(),
+        };
+        let err = apply_edits(DOC, &[op]).unwrap_err();
+        assert_eq!(
+            err,
+            EditError::HeadingNotFound {
+                index: 0,
+                kind: "delete_section",
+                heading: "## Gamma".into(),
+            }
+        );
+    }
 }

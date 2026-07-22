@@ -14,6 +14,35 @@
 
 use crate::heading::{parse_headings, Heading};
 
+/// Indices of the headings whose text matches `text` exactly.
+fn matching_indices(headings: &[Heading], text: &str) -> Vec<usize> {
+    headings
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| h.text == text)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The heading TEXT of an ATX-prefixed anchor, or `None` when the anchor is not
+/// an ATX form (NRN-164). The anchor must begin with a run of 1–6 `#` followed
+/// by at least one space or tab — CommonMark's ATX opening. The very same
+/// `pulldown-cmark` pass that produced the document's headings then extracts the
+/// anchor's text, so a trailing ATX closer (`## X ##` → `X`) and inline markup
+/// are handled identically to a real heading: a `#` that is part of the text
+/// (`## C#`) is preserved, never mistaken for a closer. Parsing the tiny anchor
+/// only on the miss path keeps the exact-match hot path untouched.
+fn atx_anchor_text(anchor: &str) -> Option<String> {
+    let hashes = anchor.bytes().take_while(|&b| b == b'#').count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    if !matches!(anchor.as_bytes().get(hashes), Some(b' ') | Some(b'\t')) {
+        return None;
+    }
+    parse_headings(anchor).into_iter().next().map(|h| h.text)
+}
+
 /// Byte ranges describing a section addressed by exact heading text. Offsets are
 /// relative to the `body` the span was resolved against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,12 +78,21 @@ pub fn resolve_section_in(
     body: &str,
     heading: &str,
 ) -> Result<SectionSpan, SectionError> {
-    let matches: Vec<usize> = headings
-        .iter()
-        .enumerate()
-        .filter(|(_, h)| h.text == heading)
-        .map(|(i, _)| i)
-        .collect();
+    // Exact match FIRST — the anchor verbatim, exactly as before. This preserves
+    // every currently-resolving anchor, including a heading whose text
+    // legitimately begins with `#`.
+    let mut matches = matching_indices(headings, heading);
+    // Forgiving ATX fallback (NRN-164, ADR 0010): only on a TOTAL miss, and only
+    // when the anchor is an ATX-prefixed form (`## State`, `### X ##`), retry on
+    // the heading TEXT with the `#` prefix (and any trailing closer) stripped.
+    // Heading level is treated as syntax noise — the retry matches on text, so a
+    // `## X` anchor resolves a `### X` heading. Silent acceptance, per ADR 0010's
+    // forgiving-inputs doctrine. Exact-first guarantees no working anchor flips.
+    if matches.is_empty() {
+        if let Some(text) = atx_anchor_text(heading) {
+            matches = matching_indices(headings, &text);
+        }
+    }
     match matches.len() {
         0 => Err(SectionError::HeadingNotFound {
             heading: heading.to_string(),
@@ -210,5 +248,75 @@ mod tests {
         assert_eq!(span.body_start, doc.len());
         assert_eq!(span.end, doc.len());
         assert_eq!(&doc[span.heading_start..span.end], "## Tail");
+    }
+
+    // ── NRN-164: forgiving ATX-prefixed anchors ──────────────────────────────
+    // The section resolver tries the anchor EXACTLY first, then — only on a total
+    // miss — retries an ATX-prefixed anchor (`## X`) on the heading TEXT.
+
+    #[test]
+    fn atx_prefixed_anchor_resolves_by_stripping_the_prefix() {
+        // `## Alpha` (the natural markdown form) resolves the `## Alpha` heading.
+        let span = resolve_section(DOC, "## Alpha").unwrap();
+        assert_eq!(span, resolve_section(DOC, "Alpha").unwrap());
+    }
+
+    #[test]
+    fn atx_anchor_level_is_syntax_noise_text_matches() {
+        // A `## X` anchor resolves a `### X` heading — level differs, text matches.
+        let doc = "### Deep\nbody\n";
+        let span = resolve_section(doc, "## Deep").unwrap();
+        assert_eq!(span, resolve_section(doc, "Deep").unwrap());
+        // …and the reverse: a `#### X` anchor onto an `## X` heading.
+        let span2 = resolve_section(DOC, "#### Alpha").unwrap();
+        assert_eq!(span2, resolve_section(DOC, "Alpha").unwrap());
+    }
+
+    #[test]
+    fn atx_anchor_trailing_closer_is_stripped() {
+        // A closed ATX anchor (`## Alpha ##`) resolves the same section.
+        let span = resolve_section(DOC, "## Alpha ##").unwrap();
+        assert_eq!(span, resolve_section(DOC, "Alpha").unwrap());
+    }
+
+    #[test]
+    fn exact_match_wins_over_forgiving_strip_ambiguous_doc() {
+        // The ambiguity guard: a doc with BOTH a heading whose text is literally
+        // `## Verbatim` (an ATX heading whose text begins with `#`) AND a
+        // different heading `Verbatim`. The anchor `## Verbatim` must resolve the
+        // FIRST (exact text match), never be stripped to `Verbatim` and land on
+        // the wrong section. Exact-first is what prevents the mis-resolution.
+        let doc = "#### ## Verbatim\nright body\n\n## Verbatim\nwrong body\n";
+        let span = resolve_section(doc, "## Verbatim").unwrap();
+        assert_eq!(&doc[span.body_start..span.end], "right body\n\n");
+        // Sanity: the bare text still resolves the OTHER (level-2) section.
+        let other = resolve_section(doc, "Verbatim").unwrap();
+        assert_eq!(&doc[other.body_start..other.end], "wrong body\n");
+    }
+
+    #[test]
+    fn non_atx_hash_anchor_is_not_stripped() {
+        // `#Alpha` (no space after the hashes) is NOT an ATX opening, so it is
+        // never stripped — it stays a total miss.
+        let err = resolve_section(DOC, "#Alpha").unwrap_err();
+        assert_eq!(
+            err,
+            SectionError::HeadingNotFound {
+                heading: "#Alpha".into()
+            }
+        );
+    }
+
+    #[test]
+    fn missing_heading_still_refuses_after_forgiving_retry() {
+        // Neither the exact anchor nor its stripped text matches: the error is
+        // unchanged and reports the anchor AS PASSED.
+        let err = resolve_section(DOC, "## Gamma").unwrap_err();
+        assert_eq!(
+            err,
+            SectionError::HeadingNotFound {
+                heading: "## Gamma".into()
+            }
+        );
     }
 }
