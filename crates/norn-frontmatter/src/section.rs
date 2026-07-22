@@ -262,6 +262,36 @@ mod tests {
     }
 
     #[test]
+    fn atx_anchor_level_boundary_h6_strips_h7_falls_through() {
+        // The full ATX range h1-h6 strips; seven hashes is not a valid ATX
+        // heading (CommonMark), so it falls through to the unchanged
+        // not-found error naming the original anchor.
+        let doc = "## Edge\nbody\n";
+        let span = resolve_section(doc, "###### Edge").unwrap();
+        assert_eq!(span, resolve_section(doc, "Edge").unwrap());
+        let err = resolve_section(doc, "####### Edge").unwrap_err();
+        assert!(err.to_string().contains("####### Edge"));
+    }
+
+    #[test]
+    fn degenerate_atx_anchors_fall_through_to_not_found() {
+        // An empty-text anchor (`## `) and a bare hash run (`##`) never
+        // resolve and never panic.
+        let doc = "## Alpha\nbody\n";
+        assert!(resolve_section(doc, "## ").is_err());
+        assert!(resolve_section(doc, "##").is_err());
+    }
+
+    #[test]
+    fn atx_anchor_resolves_a_setext_heading_by_text() {
+        // Match-on-text crosses heading styles: a `## X` anchor resolves a
+        // setext `X` heading (NRN-437 arm shared, unchanged).
+        let doc = "Overview\n========\nbody\n";
+        let span = resolve_section(doc, "## Overview").unwrap();
+        assert_eq!(span, resolve_section(doc, "Overview").unwrap());
+    }
+
+    #[test]
     fn atx_anchor_level_is_syntax_noise_text_matches() {
         // A `## X` anchor resolves a `### X` heading — level differs, text matches.
         let doc = "### Deep\nbody\n";
