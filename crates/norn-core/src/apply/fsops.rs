@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::standards::apply::{ApplyError, ContainmentError, DeleteResult, MoveResult};
-use crate::standards::PlannedChange;
+use crate::standards::ApplyOp;
 
 /// (NRN-145) Refuse an op target that would resolve outside the vault root. The
 /// shared containment gate for the mutation stack (create / move / delete / edit
@@ -120,11 +120,11 @@ fn nearest_existing_ancestor(path: &Utf8Path) -> &Utf8Path {
     }
 }
 
-/// Performs the filesystem move for a `move_document` PlannedChange.
+/// Performs the filesystem move for a `move_document` ApplyOp.
 /// Refuses with precondition errors if source is missing/symlink or
 /// destination exists. Falls back to copy+remove if rename fails
 /// (typically cross-device).
-pub fn apply_move(cwd: &Utf8Path, change: &PlannedChange) -> Result<MoveResult, ApplyError> {
+pub fn apply_move(cwd: &Utf8Path, change: &ApplyOp) -> Result<MoveResult, ApplyError> {
     let source_rel = &change.path;
     let dest_rel = change
         .destination
@@ -196,9 +196,9 @@ pub fn apply_move(cwd: &Utf8Path, change: &PlannedChange) -> Result<MoveResult, 
     }
 }
 
-/// Performs the filesystem removal for a `delete_document` PlannedChange.
+/// Performs the filesystem removal for a `delete_document` ApplyOp.
 /// Refuses with precondition errors if source is missing or is a symlink.
-pub fn apply_delete(cwd: &Utf8Path, change: &PlannedChange) -> Result<DeleteResult, ApplyError> {
+pub fn apply_delete(cwd: &Utf8Path, change: &ApplyOp) -> Result<DeleteResult, ApplyError> {
     let source_rel = &change.path;
     let source_abs = cwd.join(source_rel);
 
@@ -395,19 +395,14 @@ pub(crate) fn create_document_file(
 mod tests {
     use super::*;
 
-    fn planned(
-        operation: &str,
-        path: &str,
-        destination: Option<&str>,
-        force: bool,
-    ) -> PlannedChange {
-        PlannedChange {
+    fn planned(operation: &str, path: &str, destination: Option<&str>, force: bool) -> ApplyOp {
+        ApplyOp {
             change_id: format!("{operation}-{path}"),
             path: Utf8PathBuf::from(path),
             document_hash: "irrelevant".into(),
-            finding_code: "operator-request".into(),
+            finding_code: None,
             finding_rule: None,
-            repair_rule: "operator-request".into(),
+            repair_rule: None,
             operation: operation.into(),
             field: None,
             expected_old_value: None,

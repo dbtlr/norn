@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use crate::standards::config::{RepairAction, RepairConfig, RepairRule, RepairRuleMatch};
 use crate::standards::findings::Finding;
+use crate::standards::op::ApplyOp;
 
 pub const REPAIR_PLAN_SCHEMA_VERSION: u32 = 9;
 
@@ -124,35 +125,6 @@ impl SkippedSummary {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct RepairPlan {
-    pub schema_version: u32,
-    pub vault_root: Utf8PathBuf,
-    pub source_filters: RepairPlanFilters,
-    pub summary: RepairPlanSummary,
-    pub changes: Vec<PlannedChange>,
-    pub(crate) skipped_findings: Vec<SkippedFinding>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub footnotes: Vec<PlanFootnote>,
-}
-
-impl RepairPlan {
-    /// The single preflight-produced op of `kind`, panicking with a uniform
-    /// message if absent. The CLI direct arms and the MCP tools all pull the
-    /// preflight-RESOLVED path out of the plan through this one accessor, so
-    /// the routed and direct surfaces cannot drift on the extraction (NRN-239).
-    ///
-    /// Unused until the mutation executor (this organ's next port) calls it;
-    /// keep it live rather than deferring the accessor's port along with it.
-    #[allow(dead_code)]
-    pub(crate) fn expect_change(&self, kind: &str) -> &PlannedChange {
-        self.changes
-            .iter()
-            .find(|c| c.operation == kind)
-            .unwrap_or_else(|| panic!("preflight_and_plan must produce a {kind} op"))
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RepairPlanSummary {
     pub findings: usize,
     pub planned_changes: usize,
@@ -164,7 +136,7 @@ pub struct RepairPlanSummary {
 /// former `RepairPlan` served that the wire plan does not — the rich `skipped`
 /// findings (candidate paths, next actions, skip-reason code) the planner's REPORT
 /// surfaces, and the run `summary` tallies. Repair no longer produces
-/// `PlannedChange`/`RepairPlan` as its output contract; the ops carry finding
+/// `ApplyOp`/`RepairPlan` as its output contract; the ops carry finding
 /// linkage (`finding_code`/`repair_rule`) and per-op footnotes directly.
 ///
 /// `plan.generator`/`plan.generated_at` are left unset here (the planner is a pure
@@ -179,14 +151,14 @@ pub struct RepairPlanResult {
     pub summary: RepairPlanSummary,
 }
 
-/// Build a wire op's `fields` object from an interior `PlannedChange`, natively —
+/// Build a wire op's `fields` object from an interior `ApplyOp`, natively —
 /// the byte-for-byte successor to the former `serde_json::to_value(&change)` round
 /// trip (which serialized the whole struct, dropped `operation`, and remapped
 /// `path`/`destination`→`src`/`dst` for moves). `serde_json`'s `Map` is a
 /// `BTreeMap`, so the emitted key ORDER is the sorted set regardless of insertion
 /// order; only the key set and values are load-bearing for plan bytes. `operation`
 /// is intentionally omitted — it becomes the [`MigrationOp::kind`].
-fn op_fields_from_change(change: &PlannedChange) -> Value {
+fn op_fields_from_change(change: &ApplyOp) -> Value {
     let is_move = change.operation == "move_document";
     let mut fields = serde_json::Map::new();
     fields.insert("change_id".into(), Value::String(change.change_id.clone()));
@@ -198,17 +170,19 @@ fn op_fields_from_change(change: &PlannedChange) -> Value {
         "document_hash".into(),
         Value::String(change.document_hash.clone()),
     );
-    fields.insert(
-        "finding_code".into(),
-        Value::String(change.finding_code.clone()),
-    );
+    // Linkage is `Option<String>` on the interior op; the repair planner always
+    // populates `finding_code` / `repair_rule` (a finding's code and its rule
+    // name), so the conditional insert fires for every repair-emitted op — the
+    // emitted key set is byte-identical to the former unconditional insert.
+    if let Some(finding_code) = &change.finding_code {
+        fields.insert("finding_code".into(), Value::String(finding_code.clone()));
+    }
     if let Some(finding_rule) = &change.finding_rule {
         fields.insert("finding_rule".into(), Value::String(finding_rule.clone()));
     }
-    fields.insert(
-        "repair_rule".into(),
-        Value::String(change.repair_rule.clone()),
-    );
+    if let Some(repair_rule) = &change.repair_rule {
+        fields.insert("repair_rule".into(), Value::String(repair_rule.clone()));
+    }
     if let Some(field) = &change.field {
         fields.insert("field".into(), Value::String(field.clone()));
     }
@@ -302,39 +276,6 @@ pub struct PlanFootnote {
     pub details: FootnoteDetails,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PlannedChange {
-    pub change_id: String,
-    pub path: Utf8PathBuf,
-    pub document_hash: String,
-    pub finding_code: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub finding_rule: Option<String>,
-    pub repair_rule: String,
-    pub operation: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub field: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expected_old_value: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub new_value: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub destination: Option<Utf8PathBuf>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) link_risk: Option<crate::standards::repair::link_risk::LinkRisk>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub warnings: Vec<crate::standards::repair::warnings::PlanWarning>,
-    /// When true, `apply_move` will remove an existing destination before
-    /// renaming. Defaults to false; skips serialization when false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub force: bool,
-    /// When true, intermediate destination subdirectories are created at apply
-    /// time (analogous to `mkdir -p`). Propagated from `move_folder` ops.
-    /// Defaults to false; skips serialization when false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub parents: bool,
-}
-
 fn derive_change_id(
     path: &Utf8PathBuf,
     finding_code: &str,
@@ -366,7 +307,7 @@ const DEFAULT_MEDIUM_THRESHOLD: f64 = 0.7;
 
 enum ClosestMatchOutcome {
     Change {
-        change: Box<PlannedChange>,
+        change: Box<ApplyOp>,
         footnote: Box<PlanFootnote>,
     },
     TiedSkip {
@@ -431,13 +372,13 @@ fn handle_closest_match(
                 occurrence_index,
             );
 
-            let change = PlannedChange {
+            let change = ApplyOp {
                 change_id: change_id.clone(),
                 path: finding.path.clone(),
                 document_hash,
-                finding_code: finding.code.clone(),
+                finding_code: Some(finding.code.clone()),
                 finding_rule: None,
-                repair_rule: "built-in:closest-match-stem".to_string(),
+                repair_rule: Some("built-in:closest-match-stem".to_string()),
                 operation: "rewrite_link".to_string(),
                 field: None,
                 expected_old_value,
@@ -591,13 +532,13 @@ pub fn plan_repairs(
                                 None,
                                 occurrence_index,
                             );
-                            changes.push(PlannedChange {
+                            changes.push(ApplyOp {
                                 change_id,
                                 path: finding.path.clone(),
                                 document_hash: document_hash.clone(),
-                                finding_code: finding.code.clone(),
+                                finding_code: Some(finding.code.clone()),
                                 finding_rule: None,
-                                repair_rule: "built-in:strip-bom".to_string(),
+                                repair_rule: Some("built-in:strip-bom".to_string()),
                                 operation: "strip_bom".to_string(),
                                 field: None,
                                 expected_old_value: None,
@@ -639,7 +580,7 @@ pub fn plan_repairs(
         skipped: skipped_summary,
     };
 
-    // Emit wire ops natively (ADR 0024). Each interior `PlannedChange` becomes a
+    // Emit wire ops natively (ADR 0024). Each interior `ApplyOp` becomes a
     // `MigrationOp`: `operation` → `kind`, the remaining fields → the `fields`
     // object (byte-identical to the former serde round trip), and the 1:1
     // closest-match footnote — keyed by `change_id`, the only footnote family — is
@@ -731,7 +672,7 @@ fn planned_change(
     document_hashes: &BTreeMap<Utf8PathBuf, String>,
     documents: &[crate::domain::Document],
     occurrence_index: u32,
-) -> Result<PlannedChange, (SkipReason, Option<String>)> {
+) -> Result<ApplyOp, (SkipReason, Option<String>)> {
     let repair_rule = rule
         .name
         .clone()
@@ -747,13 +688,13 @@ fn planned_change(
         occurrence_index,
     );
     Ok(match action {
-        RepairAction::SetFrontmatter { field, value } => PlannedChange {
+        RepairAction::SetFrontmatter { field, value } => ApplyOp {
             change_id: change_id.clone(),
             path: finding.path.clone(),
             document_hash,
-            finding_code: finding.code.clone(),
+            finding_code: Some(finding.code.clone()),
             finding_rule: finding_rule(finding),
-            repair_rule,
+            repair_rule: Some(repair_rule),
             operation: "set_frontmatter".to_string(),
             field: Some(field.clone()),
             expected_old_value: finding_actual_value(finding).cloned(),
@@ -764,13 +705,13 @@ fn planned_change(
             force: false,
             parents: false,
         },
-        RepairAction::RemoveFrontmatter { field } => PlannedChange {
+        RepairAction::RemoveFrontmatter { field } => ApplyOp {
             change_id: change_id.clone(),
             path: finding.path.clone(),
             document_hash,
-            finding_code: finding.code.clone(),
+            finding_code: Some(finding.code.clone()),
             finding_rule: finding_rule(finding),
-            repair_rule,
+            repair_rule: Some(repair_rule),
             operation: "remove_frontmatter".to_string(),
             field: Some(field.clone()),
             expected_old_value: finding_actual_value(finding).cloned(),
@@ -781,13 +722,13 @@ fn planned_change(
             force: false,
             parents: false,
         },
-        RepairAction::AddFrontmatter { field, value } => PlannedChange {
+        RepairAction::AddFrontmatter { field, value } => ApplyOp {
             change_id: change_id.clone(),
             path: finding.path.clone(),
             document_hash,
-            finding_code: finding.code.clone(),
+            finding_code: Some(finding.code.clone()),
             finding_rule: finding_rule(finding),
-            repair_rule,
+            repair_rule: Some(repair_rule),
             operation: "add_frontmatter".to_string(),
             field: Some(field.clone()),
             expected_old_value: None,
@@ -832,13 +773,13 @@ fn planned_change(
                 warnings.push(w);
             }
 
-            PlannedChange {
+            ApplyOp {
                 change_id,
                 path: finding.path.clone(),
                 document_hash,
-                finding_code: finding.code.clone(),
+                finding_code: Some(finding.code.clone()),
                 finding_rule: finding_rule(finding),
-                repair_rule,
+                repair_rule: Some(repair_rule),
                 operation: "move_document".to_string(),
                 field: None,
                 expected_old_value: None,
@@ -1051,7 +992,7 @@ mod tests {
     }
 
     /// A native op's `fields` value by key — the emission path now pins op fields
-    /// where the tests once read `PlannedChange` members.
+    /// where the tests once read `ApplyOp` members.
     fn op_field<'a>(result: &'a RepairPlanResult, i: usize, key: &str) -> Option<&'a Value> {
         result.plan.operations[i].fields.get(key)
     }
@@ -1529,61 +1470,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_v5_serde_round_trip_with_footnote() {
-        let plan = RepairPlan {
-            schema_version: 5,
-            vault_root: "/tmp/v".into(),
-            source_filters: RepairPlanFilters::default(),
-            summary: RepairPlanSummary {
-                findings: 1,
-                planned_changes: 1,
-                skipped: SkippedSummary::default(),
-            },
-            changes: vec![PlannedChange {
-                change_id: "abc12345".into(),
-                path: "doc.md".into(),
-                document_hash: "h".into(),
-                finding_code: "link-target-missing".into(),
-                finding_rule: None,
-                repair_rule: "built-in:closest-match-stem".into(),
-                operation: "rewrite_link".into(),
-                field: None,
-                expected_old_value: Some(Value::String("Norn Brand".into())),
-                new_value: Some(Value::String("norn-brand".into())),
-                destination: None,
-                link_risk: None,
-                warnings: vec![],
-                force: false,
-                parents: false,
-            }],
-            skipped_findings: vec![],
-            footnotes: vec![PlanFootnote {
-                change_id: "abc12345".into(),
-                kind: FootnoteKind::ClosestMatchSuggestion,
-                confidence: Confidence::High,
-                details: FootnoteDetails::ClosestMatch(ClosestMatchDetails {
-                    original_target: "Norn Brand".into(),
-                    normalized_target: "norn-brand".into(),
-                    candidate_stem: "norn-brand".into(),
-                    normalized_distance: 0,
-                    slug_normalized_identity: true,
-                }),
-            }],
-        };
-
-        let json = serde_json::to_string(&plan).unwrap();
-        let round_tripped: RepairPlan = serde_json::from_str(&json).unwrap();
-        assert_eq!(round_tripped.schema_version, 5);
-        assert_eq!(round_tripped.changes.len(), 1);
-        assert_eq!(round_tripped.changes[0].change_id, "abc12345");
-        assert_eq!(round_tripped.footnotes.len(), 1);
-        assert!(matches!(
-            round_tripped.footnotes[0].confidence,
-            Confidence::High
-        ));
-    }
-
-    #[test]
     fn closest_match_proposes_high_confidence_rewrite_on_target_missing() {
         // A doc links to [[Norn Brand]], but the resolution is target-missing.
         // The vault has norn-brand.md — slug-normalize identity → High.
@@ -1870,75 +1756,6 @@ mod tests {
     }
 
     #[test]
-    fn create_document_planned_change_serializes_round_trip() {
-        let pc = PlannedChange {
-            change_id: "abc12345".into(),
-            path: "Workspaces/foo/tasks/bar.md".into(),
-            document_hash: "0".repeat(64),
-            finding_code: "imperative-create".into(),
-            finding_rule: None,
-            repair_rule: "vault-new".into(),
-            operation: "create_document".into(),
-            field: None,
-            expected_old_value: None,
-            new_value: Some(serde_json::json!({
-                "frontmatter": {"type": "task", "status": "backlog"},
-                "body": ""
-            })),
-            destination: None,
-            link_risk: None,
-            warnings: vec![],
-            force: false,
-            parents: false,
-        };
-        let json = serde_json::to_string(&pc).unwrap();
-        let round: PlannedChange = serde_json::from_str(&json).unwrap();
-        assert_eq!(round.operation, "create_document");
-        assert_eq!(round.path.as_str(), "Workspaces/foo/tasks/bar.md");
-        assert!(round.new_value.is_some());
-    }
-
-    #[test]
-    fn replace_body_op_is_a_valid_operation() {
-        let plan_json = r#"{
-            "schema_version": 8,
-            "vault_root": "/tmp/vault",
-            "source_filters": {
-                "code": [],
-                "severity": [],
-                "field": [],
-                "rule": [],
-                "path": [],
-                "target": [],
-                "reason": [],
-                "skip_reason": []
-            },
-            "summary": {
-                "findings": 1,
-                "planned_changes": 1,
-                "skipped": {
-                    "by_reason": {},
-                    "total": 0
-                }
-            },
-            "changes": [{
-                "change_id": "abcd1234",
-                "path": "notes/foo.md",
-                "document_hash": "deadbeef",
-                "finding_code": "operator-mutation",
-                "repair_rule": "vault-set",
-                "operation": "replace_body",
-                "new_value": "fresh body content"
-            }],
-            "skipped_findings": [],
-            "footnotes": []
-        }"#;
-        let repair_plan: RepairPlan =
-            serde_json::from_str(plan_json).expect("plan should deserialize");
-        assert_eq!(repair_plan.changes[0].operation, "replace_body");
-    }
-
-    #[test]
     fn skipped_summary_uses_code_keyed_map() {
         let mut by_reason = BTreeMap::new();
         by_reason.insert("missing-default".to_string(), 520);
@@ -2181,108 +1998,145 @@ mod tests {
     }
 
     #[test]
-    fn native_op_fields_match_the_former_serde_conversion() {
-        // Byte-identity guard (ADR 0024): the native `op_fields_from_change` must
-        // produce the EXACT `fields` the retired `serde_json::to_value(&change)` +
-        // drop-`operation` + move-remap round trip produced. `serde_json`'s `Map`
-        // is a `BTreeMap`, so equal `Value`s serialize to equal bytes — proving the
-        // planner's native emission keeps the plan bytes unchanged.
+    fn native_op_fields_carry_the_expected_wire_shape() {
+        // Wire-byte guard (ADR 0024): `op_fields_from_change` emits the `fields`
+        // object the on-disk plan carries — `operation` is dropped (it becomes the
+        // op `kind`), `move_document` remaps `path`/`destination` → `src`/`dst`,
+        // linkage rides as present keys, and absent-`finding_rule` omits the key.
+        // `serde_json::Value` compares by key set + value, so key order is
+        // irrelevant.
         let move_link_risk = crate::standards::repair::link_risk::classify(
             camino::Utf8Path::new("notes/c.md"),
             camino::Utf8Path::new("archive/c.md"),
             &[],
             &[],
         );
-        let cases = vec![
-            PlannedChange {
-                change_id: "id1".into(),
-                path: "notes/a.md".into(),
-                document_hash: "h1".into(),
-                finding_code: "value-not-allowed".into(),
-                finding_rule: Some("task-status".into()),
-                repair_rule: "fix-status".into(),
-                operation: "set_frontmatter".into(),
-                field: Some("status".into()),
-                expected_old_value: Some(json!("someday")),
-                new_value: Some(json!("backlog")),
-                destination: None,
-                link_risk: None,
-                warnings: vec![],
-                force: false,
-                parents: false,
-            },
-            PlannedChange {
-                change_id: "id2".into(),
-                path: "notes/b.md".into(),
-                document_hash: "h2".into(),
-                finding_code: "link-target-missing".into(),
-                finding_rule: None,
-                repair_rule: "built-in:closest-match-stem".into(),
-                operation: "rewrite_link".into(),
-                field: None,
-                expected_old_value: Some(json!("Norn Brand")),
-                new_value: Some(json!("norn-brand")),
-                destination: None,
-                link_risk: None,
-                warnings: vec![],
-                force: false,
-                parents: false,
-            },
-            PlannedChange {
-                change_id: "id3".into(),
-                path: "notes/c.md".into(),
-                document_hash: "h3".into(),
-                finding_code: "document-misrouted".into(),
-                finding_rule: Some("route".into()),
-                repair_rule: "move-it".into(),
-                operation: "move_document".into(),
-                field: None,
-                expected_old_value: None,
-                new_value: None,
-                destination: Some("archive/c.md".into()),
-                link_risk: Some(move_link_risk),
-                warnings: vec![],
-                force: true,
-                parents: true,
-            },
-            PlannedChange {
-                change_id: "id4".into(),
-                path: "notes/d.md".into(),
-                document_hash: "h4".into(),
-                finding_code: "bom-marker".into(),
-                finding_rule: None,
-                repair_rule: "built-in:strip-bom".into(),
-                operation: "strip_bom".into(),
-                field: None,
-                expected_old_value: None,
-                new_value: None,
-                destination: None,
-                link_risk: None,
-                warnings: vec![],
-                force: false,
-                parents: false,
-            },
-        ];
-        for change in &cases {
-            // The retired conversion, reproduced verbatim from the former
-            // `plan_from_findings`.
-            let mut expected = serde_json::to_value(change).unwrap();
-            let obj = expected.as_object_mut().unwrap();
-            obj.remove("operation");
-            if change.operation == "move_document" {
-                if let Some(p) = obj.remove("path") {
-                    obj.insert("src".to_string(), p);
-                }
-                if let Some(d) = obj.remove("destination") {
-                    obj.insert("dst".to_string(), d);
-                }
-            }
-            assert_eq!(
-                op_fields_from_change(change),
-                expected,
-                "native fields diverged for op kind {}",
-                change.operation
-            );
-        }
+
+        let set_op = ApplyOp {
+            change_id: "id1".into(),
+            path: "notes/a.md".into(),
+            document_hash: "h1".into(),
+            finding_code: Some("value-not-allowed".into()),
+            finding_rule: Some("task-status".into()),
+            repair_rule: Some("fix-status".into()),
+            operation: "set_frontmatter".into(),
+            field: Some("status".into()),
+            expected_old_value: Some(json!("someday")),
+            new_value: Some(json!("backlog")),
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+            force: false,
+            parents: false,
+        };
+        assert_eq!(
+            op_fields_from_change(&set_op),
+            json!({
+                "change_id": "id1",
+                "path": "notes/a.md",
+                "document_hash": "h1",
+                "finding_code": "value-not-allowed",
+                "finding_rule": "task-status",
+                "repair_rule": "fix-status",
+                "field": "status",
+                "expected_old_value": "someday",
+                "new_value": "backlog",
+            }),
+        );
+
+        // `strip_bom` is the minimal shape: no field/value payload, no move keys.
+        let bom_op = ApplyOp {
+            change_id: "id4".into(),
+            path: "notes/d.md".into(),
+            document_hash: "h4".into(),
+            finding_code: Some("bom-marker".into()),
+            finding_rule: None,
+            repair_rule: Some("strip-bom".into()),
+            operation: "strip_bom".into(),
+            field: None,
+            expected_old_value: None,
+            new_value: None,
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+            force: false,
+            parents: false,
+        };
+        assert_eq!(
+            op_fields_from_change(&bom_op),
+            json!({
+                "change_id": "id4",
+                "path": "notes/d.md",
+                "document_hash": "h4",
+                "finding_code": "bom-marker",
+                "repair_rule": "strip-bom",
+            }),
+        );
+
+        // A `None` finding_rule omits the key entirely.
+        let rewrite_op = ApplyOp {
+            change_id: "id2".into(),
+            path: "notes/b.md".into(),
+            document_hash: "h2".into(),
+            finding_code: Some("link-target-missing".into()),
+            finding_rule: None,
+            repair_rule: Some("built-in:closest-match-stem".into()),
+            operation: "rewrite_link".into(),
+            field: None,
+            expected_old_value: Some(json!("Norn Brand")),
+            new_value: Some(json!("norn-brand")),
+            destination: None,
+            link_risk: None,
+            warnings: vec![],
+            force: false,
+            parents: false,
+        };
+        assert_eq!(
+            op_fields_from_change(&rewrite_op),
+            json!({
+                "change_id": "id2",
+                "path": "notes/b.md",
+                "document_hash": "h2",
+                "finding_code": "link-target-missing",
+                "repair_rule": "built-in:closest-match-stem",
+                "expected_old_value": "Norn Brand",
+                "new_value": "norn-brand",
+            }),
+        );
+
+        // move_document: `path` → `src`, `destination` → `dst`, and the planner
+        // link_risk / force / parents ride along.
+        let move_op = ApplyOp {
+            change_id: "id3".into(),
+            path: "notes/c.md".into(),
+            document_hash: "h3".into(),
+            finding_code: Some("document-misrouted".into()),
+            finding_rule: Some("route".into()),
+            repair_rule: Some("move-it".into()),
+            operation: "move_document".into(),
+            field: None,
+            expected_old_value: None,
+            new_value: None,
+            destination: Some("archive/c.md".into()),
+            link_risk: Some(move_link_risk.clone()),
+            warnings: vec![],
+            force: true,
+            parents: true,
+        };
+        assert_eq!(
+            op_fields_from_change(&move_op),
+            json!({
+                "change_id": "id3",
+                "src": "notes/c.md",
+                "document_hash": "h3",
+                "finding_code": "document-misrouted",
+                "finding_rule": "route",
+                "repair_rule": "move-it",
+                "dst": "archive/c.md",
+                "link_risk": serde_json::to_value(&move_link_risk).unwrap(),
+                "force": true,
+                "parents": true,
+            }),
+        );
     }
 }

@@ -1,6 +1,6 @@
 //! The repair-specific apply orchestrator.
 //!
-//! `apply_repair_plan` runs a `RepairPlan`'s changes in ordered passes —
+//! `apply_repair_plan` runs a `ApplyBatch`'s changes in ordered passes —
 //! document creation, moves, deletes, link rewrites, file edits — over the
 //! low-level primitives in `standards::apply`, collecting per-op results and
 //! skip reasons. The `repair` and `new` commands drive it; the general `apply`
@@ -18,7 +18,7 @@ use crate::standards::apply::{
     validate_plan_for_apply, ApplyError, CascadeRecord, CreateDocumentResult, DeleteResult,
     LinkAttempt, LinkFailResult, LinkRewriteResult, LinkSkipResult, MoveResult, RepairApplyWarning,
 };
-use crate::standards::{PlannedChange, RepairPlan};
+use crate::standards::{ApplyBatch, ApplyOp};
 use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -73,7 +73,7 @@ pub use crate::standards::apply::RepairApplyReport;
 #[allow(dead_code)]
 pub(crate) fn build_op_spans(
     sink: &mut crate::telemetry::EventSink,
-    changes: &[PlannedChange],
+    changes: &[ApplyOp],
 ) -> std::collections::HashMap<String, String> {
     let mut spans = std::collections::HashMap::new();
     for change in changes {
@@ -92,7 +92,7 @@ pub(crate) fn build_op_spans(
 /// index never saw is an `unknown-path` refusal.
 fn ensure_known_path(
     current_hashes: &std::collections::BTreeMap<Utf8PathBuf, String>,
-    change: &PlannedChange,
+    change: &ApplyOp,
 ) -> Result<()> {
     if !current_hashes.contains_key(&change.path) {
         return Err(anyhow::anyhow!(ApplyError::UnknownPath {
@@ -134,7 +134,7 @@ fn is_declarative_only(ops: &ContentOps<'_>) -> bool {
     ops.rewrite_links.is_empty() && ops.replace_bodies.is_empty() && ops.edit_ops.is_empty()
 }
 
-/// Clone the per-file op buckets (cheap: the vectors hold `&PlannedChange`) so
+/// Clone the per-file op buckets (cheap: the vectors hold `&ApplyOp`) so
 /// the transaction engine can re-run composition on a retry round without
 /// consuming the originals.
 fn clone_ops<'a>(ops: &ContentOps<'a>) -> ContentOps<'a> {
@@ -147,7 +147,7 @@ fn clone_ops<'a>(ops: &ContentOps<'a>) -> ContentOps<'a> {
     }
 }
 
-fn count_planned_links(change: &PlannedChange) -> usize {
+fn count_planned_links(change: &ApplyOp) -> usize {
     change.link_risk.as_ref().map_or(0, |r| {
         r.stem_links.len() + r.path_qualified_wikilinks.len() + r.markdown_links.len()
     })
@@ -222,7 +222,7 @@ where
 pub fn apply_repair_plan(
     cwd: &Utf8PathBuf,
     index: &GraphIndex,
-    plan: &RepairPlan,
+    plan: &ApplyBatch,
     dry_run: bool,
 ) -> Result<RepairApplyReport> {
     let mut sink = crate::telemetry::EventSink::discard(
@@ -248,7 +248,7 @@ pub fn apply_repair_plan(
 fn emit_op_action(
     sink: &mut crate::telemetry::EventSink,
     spans: &std::collections::HashMap<String, String>,
-    change: &PlannedChange,
+    change: &ApplyOp,
     sev: crate::telemetry::Severity,
     extra: Vec<(&'static str, String)>,
 ) {
@@ -286,7 +286,7 @@ fn is_content_op(op: &str) -> bool {
 /// moved away). The reverse order (edit X, then delete/move X) is the legitimate
 /// edit-then-vacate and stays valid. `create_document` at a vacated path is
 /// coherent (delete-then-recreate) and is not a content op, so it is not guarded.
-fn reject_content_op_after_vacate(plan: &RepairPlan) -> Result<()> {
+fn reject_content_op_after_vacate(plan: &ApplyBatch) -> Result<()> {
     // path -> (operation, change_id) of the earlier delete/move that vacated it.
     let mut vacated: std::collections::BTreeMap<&Utf8Path, (&str, &str)> =
         std::collections::BTreeMap::new();
@@ -357,11 +357,11 @@ fn record_changed_file(report: &mut RepairApplyReport, path: &Utf8Path) {
 /// [`compose_content_ops`].
 #[derive(Default)]
 struct ContentOps<'a> {
-    strip_bom: Vec<&'a PlannedChange>,
-    frontmatter: Vec<&'a PlannedChange>,
-    rewrite_links: Vec<&'a PlannedChange>,
-    replace_bodies: Vec<&'a PlannedChange>,
-    edit_ops: Vec<&'a PlannedChange>,
+    strip_bom: Vec<&'a ApplyOp>,
+    frontmatter: Vec<&'a ApplyOp>,
+    rewrite_links: Vec<&'a ApplyOp>,
+    replace_bodies: Vec<&'a ApplyOp>,
+    edit_ops: Vec<&'a ApplyOp>,
 }
 
 /// The region class a content op mutates. Ordered as the composition chain runs:
@@ -406,7 +406,7 @@ fn content_class(op: &str) -> Option<ContentClass> {
 /// `changed_files` entry.
 #[derive(Debug)]
 struct ComposedUnit<'a> {
-    changes: Vec<&'a PlannedChange>,
+    changes: Vec<&'a ApplyOp>,
     class: ContentClass,
     changed: bool,
 }
@@ -566,7 +566,7 @@ fn compose_content_ops<'a>(
 pub fn apply_repair_plan_with_context(
     cwd: &Utf8PathBuf,
     index: &GraphIndex,
-    plan: &RepairPlan,
+    plan: &ApplyBatch,
     dry_run: bool,
     ctx: &CreateApplyContext,
     sink: &mut crate::telemetry::EventSink,
@@ -1048,7 +1048,7 @@ pub fn apply_repair_plan_with_context(
         }
         // Audit the action against the resolved path, not the `{{seq}}` template
         // (NRN-101). Same change_id, so it still hangs off the op_planned span.
-        let resolved_change = PlannedChange {
+        let resolved_change = ApplyOp {
             path: resolved_path.clone(),
             ..change.clone()
         };
@@ -1056,7 +1056,7 @@ pub fn apply_repair_plan_with_context(
     }
 
     // Collect move_document changes for passes 2 and 3.
-    let move_changes: Vec<&PlannedChange> = plan
+    let move_changes: Vec<&ApplyOp> = plan
         .changes
         .iter()
         .filter(|c| c.operation == "move_document")
@@ -1285,8 +1285,7 @@ pub fn apply_repair_plan_with_context(
 mod tests {
     use super::*;
     use crate::standards::{
-        PlannedChange, RepairPlan, RepairPlanFilters, RepairPlanSummary, SkippedSummary,
-        REPAIR_PLAN_SCHEMA_VERSION,
+        ApplyBatch, ApplyOp, RepairPlanSummary, SkippedSummary, REPAIR_PLAN_SCHEMA_VERSION,
     };
 
     /// A throwaway in-memory sink for tests that exercise the orchestrator
@@ -1324,23 +1323,22 @@ mod tests {
         (tmp, root, index, hash)
     }
 
-    fn delete_plan(vault_root: &camino::Utf8PathBuf, doc_rel: &str, hash: &str) -> RepairPlan {
-        RepairPlan {
+    fn delete_plan(vault_root: &camino::Utf8PathBuf, doc_rel: &str, hash: &str) -> ApplyBatch {
+        ApplyBatch {
             schema_version: REPAIR_PLAN_SCHEMA_VERSION,
             vault_root: vault_root.clone(),
-            source_filters: RepairPlanFilters::default(),
             summary: RepairPlanSummary {
                 findings: 0,
                 planned_changes: 1,
                 skipped: SkippedSummary::default(),
             },
-            changes: vec![PlannedChange {
+            changes: vec![ApplyOp {
                 change_id: "delete-foo".into(),
                 path: doc_rel.into(),
                 document_hash: hash.to_string(),
-                finding_code: "operator-request".into(),
+                finding_code: None,
                 finding_rule: None,
-                repair_rule: "operator-request".into(),
+                repair_rule: None,
                 operation: "delete_document".into(),
                 field: None,
                 expected_old_value: None,
@@ -1351,8 +1349,6 @@ mod tests {
                 force: false,
                 parents: false,
             }],
-            skipped_findings: Vec::new(),
-            footnotes: Vec::new(),
         }
     }
 
@@ -1361,23 +1357,22 @@ mod tests {
         from_rel: &str,
         to_rel: &str,
         hash: &str,
-    ) -> RepairPlan {
-        RepairPlan {
+    ) -> ApplyBatch {
+        ApplyBatch {
             schema_version: REPAIR_PLAN_SCHEMA_VERSION,
             vault_root: vault_root.clone(),
-            source_filters: RepairPlanFilters::default(),
             summary: RepairPlanSummary {
                 findings: 0,
                 planned_changes: 1,
                 skipped: SkippedSummary::default(),
             },
-            changes: vec![PlannedChange {
+            changes: vec![ApplyOp {
                 change_id: "move-test".into(),
                 path: from_rel.into(),
                 document_hash: hash.to_string(),
-                finding_code: "operator-request".into(),
+                finding_code: None,
                 finding_rule: None,
-                repair_rule: "operator-request".into(),
+                repair_rule: None,
                 operation: "move_document".into(),
                 field: None,
                 expected_old_value: None,
@@ -1388,8 +1383,6 @@ mod tests {
                 force: false,
                 parents: false,
             }],
-            skipped_findings: Vec::new(),
-            footnotes: Vec::new(),
         }
     }
 
@@ -1399,23 +1392,22 @@ mod tests {
         hash: &str,
         old_target: &str,
         new_target: &str,
-    ) -> RepairPlan {
-        RepairPlan {
+    ) -> ApplyBatch {
+        ApplyBatch {
             schema_version: REPAIR_PLAN_SCHEMA_VERSION,
             vault_root: vault_root.clone(),
-            source_filters: RepairPlanFilters::default(),
             summary: RepairPlanSummary {
                 findings: 0,
                 planned_changes: 1,
                 skipped: SkippedSummary::default(),
             },
-            changes: vec![PlannedChange {
+            changes: vec![ApplyOp {
                 change_id: "rewrite-test".into(),
                 path: doc_rel.into(),
                 document_hash: hash.to_string(),
-                finding_code: "link-target-missing".into(),
+                finding_code: Some("link-target-missing".into()),
                 finding_rule: None,
-                repair_rule: "operator-request".into(),
+                repair_rule: None,
                 operation: "rewrite_link".into(),
                 field: None,
                 expected_old_value: Some(serde_json::json!(old_target)),
@@ -1426,8 +1418,6 @@ mod tests {
                 force: false,
                 parents: false,
             }],
-            skipped_findings: Vec::new(),
-            footnotes: Vec::new(),
         }
     }
 
@@ -1437,23 +1427,22 @@ mod tests {
         hash: &str,
         field: &str,
         expected_old: serde_json::Value,
-    ) -> RepairPlan {
-        RepairPlan {
+    ) -> ApplyBatch {
+        ApplyBatch {
             schema_version: REPAIR_PLAN_SCHEMA_VERSION,
             vault_root: vault_root.clone(),
-            source_filters: RepairPlanFilters::default(),
             summary: RepairPlanSummary {
                 findings: 0,
                 planned_changes: 1,
                 skipped: SkippedSummary::default(),
             },
-            changes: vec![PlannedChange {
+            changes: vec![ApplyOp {
                 change_id: "remove-test".into(),
                 path: doc_rel.into(),
                 document_hash: hash.to_string(),
-                finding_code: "operator-mutation".into(),
+                finding_code: Some("operator-mutation".into()),
                 finding_rule: None,
-                repair_rule: "vault-set".into(),
+                repair_rule: Some("vault-set".into()),
                 operation: "remove_frontmatter".into(),
                 field: Some(field.to_string()),
                 expected_old_value: Some(expected_old),
@@ -1464,8 +1453,6 @@ mod tests {
                 force: false,
                 parents: false,
             }],
-            skipped_findings: Vec::new(),
-            footnotes: Vec::new(),
         }
     }
 
@@ -1564,13 +1551,13 @@ mod tests {
         let mut plan = rewrite_link_plan(&root, "doc.md", &hash, "Parent", "Parent's Two");
         plan.changes.insert(
             0,
-            PlannedChange {
+            ApplyOp {
                 change_id: "add-up".into(),
                 path: "doc.md".into(),
                 document_hash: hash.clone(),
-                finding_code: "operator-mutation".into(),
+                finding_code: Some("operator-mutation".into()),
                 finding_rule: None,
-                repair_rule: "vault-set".into(),
+                repair_rule: Some("vault-set".into()),
                 operation: "add_frontmatter".into(),
                 field: Some("up".into()),
                 expected_old_value: None,
@@ -1686,22 +1673,21 @@ mod tests {
             &index.files,
         );
 
-        let plan = RepairPlan {
+        let plan = ApplyBatch {
             schema_version: REPAIR_PLAN_SCHEMA_VERSION,
             vault_root: root.clone(),
-            source_filters: RepairPlanFilters::default(),
             summary: RepairPlanSummary {
                 findings: 0,
                 planned_changes: 1,
                 skipped: SkippedSummary::default(),
             },
-            changes: vec![PlannedChange {
+            changes: vec![ApplyOp {
                 change_id: "delete-b".into(),
                 path: "b.md".into(),
                 document_hash: b_doc.hash.clone(),
-                finding_code: "operator-request".into(),
+                finding_code: None,
                 finding_rule: None,
-                repair_rule: "operator-request".into(),
+                repair_rule: None,
                 operation: "delete_document".into(),
                 field: None,
                 expected_old_value: None,
@@ -1712,8 +1698,6 @@ mod tests {
                 force: false,
                 parents: false,
             }],
-            skipped_findings: Vec::new(),
-            footnotes: Vec::new(),
         };
 
         let report = apply_repair_plan(&root, &index, &plan, false).unwrap();
@@ -1745,27 +1729,26 @@ mod tests {
         fm: serde_json::Map<String, serde_json::Value>,
         body: &str,
         force: bool,
-    ) -> RepairPlan {
+    ) -> ApplyBatch {
         let new_value = serde_json::json!({
             "frontmatter": serde_json::Value::Object(fm),
             "body": body,
         });
-        RepairPlan {
+        ApplyBatch {
             schema_version: REPAIR_PLAN_SCHEMA_VERSION,
             vault_root: vault_root.clone(),
-            source_filters: RepairPlanFilters::default(),
             summary: RepairPlanSummary {
                 findings: 1,
                 planned_changes: 1,
                 skipped: SkippedSummary::default(),
             },
-            changes: vec![PlannedChange {
+            changes: vec![ApplyOp {
                 change_id: "create-test".into(),
                 path: rel_path.into(),
                 document_hash: String::new(),
-                finding_code: "imperative-create".into(),
+                finding_code: Some("imperative-create".into()),
                 finding_rule: None,
-                repair_rule: "vault-new".into(),
+                repair_rule: Some("vault-new".into()),
                 operation: "create_document".into(),
                 field: None,
                 expected_old_value: None,
@@ -1776,8 +1759,6 @@ mod tests {
                 force,
                 parents: false,
             }],
-            skipped_findings: vec![],
-            footnotes: vec![],
         }
     }
 
@@ -2177,13 +2158,13 @@ mod tests {
             &index.documents,
             &index.files,
         ));
-        let move_change = PlannedChange {
+        let move_change = ApplyOp {
             change_id: "move-a.md".into(),
             path: src_rel,
             document_hash: src_hash,
-            finding_code: "operator-request".into(),
+            finding_code: None,
             finding_rule: None,
-            repair_rule: "operator-request".into(),
+            repair_rule: None,
             operation: "move_document".into(),
             field: None,
             expected_old_value: None,
@@ -2194,18 +2175,15 @@ mod tests {
             force: false,
             parents: false,
         };
-        let plan = RepairPlan {
+        let plan = ApplyBatch {
             schema_version: crate::standards::REPAIR_PLAN_SCHEMA_VERSION,
             vault_root: root.clone(),
-            source_filters: crate::standards::RepairPlanFilters::default(),
             summary: crate::standards::RepairPlanSummary {
                 findings: 0,
                 planned_changes: 1,
                 skipped: crate::standards::SkippedSummary::default(),
             },
             changes: vec![move_change],
-            skipped_findings: Vec::new(),
-            footnotes: Vec::new(),
         };
 
         let create_ctx = CreateApplyContext {
@@ -2384,14 +2362,14 @@ mod tests {
         field: &str,
         old: serde_json::Value,
         new: serde_json::Value,
-    ) -> PlannedChange {
-        PlannedChange {
+    ) -> ApplyOp {
+        ApplyOp {
             change_id: format!("set-{field}"),
             path: path.into(),
             document_hash: hash.to_string(),
-            finding_code: "operator-request".into(),
+            finding_code: None,
             finding_rule: None,
-            repair_rule: "operator-request".into(),
+            repair_rule: None,
             operation: "set_frontmatter".into(),
             field: Some(field.to_string()),
             expected_old_value: Some(old),
@@ -2404,24 +2382,19 @@ mod tests {
         }
     }
 
-    fn append_to_section_change(
-        path: &str,
-        hash: &str,
-        heading: &str,
-        content: &str,
-    ) -> PlannedChange {
+    fn append_to_section_change(path: &str, hash: &str, heading: &str, content: &str) -> ApplyOp {
         let payload = serde_json::json!({
             "op": "append_to_section",
             "heading": heading,
             "content": content,
         });
-        PlannedChange {
+        ApplyOp {
             change_id: format!("append-{heading}"),
             path: path.into(),
             document_hash: hash.to_string(),
-            finding_code: "operator-request".into(),
+            finding_code: None,
             finding_rule: None,
-            repair_rule: "operator-request".into(),
+            repair_rule: None,
             operation: "append_to_section".into(),
             field: None,
             expected_old_value: None,
@@ -2434,19 +2407,16 @@ mod tests {
         }
     }
 
-    fn plan_with(vault_root: &camino::Utf8PathBuf, changes: Vec<PlannedChange>) -> RepairPlan {
-        RepairPlan {
+    fn plan_with(vault_root: &camino::Utf8PathBuf, changes: Vec<ApplyOp>) -> ApplyBatch {
+        ApplyBatch {
             schema_version: REPAIR_PLAN_SCHEMA_VERSION,
             vault_root: vault_root.clone(),
-            source_filters: RepairPlanFilters::default(),
             summary: RepairPlanSummary {
                 findings: 0,
                 planned_changes: changes.len(),
                 skipped: SkippedSummary::default(),
             },
             changes,
-            skipped_findings: Vec::new(),
-            footnotes: Vec::new(),
         }
     }
 
@@ -2670,14 +2640,14 @@ mod tests {
 
     // ── NRN-139: reject a content op after a delete/move of the same path ──────
 
-    fn op_change(change_id: &str, path: &str, operation: &str) -> PlannedChange {
-        PlannedChange {
+    fn op_change(change_id: &str, path: &str, operation: &str) -> ApplyOp {
+        ApplyOp {
             change_id: change_id.into(),
             path: path.into(),
             document_hash: String::new(),
-            finding_code: "operator-request".into(),
+            finding_code: None,
             finding_rule: None,
-            repair_rule: "operator-request".into(),
+            repair_rule: None,
             operation: operation.into(),
             field: None,
             expected_old_value: None,
@@ -2946,22 +2916,21 @@ mod tests {
             markdown_links: vec![],
         };
 
-        let plan = RepairPlan {
+        let plan = ApplyBatch {
             schema_version: REPAIR_PLAN_SCHEMA_VERSION,
             vault_root: root.clone(),
-            source_filters: RepairPlanFilters::default(),
             summary: RepairPlanSummary {
                 findings: 0,
                 planned_changes: 1,
                 skipped: SkippedSummary::default(),
             },
-            changes: vec![PlannedChange {
+            changes: vec![ApplyOp {
                 change_id: "move-old".into(),
                 path: "old.md".into(),
                 document_hash: hash,
-                finding_code: "operator-request".into(),
+                finding_code: None,
                 finding_rule: None,
-                repair_rule: "operator-request".into(),
+                repair_rule: None,
                 operation: "move_document".into(),
                 field: None,
                 expected_old_value: None,
@@ -2972,8 +2941,6 @@ mod tests {
                 force: false,
                 parents: false,
             }],
-            skipped_findings: Vec::new(),
-            footnotes: Vec::new(),
         };
 
         let before = std::fs::read_to_string(&outside_file).unwrap();

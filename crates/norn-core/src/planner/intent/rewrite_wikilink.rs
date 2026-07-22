@@ -22,7 +22,7 @@
 //! is strictly correct.
 
 use crate::domain::{GraphIndex, LinkKind, LinkSourceArea};
-use crate::standards::PlannedChange;
+use crate::standards::ApplyOp;
 use anyhow::Result;
 use camino::Utf8PathBuf;
 use serde_json::Value;
@@ -64,7 +64,7 @@ impl RewriteWikilinkError {
 /// 1. Resolve `op.old` to a document path via stem-match in the index.
 /// 2. Refuse (Err) if no document resolves — caller maps this to exit code 2.
 /// 3. Walk every document's body links (source_context.area == Body) that
-///    resolve to `old_path`; emit a `rewrite_link` PlannedChange per match.
+///    resolve to `old_path`; emit a `rewrite_link` ApplyOp per match.
 /// 4. Walk every document's frontmatter for string values equal to
 ///    `[[<op.old>]]` and emit a `set_frontmatter` op for each match.
 /// 5. Return the combined list.
@@ -77,12 +77,12 @@ impl RewriteWikilinkError {
 pub(crate) fn expand_rewrite_wikilink(
     op: &RewriteWikilinkOp,
     index: &GraphIndex,
-) -> Result<Vec<PlannedChange>> {
+) -> Result<Vec<ApplyOp>> {
     // --- Step 1: resolve op.old → document path ---
     let old_path: Utf8PathBuf = resolve_stem_to_path(&op.old, index)
         .ok_or_else(|| RewriteWikilinkError::OldUnresolved(op.old.clone()))?;
 
-    let mut changes: Vec<PlannedChange> = Vec::new();
+    let mut changes: Vec<ApplyOp> = Vec::new();
 
     // --- Step 3: body-link rewrites ---
     // Walk all documents; for each body link (not frontmatter) that resolves to
@@ -125,13 +125,13 @@ pub(crate) fn expand_rewrite_wikilink(
             // Both are matched by expected_old_value against the bare target text.
             let old_target = link.target.clone();
 
-            changes.push(PlannedChange {
+            changes.push(ApplyOp {
                 change_id: format!("rewrite-wikilink-{}-{}", doc.path, old_target),
                 path: doc.path.clone(),
                 document_hash: doc.hash.clone(),
-                finding_code: "operator-request".into(),
+                finding_code: None,
                 finding_rule: None,
-                repair_rule: "operator-request".into(),
+                repair_rule: None,
                 operation: "rewrite_link".into(),
                 field: None,
                 expected_old_value: Some(Value::String(old_target)),
@@ -159,13 +159,13 @@ pub(crate) fn expand_rewrite_wikilink(
         for (field_name, field_value) in obj {
             if let Some(s) = field_value.as_str() {
                 if s == old_wikilink_literal {
-                    changes.push(PlannedChange {
+                    changes.push(ApplyOp {
                         change_id: format!("rewrite-wikilink-fm-{}-{}", doc.path, field_name),
                         path: doc.path.clone(),
                         document_hash: doc.hash.clone(),
-                        finding_code: "operator-request".into(),
+                        finding_code: None,
                         finding_rule: None,
-                        repair_rule: "operator-request".into(),
+                        repair_rule: None,
                         operation: "set_frontmatter".into(),
                         field: Some(field_name.clone()),
                         expected_old_value: Some(Value::String(old_wikilink_literal.clone())),
@@ -191,13 +191,13 @@ pub(crate) fn expand_rewrite_wikilink(
                     })
                     .collect();
                 if new_arr != *arr {
-                    changes.push(PlannedChange {
+                    changes.push(ApplyOp {
                         change_id: format!("rewrite-wikilink-fm-arr-{}-{}", doc.path, field_name),
                         path: doc.path.clone(),
                         document_hash: doc.hash.clone(),
-                        finding_code: "operator-request".into(),
+                        finding_code: None,
                         finding_rule: None,
-                        repair_rule: "operator-request".into(),
+                        repair_rule: None,
                         operation: "set_frontmatter".into(),
                         field: Some(field_name.clone()),
                         expected_old_value: Some(field_value.clone()),

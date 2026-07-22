@@ -1,10 +1,10 @@
-//! Expand a high-level `move_folder` op into N `move_document` PlannedChange
+//! Expand a high-level `move_folder` op into N `move_document` ApplyOp
 //! ops — one per `.md` file under `src`, preserving subdirectory structure
 //! under `dst`. `parents` propagates so intermediate dst subdirs are created
 //! at apply time. Each expanded op gets `link_risk` populated via classify.
 
 use crate::domain::GraphIndex;
-use crate::standards::{classify_link_risk, PlannedChange};
+use crate::standards::{classify_link_risk, ApplyOp};
 use anyhow::Result;
 
 pub(crate) struct MoveFolderOp {
@@ -14,12 +14,9 @@ pub(crate) struct MoveFolderOp {
 }
 
 /// Walk the vault index for `.md` files whose path starts with `op.src/`,
-/// produce one `move_document` PlannedChange per file (preserving relative
+/// produce one `move_document` ApplyOp per file (preserving relative
 /// subdirectory structure under `op.dst`), and populate `link_risk` for each.
-pub(crate) fn expand_move_folder(
-    op: &MoveFolderOp,
-    index: &GraphIndex,
-) -> Result<Vec<PlannedChange>> {
+pub(crate) fn expand_move_folder(op: &MoveFolderOp, index: &GraphIndex) -> Result<Vec<ApplyOp>> {
     // Normalise the src prefix to include a trailing slash so we don't
     // accidentally match "src_dir2" when op.src is "src_dir".
     let src_prefix = if op.src.ends_with('/') {
@@ -53,13 +50,13 @@ pub(crate) fn expand_move_folder(
 
         let link_risk = classify_link_risk(&old_rel, &new_rel, &index.documents, &index.files);
 
-        let change = PlannedChange {
+        let change = ApplyOp {
             change_id: format!("move-{}", old_rel),
             path: old_rel,
             document_hash: doc.hash.clone(),
-            finding_code: "operator-request".into(),
+            finding_code: None,
             finding_rule: None,
-            repair_rule: "operator-request".into(),
+            repair_rule: None,
             operation: "move_document".into(),
             field: None,
             expected_old_value: None,

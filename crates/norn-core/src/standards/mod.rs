@@ -29,6 +29,7 @@ pub mod duration;
 pub mod engine;
 pub mod findings;
 mod index_policy;
+pub mod op;
 pub mod path_match;
 pub mod predicates;
 pub mod repair;
@@ -52,13 +53,13 @@ pub use defaults::{
 pub use duration::parse_duration;
 pub use engine::validate_with_compiled;
 pub use findings::Finding;
+pub use op::{ApplyBatch, ApplyOp};
 pub use path_match::{effective_match_glob, glob_from_target, pattern_from_target, PathPattern};
 pub use repair::link_risk::{classify as classify_link_risk, AffectedLink, LinkRisk};
 pub use repair::warnings::PlanWarning;
 pub use repair::{
-    plan_repairs, Confidence, ConfidenceFilter, FootnoteDetails, PlannedChange, RepairPlan,
-    RepairPlanFilters, RepairPlanResult, RepairPlanSummary, SkippedSummary,
-    REPAIR_PLAN_SCHEMA_VERSION,
+    plan_repairs, Confidence, ConfidenceFilter, FootnoteDetails, RepairPlanFilters,
+    RepairPlanResult, RepairPlanSummary, SkippedSummary, REPAIR_PLAN_SCHEMA_VERSION,
 };
 pub use substitution::{format_datetime, render, Context, RenderError};
 pub use summary::{summarize, Summary};
