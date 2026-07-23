@@ -10,7 +10,16 @@
 //! builds the wire `Params` here, runs the routed owner request, and maps the
 //! `Report` back through here.
 
+pub mod apply;
 pub mod count;
+pub mod delete;
+pub mod describe;
+pub mod edit;
+pub mod find;
 pub mod get;
+pub mod move_doc;
+pub mod new;
+pub mod repair;
+pub mod rewrite_wikilink;
 pub mod set;
 pub mod validate;

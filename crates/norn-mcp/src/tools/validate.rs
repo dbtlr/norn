@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Parameters for `vault.validate` — the agent-relevant triage filters. All
 /// optional; omitted → no filter (return all findings).
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ValidateParams {
     /// Filter findings by code. Comma-separated values match any listed code.
     /// Supports glob patterns (e.g. `link-*` matches all link findings).

@@ -21,6 +21,7 @@ use crate::mutation_result::MutationResult;
 /// Paging convention: `starts_at` is ZERO-indexed — an omitted value is the
 /// first record.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
 pub struct GetParams {
     /// One or more document targets (stem or path), as `norn get` accepts.
     pub targets: Vec<String>,
@@ -206,13 +207,46 @@ pub(crate) fn envelope(p: &GetParams, report: GetReport) -> MutationResult<GetOu
     let is_error = report.notes.iter().any(Note::is_error);
     let output = GetOutput {
         records,
-        // The wire GetReport does not carry section failures; a default get (no
-        // `--section`) has none. See the crate notes for the tracked wire gap.
-        section_failures: Vec::new(),
+        // A `--section` request that resolved NO headings for a target lands as
+        // `GetRecord.sections == Some(empty)` (the seam distinguishes it from a
+        // no-section request's `None`), so the all-miss set is derivable from the
+        // records without a redundant wire field. `requested_headings` is the
+        // deduped `--section` request, in request order.
+        section_failures: derive_section_failures(&p.section, &report.records),
         notes: report.notes,
         markdown,
     };
     MutationResult::from_flag(output, is_error)
+}
+
+/// Derive the per-target all-miss set from the resolved records: a target whose
+/// `--section` request resolved zero headings carries `sections: Some(empty)`.
+/// Empty when no `--section` was requested (every record then carries `None`).
+fn derive_section_failures(requested: &[String], records: &[GetRecord]) -> Vec<SectionFailure> {
+    if requested.is_empty() {
+        return Vec::new();
+    }
+    let deduped = dedup_preserve_order(requested);
+    records
+        .iter()
+        .filter(|r| r.sections.as_ref().is_some_and(Vec::is_empty))
+        .map(|r| SectionFailure {
+            path: r.path.clone(),
+            requested_headings: deduped.clone(),
+        })
+        .collect()
+}
+
+/// Deduplicate preserving first-occurrence order — mirrors the owner-side
+/// `--section` dedup so `requested_headings` reports the same set the seam
+/// resolved against.
+fn dedup_preserve_order(items: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .iter()
+        .filter(|item| seen.insert(item.as_str()))
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -269,5 +303,69 @@ mod tests {
         assert!(col_wants(&Some(".document_hash".into()), ".document_hash"));
         assert!(!col_wants(&Some("status".into()), ".body"));
         assert!(!col_wants(&None, ".body"));
+    }
+
+    fn record_with_sections(path: &str, sections: Option<Vec<(String, String)>>) -> GetRecord {
+        GetRecord {
+            path: path.into(),
+            stem: "s".into(),
+            hash: String::new(),
+            frontmatter: None,
+            headings: vec![],
+            outgoing_links: vec![],
+            unresolved_links: vec![],
+            incoming_links: vec![],
+            body: None,
+            sections,
+        }
+    }
+
+    #[test]
+    fn section_failures_derive_only_the_all_miss_targets() {
+        // Requested `One`; alpha resolved it, beta resolved nothing (Some(empty)),
+        // gamma requested no section (None). Only beta is an all-miss.
+        let requested = vec!["One".to_string()];
+        let records = vec![
+            record_with_sections("a.md", Some(vec![("One".into(), "## One\n".into())])),
+            record_with_sections("b.md", Some(vec![])),
+            record_with_sections("c.md", None),
+        ];
+        let failures = derive_section_failures(&requested, &records);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].path, "b.md");
+        assert_eq!(failures[0].requested_headings, vec!["One".to_string()]);
+    }
+
+    #[test]
+    fn no_section_request_yields_no_failures() {
+        let records = vec![record_with_sections("a.md", None)];
+        assert!(derive_section_failures(&[], &records).is_empty());
+    }
+
+    #[test]
+    fn requested_headings_are_deduped_in_request_order() {
+        let requested = vec!["One".to_string(), "One".to_string(), "Two".to_string()];
+        let records = vec![record_with_sections("b.md", Some(vec![]))];
+        let failures = derive_section_failures(&requested, &records);
+        assert_eq!(
+            failures[0].requested_headings,
+            vec!["One".to_string(), "Two".to_string()]
+        );
+    }
+
+    #[test]
+    fn unknown_param_key_is_rejected() {
+        // B3: the param struct denies unknown keys, so an MCP client typo
+        // (`target` vs the `targets` array) fails loudly instead of silently
+        // running an all-vault default.
+        let err = serde_json::from_value::<GetParams>(json!({
+            "targets": ["alpha"],
+            "targ999": "typo"
+        }))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("targ999") || err.to_string().contains("unknown field"),
+            "got: {err}"
+        );
     }
 }
