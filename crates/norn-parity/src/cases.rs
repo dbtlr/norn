@@ -1976,8 +1976,10 @@ const WIKILINK_EDGE_1: Fixture = Fixture {
 /// cascade verbs, empty-until-real on `set`/`new`/`edit` until NRN-400 wires
 /// their telemetry) while leaving the marker's PRESENCE pinned, so without
 /// this an otherwise byte-equal apply would diverge on the opaque id value
-/// alone (see [`Normalization::TraceId`]). Only on the applies that MATCH — a
-/// diverged/refused/forecast case carries no id to normalize.
+/// alone (see [`Normalization::TraceId`]). Applied to every confirmed-apply
+/// case that renders the trace marker — including diverged applies, whose
+/// non-trace bytes are what the ledger entry gates; refusals and forecasts
+/// carry no id to normalize.
 const TRACE_NORM: &[Normalization] = &[Normalization::TraceId];
 
 /// A cascade-verb `--format json` forecast normalizes only the root-dependent

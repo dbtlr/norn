@@ -43,12 +43,15 @@ pub fn resolve_target(index: &GraphIndex, target: &str) -> TargetResolution {
         return TargetResolution::Resolved(document.path.clone());
     }
 
-    let matches = index
+    let mut matches = index
         .documents
         .iter()
         .filter(|document| document.stem.eq_ignore_ascii_case(target))
         .map(|document| document.path.clone())
         .collect::<Vec<_>>();
+    // Lexical path order is the refusal contract; sorting here keeps it
+    // independent of the index's own document ordering.
+    matches.sort();
 
     match matches.as_slice() {
         [path] => TargetResolution::Resolved(path.clone()),
