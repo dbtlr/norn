@@ -146,8 +146,8 @@ pub struct KnownFlags {
 /// different surface from `Cli::command()`, the drift guard fails — forcing a
 /// conscious decision about a newly-added query/mutate flag (NRN-178).
 ///
-/// `--vault` is the new-world registered-vault global (exposed as of NRN-345)
-/// and consumes a value; the global `--config` was deleted (ADR 0017
+/// `--vault` is the registered-vault global (exposed as of NRN-345) and
+/// consumes a value; the global `--config` was deleted (ADR 0017
 /// resolver-derived config).
 pub fn frozen_known_flags() -> KnownFlags {
     /// The value-taking globals (`global = true`): present on every subcommand.

@@ -23,8 +23,8 @@
 //! ## Fingerprint definition (stand-in, flagged)
 //!
 //! ADR 0012 defines the fingerprint as a blake3 over the sorted `src/` tree +
-//! `Cargo.lock`, emitted by a build script. The rewrite tree has no such build
-//! script yet, so this uses a **runtime executable-identity** fingerprint —
+//! `Cargo.lock`, emitted by a build script. No such build script exists yet,
+//! so this uses a **runtime executable-identity** fingerprint —
 //! blake3 over `current_exe()`'s path + size + mtime — which satisfies the
 //! load-bearing property (different builds → different fingerprints; the client
 //! and the owner it spawns hash the same file → the same fingerprint) at O(1)

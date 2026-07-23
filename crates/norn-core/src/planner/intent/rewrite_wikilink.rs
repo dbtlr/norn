@@ -369,7 +369,8 @@ mod tests {
 
     /// NRN-229: the OLD-unresolvable refusal is a TYPED `RewriteWikilinkError`
     /// (not a bare `anyhow!`), so it carries `target-not-found` (reused from
-    /// `set`) and its `Display` matches the prior `anyhow!()` prose.
+    /// `set`) and its `Display` renders `"rewrite_wikilink: '<target>' does not
+    /// resolve to any document in the vault (pre-flight refusal)"`.
     #[test]
     fn rewrite_wikilink_error_code_and_display_are_stable() {
         let err = RewriteWikilinkError::OldUnresolved("no-such".into());

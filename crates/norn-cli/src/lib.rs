@@ -116,7 +116,7 @@ pub fn run() -> i32 {
 fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i32 {
     match cli.command {
         // The ported read verbs resolve their report into an `Output` and the
-        // single `emit` call renders it; the rest of the v0.48 surface is
+        // single `emit` call renders it; the remaining verbs are
         // grammar-only stubs (NRN-329) routed to the uniform not-yet-ported
         // outcome by name.
         Command::Find(args) => emit(

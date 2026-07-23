@@ -282,10 +282,11 @@ fn derive_change_id(
     expected_old_value: Option<&Value>,
     occurrence_index: u32,
 ) -> String {
-    // The id is derived by hashing the input with BLAKE3 and taking the first
-    // 16 hex chars of its hex digest (a 64-bit-equivalent width). change_ids are
-    // internal identifiers, not a wire contract, so only the determinism and
-    // width need to be stable, not the algorithm.
+    // BLAKE3 derives the id (`sha2` isn't a norn-core dependency; `blake3`
+    // is), taking the first 16 hex chars of its hex digest (a
+    // 64-bit-equivalent width). change_ids are internal identifiers, not a
+    // wire contract, so only the determinism and width need to be stable, not
+    // the algorithm.
     let mut hasher = blake3::Hasher::new();
     hasher.update(path.as_str().as_bytes());
     hasher.update(b"\0");
