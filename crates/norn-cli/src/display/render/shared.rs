@@ -7,7 +7,7 @@ use norn_wire::{ApplyOutcome, ApplyReport, FindReport, MutationOutcome, Mutation
 use serde_json::Value;
 
 use crate::display::conversation::Conversation;
-use crate::display::{Format, EXIT_OK, EXIT_USAGE};
+use crate::display::{serde_label, Format, EXIT_OK, EXIT_USAGE};
 
 /// `""` for a count of 1, `"s"` otherwise.
 pub(super) fn plural(n: usize) -> &'static str {
@@ -162,7 +162,7 @@ pub(super) fn render_apply_report_body(
     if !report.preconditions.is_empty() {
         writeln!(out, "preconditions:")?;
         for precondition in &report.preconditions {
-            let status = format!("{:?}", precondition.status).to_lowercase();
+            let status = serde_label(&precondition.status);
             writeln!(out, "  [{status}] {}", precondition.id)?;
             if let Some(error) = &precondition.error {
                 writeln!(out, "    {}: {}", error.code, error.message)?;
@@ -170,7 +170,7 @@ pub(super) fn render_apply_report_body(
         }
     }
     for op in &report.operations {
-        let status = format!("{:?}", op.status).to_lowercase();
+        let status = serde_label(&op.status);
         writeln!(out, "  [{status}] {}", op.summary)?;
     }
     if !report.warnings.is_empty() {

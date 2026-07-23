@@ -14,7 +14,7 @@ use crate::display::conversation::Conversation;
 use crate::display::emit::render_outcome;
 use crate::display::output::MoveMutationView;
 use crate::display::sink::Sink;
-use crate::display::Format;
+use crate::display::{serde_label, Format};
 use crate::output::glyphs::{self, Glyph};
 
 use super::shared::{
@@ -143,7 +143,7 @@ fn render_folder_apply_tty(out: &mut dyn Write, report: &norn_wire::ApplyReport)
         report.applied, report.skipped, report.failed
     )?;
     for op in &report.operations {
-        let status = format!("{:?}", op.status).to_lowercase();
+        let status = serde_label(&op.status);
         writeln!(out, "  [{status}] {}", op.summary)?;
     }
     Ok(())
