@@ -118,12 +118,12 @@ pub struct SetParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetReport {
     pub schema_version: u32,
-    /// The telemetry trace id. Empty on EVERY outcome — forecast, refusal, AND
-    /// applied — until the durable telemetry store lands with the audit verb; the
-    /// owner's discard sink deliberately does not mint a placeholder on apply, so
-    /// the contract holds one shape and a confirmed apply needs no trace
-    /// normalization. Serialized right after `schema_version` so it holds a
-    /// stable position in the struct-order JSON.
+    /// The telemetry trace id correlating this mutation to its durable event
+    /// stream (NRN-400). Non-empty on a CONFIRMED apply — the executor mints it
+    /// from the shared `EventSink` and it matches the `trace` on every line the
+    /// apply wrote to the audit store — and empty on a forecast or a pre-write
+    /// refusal (neither writes, so no trace correlates). Serialized right after
+    /// `schema_version` so it holds a stable position in the struct-order JSON.
     #[serde(default)]
     pub trace_id: String,
     pub operation: String,
@@ -200,7 +200,8 @@ pub struct NewParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewReport {
     pub schema_version: u32,
-    /// Empty until durable telemetry lands (see [`SetReport::trace_id`]).
+    /// Non-empty on a confirmed apply, empty on forecast/refusal (see
+    /// [`SetReport::trace_id`]).
     #[serde(default)]
     pub trace_id: String,
     pub operation: String,
@@ -261,7 +262,7 @@ pub struct EditParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditReport {
     pub schema_version: u32,
-    /// Empty on EVERY outcome until durable telemetry lands (see
+    /// Non-empty on a confirmed apply, empty on forecast/refusal (see
     /// [`SetReport::trace_id`]).
     #[serde(default)]
     pub trace_id: String,

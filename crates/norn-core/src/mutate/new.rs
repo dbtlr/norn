@@ -207,10 +207,10 @@ pub fn execute(
     } else {
         Vec::new()
     };
-    // The wire contract holds `trace_id` empty on EVERY outcome until durable
-    // telemetry lands (see `mutate::set::execute`); the discard sink must not
-    // mint a placeholder id on apply.
-    let trace_id = String::new();
+    // Real trace id on a confirmed apply, empty on a forecast (NRN-400) — see
+    // `mutate::set::execute`. The executor mints it from the EventSink on a
+    // write, so it correlates to the durable telemetry line this apply wrote.
+    let trace_id = apply_report.trace_id.clone();
 
     // Post-create validate pass. Only meaningful once the file is actually on
     // disk (a forecast writes nothing for the pass to see), so it runs only on a

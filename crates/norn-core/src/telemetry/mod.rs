@@ -4,20 +4,27 @@
 //! seams ([`IdGen`], [`Clock`]), and the in-memory [`EventSink`] the mutation
 //! executor emits through and reads back to fold an [`norn_wire::ApplyReport`].
 //!
-//! # Ported seam (ADR 0018)
+//! # Two halves (ADR 0018)
 //!
 //! The executor needs the event STREAM in memory: it emits `op_planned` /
 //! per-action / retry events and then folds them back into cascade summaries and
-//! per-op statuses. That in-memory stream ports here whole. The DURABLE side —
-//! the daily-file JSONL store (`store::daily_file_name`) and the `norn audit`
-//! READ verb over it (`telemetry::read`) — is audit-command surface that ports
-//! with the telemetry + CLI layer. It is not dropped:
-//! the sink keeps a value-in `writer` seam so the owner can attach a durable
-//! `Write` sink later ([`EventSink::with_writer`]), and every event is always
-//! retained in [`EventSink::events`] regardless of the writer state.
+//! per-op statuses — the in-memory stream, always retained in
+//! [`EventSink::events`] regardless of the durable writer state.
+//!
+//! The DURABLE side (NRN-400) sits behind the value-in `writer` seam: for a
+//! REGISTERED vault the owner attaches a daily-file JSONL sink via
+//! [`EventSink::open`] (the `store` submodule names the file and owns
+//! retention), so every CONFIRMED mutation appends one OTEL Logs object per
+//! line; an ephemeral (unregistered) tier keeps the in-memory
+//! [`EventSink::discard`]. The `read` submodule is the mirror image — the
+//! `norn audit` read verb parses those lines back into
+//! [`norn_wire::AuditEvent`] rows. norn-core stays root-free: the events dir
+//! arrives as a value.
 
 pub mod event;
 pub mod ids;
+pub mod read;
+pub mod store;
 
 pub use event::{Event, Severity};
 pub use ids::{Clock, IdGen};
@@ -63,6 +70,45 @@ impl EventSink {
             events: Vec::new(),
             writer,
             service_version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+
+    /// File-backed sink for a registered vault's durable telemetry. Best-effort:
+    /// if the events dir can't be created or the daily file can't be opened, one
+    /// stderr warning is emitted and an in-memory ([`Self::discard`]-style) sink
+    /// is returned instead — this NEVER returns `Err` for an IO problem, so a
+    /// telemetry hiccup can never fail a mutation.
+    ///
+    /// `start_ts` is the invocation start timestamp (RFC-3339 UTC); it selects
+    /// the daily file via [`store::daily_file_name`]. The `events_dir` arrives as
+    /// a value (the owner resolved it from the vault's state/logs home).
+    pub fn open(
+        events_dir: &camino::Utf8Path,
+        start_ts: String,
+        ids: IdGen,
+        clock: Clock,
+    ) -> std::io::Result<Self> {
+        if let Err(e) = std::fs::create_dir_all(events_dir.as_std_path()) {
+            eprintln!(
+                "warning: could not create telemetry events dir {events_dir}: {e}; \
+                 continuing without the log"
+            );
+            return Ok(Self::discard(ids, clock));
+        }
+        let file_path = events_dir.join(store::daily_file_name(&start_ts));
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file_path.as_std_path())
+        {
+            Ok(file) => Ok(Self::with_writer(ids, clock, Some(Box::new(file)))),
+            Err(e) => {
+                eprintln!(
+                    "warning: could not open telemetry events file {file_path}: {e}; \
+                     continuing without the log"
+                );
+                Ok(Self::discard(ids, clock))
+            }
         }
     }
 

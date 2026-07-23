@@ -200,12 +200,11 @@ pub fn execute(
         Vec::new()
     };
 
-    // The wire contract holds `trace_id` empty on EVERY outcome (forecast,
-    // refusal, AND applied) until durable telemetry lands — the owner's discard
-    // sink would otherwise mint a placeholder id on apply that contradicts the
-    // documented shape (and would need a trace-normalization step). Real
-    // trace ids return with the telemetry/audit port.
-    let trace_id = String::new();
+    // Real trace id on a confirmed apply, empty on a forecast (NRN-400). The
+    // shared `apply_migration_plan` executor mints the id from the EventSink on
+    // a write and leaves it empty on a dry-run, so the report carries the id
+    // that correlates to the durable telemetry line the same apply wrote.
+    let trace_id = apply_report.trace_id.clone();
     Ok(MutationExecution {
         report: SetReport {
             schema_version: 2,
