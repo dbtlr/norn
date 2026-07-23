@@ -2,7 +2,7 @@
 //! schema-aware. DRY-RUN by default; `confirm: true` writes.
 //!
 //! The param struct mirrors `norn set`'s mutation flags; the handler routes to the
-//! owner and wraps the wire [`SetReport`] in the donor's `{ report: … }` envelope,
+//! owner and wraps the wire [`SetReport`] in the `{ report: … }` envelope,
 //! deriving the MCP `isError` bit from the report's outcome (a confirmed refusal /
 //! failure is `isError: true`; a dry-run forecast never is).
 
@@ -85,8 +85,8 @@ pub(crate) fn to_wire(p: SetParams) -> WireSetParams {
     }
 }
 
-/// Wrap the wire report in the MCP envelope. `isError` is derived from the same
-/// outcome→exit vocabulary the donor uses: a CONFIRM apply whose outcome is not
+/// Wrap the wire report in the MCP envelope. `isError` is derived from the
+/// outcome→exit vocabulary: a CONFIRM apply whose outcome is not
 /// clean (`refused`) is `isError: true`; a dry-run forecast never is.
 pub(crate) fn envelope(confirm: bool, report: SetReport) -> MutationResult<SetOutput> {
     let is_error = confirm && matches!(report.outcome, MutationOutcome::Refused);

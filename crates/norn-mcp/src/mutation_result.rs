@@ -1,10 +1,9 @@
 //! `MutationResult<T>` — a structured tool output paired with the MCP `isError`
-//! bit (ported from the donor's `mcp::mutation_result`, NRN-219 / NRN-220 /
-//! NRN-214).
+//! bit.
 //!
 //! The four cascade mutation tools (`vault.apply` / `move` / `delete` /
 //! `rewrite_wikilink`) return an in-band `ApplyReport` even when the mutation did
-//! NOT apply — a byte-identical pre-flight refusal (a CAS / stale-hash mismatch)
+//! NOT apply — a no-op pre-flight refusal (a CAS / stale-hash mismatch)
 //! or a partial-apply failure. rmcp's `Json<T>` wrapper always renders
 //! `isError: false`, so before this wrapper those not-applied outcomes crossed MCP
 //! looking like success. This wrapper carries an `isError` bit derived from the
@@ -32,7 +31,7 @@ use serde::Serialize;
 /// `Json<T>` return type (it name-matches `Json`), so a `MutationResult<T>` tool
 /// would otherwise advertise no schema at all. This reproduces exactly what the
 /// macro generates for `Json<T>` — the same `schema_for_output::<T>()` call — so
-/// the published schema is byte-for-byte what the donor advertised.
+/// the published schema is exactly what the macro emits for `Json<T>`.
 pub fn output_schema_for<T: JsonSchema + std::any::Any>() -> Arc<JsonObject> {
     rmcp::handler::server::tool::schema_for_output::<T>().unwrap_or_else(|e| {
         panic!(

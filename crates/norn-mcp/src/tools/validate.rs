@@ -63,8 +63,7 @@ pub struct ValidateOutput {
     pub findings: Option<Vec<Finding>>,
 
     /// The grouped finding-count rollup, present only when `summary: true` was
-    /// requested — byte-for-byte the same shape `norn validate --summary --format
-    /// json` emits.
+    /// requested — the same shape `norn validate --summary --format json` emits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<serde_json::Value>,
 }
@@ -79,9 +78,9 @@ pub(crate) fn to_wire(p: ValidateParams) -> WireValidateParams {
         paths: p.path,
         targets: p.target,
         reasons: p.reason,
-        // The MCP surface keeps full graph-diagnostic `detail` in findings — the
-        // donor's `vault.validate` ran in the verbose mode (an off-filesystem
-        // client cannot re-derive the detail), unlike the non-verbose CLI default.
+        // The MCP surface keeps full graph-diagnostic `detail` in findings — an
+        // off-filesystem client cannot re-derive the detail, so it runs verbose,
+        // unlike the non-verbose CLI default.
         verbose: true,
         summary: p.summary,
     }

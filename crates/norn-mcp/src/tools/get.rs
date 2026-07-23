@@ -2,9 +2,9 @@
 //!
 //! The param struct mirrors `norn get`'s daily surface; the handler routes to the
 //! owner and projects each wire [`GetRecord`] into the same full-facet JSON the
-//! CLI's `--format json` emits, wrapped in the typed [`GetOutput`] envelope. Like
-//! the donor, a requested target that did not resolve (an `error:`-prefixed note)
-//! maps to `isError: true` while still returning every good target's records.
+//! CLI's `--format json` emits, wrapped in the typed [`GetOutput`] envelope. A
+//! requested target that did not resolve (an `error:`-prefixed note) maps to
+//! `isError: true` while still returning every good target's records.
 
 use norn_wire::{GetParams as WireGetParams, GetRecord, GetReport, SortPaginateParams};
 use serde::{Deserialize, Serialize};
@@ -17,9 +17,8 @@ use crate::mutation_result::MutationResult;
 /// `--section` heading slice, and `--all-cols`. `format: "markdown"` selects the
 /// exact-source envelope.
 ///
-/// NRN-332 paging divergence: `starts_at` is ZERO-indexed here (the rewrite's
-/// paging convention), unlike the donor's 1-indexed MCP surface — an omitted
-/// value is the first record.
+/// Paging convention: `starts_at` is ZERO-indexed — an omitted value is the
+/// first record.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
 pub struct GetParams {
     /// One or more document targets (stem or path), as `norn get` accepts.
@@ -77,7 +76,7 @@ pub enum GetRepresentation {
 }
 
 /// Targets for which `--section` was requested but NONE of the requested headings
-/// resolved. Mirrors the donor `get::SectionFailure`.
+/// resolved.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct SectionFailure {
     /// The all-missing target's vault-relative path.
@@ -235,8 +234,8 @@ mod tests {
 
     #[test]
     fn default_record_is_full_facets_without_stem_hash_or_body() {
-        // The default dump omits stem/hash/body (the oracle MCP record shape) and
-        // keeps path + frontmatter + the facet arrays.
+        // The default dump omits stem/hash/body and keeps path + frontmatter +
+        // the facet arrays.
         let v = record_json(&record(Some(json!({"title":"Alpha"}))), false, false);
         assert_eq!(v["path"], json!("notes/alpha.md"));
         assert_eq!(v["frontmatter"], json!({"title":"Alpha"}));
@@ -249,7 +248,7 @@ mod tests {
     #[test]
     fn absent_frontmatter_block_omits_the_key() {
         // A source with no `---` block (frontmatter None) omits the key entirely,
-        // preserving the absent-vs-null distinction the donor kept.
+        // preserving the absent-vs-null distinction.
         let v = record_json(&record(None), false, false);
         assert!(v.get("frontmatter").is_none());
     }
