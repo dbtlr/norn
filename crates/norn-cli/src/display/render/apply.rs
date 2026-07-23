@@ -17,7 +17,10 @@ use crate::display::emit::render_outcome;
 use crate::display::output::ApplyMutationView;
 use crate::display::sink::Sink;
 
-use super::shared::{apply_report_exit, render_apply_refusal};
+use super::shared::{
+    apply_report_exit, apply_status_label, render_apply_refusal, render_apply_report_body,
+    write_report_json, write_report_to_out_file,
+};
 
 pub(crate) fn render_apply(
     view: ApplyMutationView,
@@ -46,8 +49,7 @@ pub(crate) fn render_apply(
     // `--out`: write the (always-JSON, pretty) report to the file, silence stdout.
     if let Some(out_path) = &view.out {
         let result: io::Result<i32> = (|| {
-            let json = serde_json::to_string_pretty(report)?;
-            std::fs::write(out_path, format!("{json}\n"))?;
+            write_report_to_out_file(out_path, report)?;
             Ok(exit)
         })();
         return render_outcome(result, conv.writer());
@@ -55,7 +57,7 @@ pub(crate) fn render_apply(
 
     if view.json {
         let result: io::Result<i32> = (|| {
-            writeln!(sink.writer(), "{}", serde_json::to_string_pretty(report)?)?;
+            write_report_json(sink.writer(), report)?;
             Ok(exit)
         })();
         return render_outcome(result, conv.writer());
@@ -81,38 +83,6 @@ pub(crate) fn render_apply(
 
 /// The generic apply-report records block (donor `apply::render_records`).
 fn render_apply_records(out: &mut dyn Write, report: &ApplyReport) -> io::Result<()> {
-    let status_label = match report.outcome {
-        ApplyOutcome::Applied if report.dry_run => "dry-run",
-        ApplyOutcome::Applied => "applied",
-        ApplyOutcome::Failed => "failed",
-        ApplyOutcome::Refused => "refused",
-        ApplyOutcome::Rebased => "rebased",
-    };
-    writeln!(out, "apply {status_label}")?;
-    writeln!(
-        out,
-        "  applied: {}  skipped: {}  failed: {}  remaining: {}",
-        report.applied, report.skipped, report.failed, report.remaining
-    )?;
-    if !report.preconditions.is_empty() {
-        writeln!(out, "preconditions:")?;
-        for precondition in &report.preconditions {
-            let status = format!("{:?}", precondition.status).to_lowercase();
-            writeln!(out, "  [{status}] {}", precondition.id)?;
-            if let Some(error) = &precondition.error {
-                writeln!(out, "    {}: {}", error.code, error.message)?;
-            }
-        }
-    }
-    for op in &report.operations {
-        let status = format!("{:?}", op.status).to_lowercase();
-        writeln!(out, "  [{status}] {}", op.summary)?;
-    }
-    if !report.warnings.is_empty() {
-        writeln!(out, "warnings:")?;
-        for w in &report.warnings {
-            writeln!(out, "  {}: {}", w.code, w.message)?;
-        }
-    }
-    Ok(())
+    writeln!(out, "apply {}", apply_status_label(report))?;
+    render_apply_report_body(out, report)
 }

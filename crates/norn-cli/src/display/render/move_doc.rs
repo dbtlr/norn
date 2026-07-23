@@ -17,7 +17,9 @@ use crate::display::output::MoveMutationView;
 use crate::display::sink::Sink;
 use crate::output::glyphs::{self, Glyph};
 
-use super::shared::{apply_report_exit, plural, render_apply_refusal};
+use super::shared::{
+    apply_report_exit, apply_status_label, plural, render_apply_refusal, write_report_json,
+};
 
 pub(crate) fn render_move(
     view: MoveMutationView,
@@ -35,7 +37,7 @@ pub(crate) fn render_move(
 
     if view.json {
         let result: io::Result<i32> = (|| {
-            writeln!(sink.writer(), "{}", serde_json::to_string_pretty(report)?)?;
+            write_report_json(sink.writer(), report)?;
             Ok(exit)
         })();
         return render_outcome(result, conv.writer());
@@ -48,7 +50,7 @@ pub(crate) fn render_move(
     let is_folder = report.operations.iter().any(|o| o.from.is_some());
     let result: io::Result<i32> = (|| {
         if is_folder {
-            render_folder_apply_tty(sink.writer(), report, dry_run)?;
+            render_folder_apply_tty(sink.writer(), report)?;
         } else {
             let (link_total, link_files) = report
                 .operations
@@ -121,14 +123,12 @@ fn render_move_apply_tty(
     Ok(())
 }
 
-/// Folder move summary (donor `r#move::render_folder_apply_tty`).
-fn render_folder_apply_tty(
-    out: &mut dyn Write,
-    report: &norn_wire::ApplyReport,
-    dry_run: bool,
-) -> io::Result<()> {
-    let status_label = if dry_run { "dry-run" } else { "applied" };
-    writeln!(out, "move-folder {status_label}")?;
+/// Folder move summary (donor `r#move::render_folder_apply_tty`). The headline
+/// reads the report's own outcome (`apply_status_label`), not `dry_run` alone,
+/// so a runtime op failure prints `move-folder failed` rather than the
+/// `applied` label a purely dry-run-keyed check would still emit.
+fn render_folder_apply_tty(out: &mut dyn Write, report: &norn_wire::ApplyReport) -> io::Result<()> {
+    writeln!(out, "move-folder {}", apply_status_label(report))?;
     writeln!(
         out,
         "  applied: {}  skipped: {}  failed: {}",
@@ -139,4 +139,71 @@ fn render_folder_apply_tty(
         writeln!(out, "  [{status}] {}", op.summary)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use norn_wire::{ApplyReport, ApplyReportOp, OpStatus};
+
+    fn failed_report() -> ApplyReport {
+        ApplyReport {
+            schema_version: 3,
+            trace_id: String::new(),
+            plan_hash: String::new(),
+            vault_root: "/vault".into(),
+            dry_run: false,
+            applied: 1,
+            skipped: 0,
+            failed: 1,
+            remaining: 0,
+            preconditions: Vec::new(),
+            operations: vec![
+                ApplyReportOp {
+                    op_id: "0".into(),
+                    kind: "move_document".into(),
+                    status: OpStatus::Applied,
+                    from: Some("0".into()),
+                    path: Some("b/x.md".into()),
+                    stem: Some("x".into()),
+                    summary: "moved a/x.md -> b/x.md".into(),
+                    error: None,
+                    footnote: None,
+                    cascade: None,
+                    link_impact: None,
+                    finding_code: None,
+                    repair_rule: None,
+                },
+                ApplyReportOp {
+                    op_id: "1".into(),
+                    kind: "move_document".into(),
+                    status: OpStatus::Failed,
+                    from: Some("0".into()),
+                    path: Some("b/y.md".into()),
+                    stem: Some("y".into()),
+                    summary: "move a/y.md -> b/y.md: permission denied".into(),
+                    error: None,
+                    footnote: None,
+                    cascade: None,
+                    link_impact: None,
+                    finding_code: None,
+                    repair_rule: None,
+                },
+            ],
+            warnings: Vec::new(),
+            outcome: ApplyOutcome::Failed,
+            touched_paths: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn f1_a_failed_folder_move_headlines_failed_not_applied() {
+        let report = failed_report();
+        let mut out = Vec::new();
+        render_folder_apply_tty(&mut out, &report).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "move-folder failed\n  applied: 1  skipped: 0  failed: 1\n  [applied] moved a/x.md -> b/x.md\n  [failed] move a/y.md -> b/y.md: permission denied\n"
+        );
+    }
 }

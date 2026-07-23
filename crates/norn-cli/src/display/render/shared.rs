@@ -1,9 +1,9 @@
 //! Cross-verb render helpers (NRN-409): the handful of pieces more than one
 //! verb module reaches for. Single-verb helpers stay put in their own module.
 
-use std::io::Write;
+use std::io::{self, Write};
 
-use norn_wire::{ApplyReport, FindReport, MutationOutcome, MutationWarning};
+use norn_wire::{ApplyOutcome, ApplyReport, FindReport, MutationOutcome, MutationWarning};
 use serde_json::Value;
 
 use crate::display::conversation::Conversation;
@@ -113,6 +113,89 @@ pub(super) fn truncation_note(report: &FindReport) -> String {
         "note: showing {} of {} (--no-limit for all)",
         report.returned, report.total
     )
+}
+
+/// Write an `ApplyReport`'s pretty JSON serialization plus a trailing newline —
+/// the `--format json` stdout path shared by every cascade verb
+/// (`apply`/`move`/`delete`/`rewrite-wikilink`).
+pub(super) fn write_report_json(out: &mut dyn Write, report: &ApplyReport) -> io::Result<()> {
+    writeln!(out, "{}", serde_json::to_string_pretty(report)?)
+}
+
+/// Write an `ApplyReport`'s pretty JSON serialization to the `--out` file path —
+/// the write shared by the cascade verbs that accept `--out` (`apply`,
+/// `rewrite-wikilink`); the caller silences stdout on this path.
+pub(super) fn write_report_to_out_file(path: &str, report: &ApplyReport) -> io::Result<()> {
+    let json = serde_json::to_string_pretty(report)?;
+    std::fs::write(path, format!("{json}\n"))
+}
+
+/// The status-label vocabulary an `ApplyReport`'s outcome maps to in a TTY
+/// headline (`apply <label>`, `move-folder <label>`): a dry-run forecast reads
+/// `dry-run`, a clean apply `applied`, a runtime op failure `failed`, a
+/// preflight refusal `refused`. The one place a records headline decides
+/// between preview/success/failure words, so every verb that prints one asks
+/// this rather than re-deriving it from `dry_run` alone (which can't tell a
+/// real failure from a success).
+pub(super) fn apply_status_label(report: &ApplyReport) -> &'static str {
+    match report.outcome {
+        ApplyOutcome::Applied if report.dry_run => "dry-run",
+        ApplyOutcome::Applied => "applied",
+        ApplyOutcome::Failed => "failed",
+        ApplyOutcome::Refused => "refused",
+        ApplyOutcome::Rebased => "rebased",
+    }
+}
+
+/// The counts + preconditions + per-op + warnings body of the generic
+/// apply-report records block (donor `apply::render_records`), independent of
+/// the headline: shared by `apply`'s own full report render and by
+/// [`render_cascade_failed`], the truthful fallback the other cascade verbs
+/// render when their own report's outcome is `failed`.
+pub(super) fn render_apply_report_body(
+    out: &mut dyn Write,
+    report: &ApplyReport,
+) -> io::Result<()> {
+    writeln!(
+        out,
+        "  applied: {}  skipped: {}  failed: {}  remaining: {}",
+        report.applied, report.skipped, report.failed, report.remaining
+    )?;
+    if !report.preconditions.is_empty() {
+        writeln!(out, "preconditions:")?;
+        for precondition in &report.preconditions {
+            let status = format!("{:?}", precondition.status).to_lowercase();
+            writeln!(out, "  [{status}] {}", precondition.id)?;
+            if let Some(error) = &precondition.error {
+                writeln!(out, "    {}: {}", error.code, error.message)?;
+            }
+        }
+    }
+    for op in &report.operations {
+        let status = format!("{:?}", op.status).to_lowercase();
+        writeln!(out, "  [{status}] {}", op.summary)?;
+    }
+    if !report.warnings.is_empty() {
+        writeln!(out, "warnings:")?;
+        for w in &report.warnings {
+            writeln!(out, "  {}: {}", w.code, w.message)?;
+        }
+    }
+    Ok(())
+}
+
+/// A FAILED cascade report's truthful records headline (`{verb} failed`) plus
+/// the shared apply-report body — the fallback `move`/`delete`/
+/// `rewrite-wikilink` render instead of their own success/preview wording when
+/// the report's outcome is `failed`, so a real runtime failure never reads like
+/// an applied or forecast run.
+pub(super) fn render_cascade_failed(
+    out: &mut dyn Write,
+    verb: &str,
+    report: &ApplyReport,
+) -> io::Result<()> {
+    writeln!(out, "{verb} failed")?;
+    render_apply_report_body(out, report)
 }
 
 #[cfg(test)]

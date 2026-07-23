@@ -16,7 +16,10 @@ use crate::display::emit::render_outcome;
 use crate::display::output::RewriteWikilinkView;
 use crate::display::sink::Sink;
 
-use super::shared::{apply_report_exit, render_apply_refusal};
+use super::shared::{
+    apply_report_exit, render_apply_refusal, render_cascade_failed, write_report_json,
+    write_report_to_out_file,
+};
 
 pub(crate) fn render_rewrite_wikilink(
     view: RewriteWikilinkView,
@@ -38,8 +41,7 @@ pub(crate) fn render_rewrite_wikilink(
     // `--out`: write the (always-JSON, pretty) report to the file, silence stdout.
     if let Some(out_path) = &view.out {
         let result: io::Result<i32> = (|| {
-            let json = serde_json::to_string_pretty(report)?;
-            std::fs::write(out_path, format!("{json}\n"))?;
+            write_report_to_out_file(out_path, report)?;
             Ok(exit)
         })();
         return render_outcome(result, conv.writer());
@@ -47,7 +49,7 @@ pub(crate) fn render_rewrite_wikilink(
 
     if view.json {
         let result: io::Result<i32> = (|| {
-            writeln!(sink.writer(), "{}", serde_json::to_string_pretty(report)?)?;
+            write_report_json(sink.writer(), report)?;
             Ok(exit)
         })();
         return render_outcome(result, conv.writer());
@@ -64,12 +66,18 @@ pub(crate) fn render_rewrite_wikilink(
 }
 
 /// Records-format rewrite-wikilink output (donor `rewrite_wikilink::render_records`).
+/// A runtime op failure (`outcome = failed`) renders the truthful shared
+/// `render_cascade_failed` headline instead of the `would rewrite`/`rewrote`
+/// wording below, which only distinguishes forecast from success.
 fn render_rewrite_records(
     out: &mut dyn Write,
     report: &ApplyReport,
     old: &str,
     new: &str,
 ) -> io::Result<()> {
+    if report.outcome == ApplyOutcome::Failed {
+        return render_cascade_failed(out, "rewrite-wikilink", report);
+    }
     let body_count = report
         .operations
         .iter()
@@ -97,4 +105,71 @@ fn render_rewrite_records(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use norn_wire::{ApplyReportOp, OpStatus};
+
+    fn failed_report() -> ApplyReport {
+        ApplyReport {
+            schema_version: 3,
+            trace_id: String::new(),
+            plan_hash: String::new(),
+            vault_root: "/vault".into(),
+            dry_run: false,
+            applied: 1,
+            skipped: 0,
+            failed: 1,
+            remaining: 0,
+            preconditions: Vec::new(),
+            operations: vec![
+                ApplyReportOp {
+                    op_id: "0".into(),
+                    kind: "rewrite_link".into(),
+                    status: OpStatus::Applied,
+                    from: None,
+                    path: Some("a.md".into()),
+                    stem: Some("a".into()),
+                    summary: "rewrote [[old]] -> [[new]] in a.md".into(),
+                    error: None,
+                    footnote: None,
+                    cascade: None,
+                    link_impact: None,
+                    finding_code: None,
+                    repair_rule: None,
+                },
+                ApplyReportOp {
+                    op_id: "1".into(),
+                    kind: "rewrite_link".into(),
+                    status: OpStatus::Failed,
+                    from: None,
+                    path: Some("b.md".into()),
+                    stem: Some("b".into()),
+                    summary: "rewrite [[old]] -> [[new]] in b.md: permission denied".into(),
+                    error: None,
+                    footnote: None,
+                    cascade: None,
+                    link_impact: None,
+                    finding_code: None,
+                    repair_rule: None,
+                },
+            ],
+            warnings: Vec::new(),
+            outcome: ApplyOutcome::Failed,
+            touched_paths: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn f1_a_failed_rewrite_wikilink_headlines_failed_not_rewrote() {
+        let report = failed_report();
+        let mut out = Vec::new();
+        render_rewrite_records(&mut out, &report, "old", "new").unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "rewrite-wikilink failed\n  applied: 1  skipped: 0  failed: 1  remaining: 0\n  [applied] rewrote [[old]] -> [[new]] in a.md\n  [failed] rewrite [[old]] -> [[new]] in b.md: permission denied\n"
+        );
+    }
 }

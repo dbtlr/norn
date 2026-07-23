@@ -17,7 +17,9 @@ use crate::display::output::DeleteMutationView;
 use crate::display::sink::Sink;
 use crate::output::glyphs::{self, Glyph};
 
-use super::shared::{apply_report_exit, noun, render_apply_refusal};
+use super::shared::{
+    apply_report_exit, noun, render_apply_refusal, render_cascade_failed, write_report_json,
+};
 
 pub(crate) fn render_delete(
     view: DeleteMutationView,
@@ -35,7 +37,7 @@ pub(crate) fn render_delete(
 
     if view.json {
         let result: io::Result<i32> = (|| {
-            writeln!(sink.writer(), "{}", serde_json::to_string_pretty(report)?)?;
+            write_report_json(sink.writer(), report)?;
             Ok(exit)
         })();
         return render_outcome(result, conv.writer());
@@ -53,7 +55,11 @@ pub(crate) fn render_delete(
     render_outcome(result, conv.writer())
 }
 
-/// Records-format delete output (donor `delete::render_delete_records`).
+/// Records-format delete output (donor `delete::render_delete_records`). A
+/// runtime op failure (`outcome = failed`) renders the truthful shared
+/// `render_cascade_failed` headline instead of the applied/preview wording
+/// below — nothing here can tell "deleted" from "failed to delete" once a real
+/// FS error happened, so the shared block owns that state.
 fn render_delete_records(
     out: &mut dyn Write,
     report: &ApplyReport,
@@ -62,6 +68,9 @@ fn render_delete_records(
     exit: i32,
     ascii: bool,
 ) -> io::Result<()> {
+    if report.outcome == ApplyOutcome::Failed {
+        return render_cascade_failed(out, "delete", report);
+    }
     let delete_op = report
         .operations
         .iter()
@@ -176,4 +185,54 @@ fn render_delete_apply_tty(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use norn_wire::{ApplyReportOp, OpStatus};
+
+    fn failed_report() -> ApplyReport {
+        ApplyReport {
+            schema_version: 3,
+            trace_id: String::new(),
+            plan_hash: String::new(),
+            vault_root: "/vault".into(),
+            dry_run: false,
+            applied: 0,
+            skipped: 0,
+            failed: 1,
+            remaining: 0,
+            preconditions: Vec::new(),
+            operations: vec![ApplyReportOp {
+                op_id: "0".into(),
+                kind: "delete_document".into(),
+                status: OpStatus::Failed,
+                from: None,
+                path: Some("doc.md".into()),
+                stem: Some("doc".into()),
+                summary: "delete doc.md: permission denied".into(),
+                error: None,
+                footnote: None,
+                cascade: None,
+                link_impact: None,
+                finding_code: None,
+                repair_rule: None,
+            }],
+            warnings: Vec::new(),
+            outcome: ApplyOutcome::Failed,
+            touched_paths: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn f1_a_failed_delete_renders_the_truthful_failed_headline_not_a_preview() {
+        let report = failed_report();
+        let mut out = Vec::new();
+        render_delete_records(&mut out, &report, "doc.md", false, 1, false).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "delete failed\n  applied: 0  skipped: 0  failed: 1  remaining: 0\n  [failed] delete doc.md: permission denied\n"
+        );
+    }
 }
