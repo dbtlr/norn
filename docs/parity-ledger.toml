@@ -685,3 +685,27 @@ old = "`structuredContent.notes` is an array of prose strings (e.g. `\"error: '<
 new = "`structuredContent.notes` is an array of typed `{severity, code, message}` objects; the `isError: true` bit is unchanged (derived from the `error`-severity note), only the notes payload shape diverges"
 reason = "decided-better"
 decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
+
+# NRN-417: the service-local `--vault <PATH>` flag was a fossil. It shared a
+# clap arg id with the global `--vault <NAME>` selector (ADR 0017), and the
+# collision PANICKED the rewrite binary (exit 101) rather than erroring — the
+# oracle predates the global selector so it never collided. Vault targeting is
+# the global selectors' job on every verb; the local flag is deleted rather
+# than renamed. Two cases pin the two collision orderings. `service status
+# --vault <path>` (path given after the subcommand): the oracle recognizes its
+# local flag and fails canonicalizing the given path (exit 1); the rewrite's
+# `--vault` is now unambiguously the global NAME selector, which `service`
+# never consults, so the argv parses clean through to the uniform
+# not-yet-ported outcome (also exit 1, but different stderr). `--vault <name>
+# service status` (name given before the subcommand): the oracle has no global
+# `--vault` at all, so this is an unrecognized argument (exit 2); the
+# rewrite's global `--vault` parses regardless of position and reaches the
+# same not-yet-ported outcome (exit 1) — exit code AND stderr diverge here.
+[[entry]]
+id = "PD-134"
+surface = "service status (--vault flag collision: local flag deleted, ADR 0017 global selector only)"
+cases = ["err-service-status-local-vault-flag-deleted-zoo", "err-service-vault-global-flag-before-subcommand-zoo"]
+old = "the oracle has a service-local `--vault <PATH>` and no global `--vault`: `service status --vault <path>` recognizes the local flag and fails canonicalizing a nonexistent path (exit 1, `vault root could not be canonicalized: ...`); `--vault <name> service status` is an unrecognized argument before any subcommand parses (exit 2, `error: unexpected argument '--vault' found`)"
+new = "the service-local `--vault <PATH>` is deleted (NRN-417); `--vault` is unambiguously the global `Option<String>` NAME selector (ADR 0017) everywhere, which `service` never consults: both orderings now parse cleanly and reach the same uniform not-yet-ported outcome (exit 1, `` `service` is not yet ported in this build ``) — a wholly different stderr in both cases, and a different exit code (1, not 2) in the before-subcommand ordering"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

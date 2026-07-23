@@ -1461,6 +1461,49 @@ const ERROR_CASES: &[Case] = &[
         normalize: NO_NORM,
         plan: None,
     },
+    Case {
+        // NRN-417: the service-local `--vault <PATH>` flag existed only on the
+        // oracle. There it recognizes `--vault` and fails trying to
+        // canonicalize the given (nonexistent) path — exit 1, a
+        // canonicalization message. The rewrite has no such local flag: the
+        // deleted id is now unambiguously the global `--vault <NAME>`
+        // selector (ADR 0017), which `service` never consults, so the
+        // argv parses clean through to the uniform not-yet-ported outcome —
+        // also exit 1, but a wholly different stderr line. Same exit code,
+        // diverging stderr text. Pinned by PD-134.
+        id: "err-service-status-local-vault-flag-deleted-zoo",
+        argv: &["service", "status", "--vault", "no-such-path-nrn417"],
+        fixture: ERR_ZOO,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 1,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // NRN-417: the mirror ordering — `--vault` given BEFORE the `service`
+        // subcommand. The oracle predates the global `--vault NAME` selector
+        // (ADR 0017) entirely, so this is an unrecognized global argument —
+        // exit 2, a clap usage error. The rewrite's global `--vault NAME` is
+        // real and `global = true`, so it parses cleanly regardless of
+        // position and the argv reaches the same uniform not-yet-ported
+        // outcome as the previous case — exit 1. Exit code AND stderr
+        // diverge. Pinned by PD-134.
+        id: "err-service-vault-global-flag-before-subcommand-zoo",
+        argv: &["--vault", "no-such-path-nrn417", "service", "status"],
+        fixture: ERR_ZOO,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
 ];
 
 /// A dedicated zoo fixture for the MCP suite (seed 4 — the next free seed

@@ -113,8 +113,11 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // NRN-407 adds one `get` case (an unknown `--col` field warning) taking the
     // total to 134; self-check runs oracle vs. itself (both emit the `warn:`
     // annotation), so all 134 Match.
+    // NRN-417 adds two `errors` cases (the two service-local `--vault` flag
+    // collision orderings) taking the total to 136; self-check runs oracle vs.
+    // itself, so both Match.
     assert!(
-        stdout.contains("134 cases: 134 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("136 cases: 136 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -285,8 +288,15 @@ fn default_mode_gates_help_cases_exit_0() {
     // `vault.get` notes cross as typed `{severity, code, message}` objects —
     // `mcp-tools-call-get-missing-zoo`). The gated total grows to 133, the match
     // count drops from 76 to 73 and the diverged count grows from 56 to 60.
+    // NRN-417 adds two ported `errors` cases, both DIVERGING under one ledger
+    // entry (PD-134): the service-local `--vault <PATH>` flag collided with the
+    // global `--vault <NAME>` selector and panicked the rewrite; deleting it
+    // means both collision orderings now reach the uniform not-yet-ported
+    // outcome instead of the oracle's real local-flag behavior. The gated total
+    // grows to 135 and the diverged count from 60 to 62; the match count stays
+    // 73.
     assert!(
-        stdout.contains("133 cases: 73 match, 60 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("135 cases: 73 match, 62 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -320,6 +330,9 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-131",
         "PD-132",
         "PD-133",
+        "PD-134",
+        "err-service-status-local-vault-flag-deleted-zoo",
+        "err-service-vault-global-flag-before-subcommand-zoo",
         "read-get-ambiguous-json-zoo",
         "read-get-unknown-col-warning-zoo",
         "mcp-tools-call-get-missing-zoo",
