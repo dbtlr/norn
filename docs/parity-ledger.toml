@@ -45,6 +45,13 @@ oracle_version = "0.48.1"   # the pinned oracle; the runner verifies `--version`
 # only the global-options change. Live help examples (the "--help builds the
 # cache" behavior) do NOT diverge: under the harness the oracle opens a
 # freshly-created empty cache and emits none, matching the rewrite.
+#
+# These two byte-exact help cases pin the top-level page and two representative
+# subcommands; the generated help-parity walker
+# (crates/norn-parity/tests/help_walker.rs) enforces this SAME global-options
+# reshape across EVERY enumerated verb and nested group, so PD-101 / PD-102 are
+# the standing decision record for a divergence the walker checks on the whole
+# clap tree, not just the three cased surfaces.
 [[entry]]
 id = "PD-101"
 surface = "--help (top-level command list + GLOBAL OPTIONS)"

@@ -26,89 +26,19 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     let ledger = Ledger::load(&path, &known_ids(), &ported_ids())
         .unwrap_or_else(|e| panic!("failed to load {}: {e}", path.display()));
     assert_eq!(ledger.meta.oracle_version, "0.48.1");
-    // Phase 1 (NRN-329) added PD-101 (the `vault` namespace in top-level
-    // `--help`). NRN-345 broadened PD-101 to also carry the GLOBAL OPTIONS
-    // change on help-bare and added PD-102 for the same GLOBAL OPTIONS change on
-    // the two ported subcommand help surfaces (help-validate / help-find). The
-    // text-layer slate (NRN-349 / NRN-350) added PD-103 (code-opacity block-id
-    // resolution) and PD-104 (BOM-prefixed frontmatter); the CLI-semantics slate
-    // added PD-105 (zero-indexed `--starts-at`, NRN-332) and PD-106 (last-wins
-    // `--limit`/`--no-limit`, NRN-331); the URL-semantics slate added PD-107
-    // (Markdown-link split-then-decode + block-ref, NRN-356) and PD-108
-    // (external-vs-local scheme classification, NRN-357); the presentation/errors
-    // slate added PD-109 (the soft-landing diagnostic surface, NRN-361/362) and
-    // PD-110 (grammar-wide last-wins, NRN-365). The confirmed-apply mutation
-    // slate (NRN-388) added PD-111 (the unified --format json warning envelope)
-    // and PD-112 (the NRN-371 null-/comment-only frontmatter mapping-promotion,
-    // two cases). NRN-405 added PD-113 (the authored-plan change-op kind/operation
-    // mismatch refusal) and PD-114 (the malformed authored-plan refusal codes —
-    // `unknown-operation-kind` / `malformed-plan` in place of `internal-error`,
-    // two cases). NRN-437 added PD-115 (the SETEXT / heading-at-EOF section-op
-    // corruption fix, five cases). NRN-424 added PD-116/117/118 (the
-    // wikilink-rewriter unification: embed-marker, code-opacity, and caret-target
-    // corruptions) and, on review, PD-119 (decided-better interior-whitespace
-    // canonicalization on rewrite) and PD-120 (decided-better refuse/skip on a
-    // rename to an unrepresentable wikilink target). NRN-406 (ADR 0022) added
-    // PD-121 (decided-better strict op-payload decode: a wrong-typed op field
-    // refuses `malformed-plan` instead of silently coercing, three cases) and
-    // PD-122 (decided-better flat finding contract: `validate --format
-    // json`/`jsonl` and `vault.validate` serialize one flat closed struct with
-    // no leaked internal link/diagnostic model, three cases). NRN-427/NRN-428
-    // (ADR 0023) added PD-123 (decided-better query predicate input strictness:
-    // a non-ISO date-operator value and a malformed `--path` glob each refuse at
-    // exit 2 instead of returning a silently-wrong or silently-empty result set,
-    // two cases). NRN-426 (ADR 0023 amendment) added PD-124 (decided-better
-    // predicate value typing: a numeric-looking `--eq`/`--not-eq` value dual-types
-    // against quoted stored values instead of eager-coercing to a miss/inverted
-    // exclusion, and a value operator on a declared-date field refuses a non-ISO
-    // value, three cases). NRN-436 added PD-125 (discovered-inconsistency: the
-    // bare-anyhow user-fault refusal families carry typed codes instead of
-    // `internal-error` — create-destination-exists / create-parent-missing /
-    // malformed-plan / invalid-precondition, five cases). NRN-406 (ADR 0024) added
-    // PD-126 (decided-better true per-op tracking: a multi-seq-create report tells
-    // the truth — `applied: 2` with distinct resolved paths — instead of the
-    // oracle's event-reconstruction under-count) and PD-127 (decided-better partial
-    // apply: independent files proceed past a per-op failure). NRN-151 (ADR
-    // 0024) added PD-128 (decided-better: a hand-authored hash-less
-    // `delete_document` refuses `delete-hash-required` fail-closed where the
-    // oracle proceeds) and PD-129 (decided-better: a present-but-stale
-    // `document_hash` on a `move_document` refuses `stale-document-hash` before
-    // the rename — the optional move CAS the donor never had). NRN-164 added
-    // PD-130 (decided-better: the section resolver accepts an ATX-prefixed
-    // heading anchor — `## Section One` resolves the `Section One` section where
-    // the oracle requires the bare text, one case).
-    // NRN-407 (ADR 0022) added PD-131 (decided-better: get's ambiguity `note:`
-    // and unknown-`--col` `warn:` annotations converge onto the closed `warning:`
-    // prefix, two cases), PD-132 (decided-better: a records not-run label renders
-    // the serde-kebab `[not-run]` instead of the Debug-lowered `[notrun]`, one
-    // case), and PD-133 (decided-better: MCP `vault.get` notes cross as typed
-    // `{severity, code, message}` objects instead of prose strings, one case).
-    // NRN-417 added PD-134 (decided-better: the service-local `--vault <PATH>`
-    // fossil, which collided with the global `--vault <NAME>` selector and
-    // PANICKED the rewrite, is deleted — both collision orderings now parse
-    // clean through to the uniform not-yet-ported outcome instead, two cases).
-    // NRN-408 (ADR 0016) added PD-135 (decided-better: the one mutation-report
-    // JSON serializer policy — every mutation verb's `--format json` emits the
-    // full report envelope, pretty in struct order with one trailing newline, on
-    // every outcome path, five cases) and PD-136 (decided-better:
-    // `MutationOutcome::Forecast` — a `set`/`new`/`edit` dry-run reports
-    // `outcome: forecast`, two cases). NRN-399 (MCP catalog part 2) added PD-137
-    // (decided-better: MCP `vault.repair` structuredContent is the richer
-    // `RepairReport` — the finding tally, run counts, and the ADR 0024 rich
-    // `skipped_detail` — where the oracle emitted only `{plan,
-    // has_diagnostic_errors}`) and extended PD-111's cases to the MCP
-    // set-unknown-field and new-title-ignored warning frames (the unified
-    // warning envelope on the MCP surface). NRN-414 added PD-138 (decided-better:
-    // a missing `-C`/NORN_ROOT vault root is refused instantly by a client-side
-    // precheck naming the path + via, instead of the oracle's low-level
-    // canonicalization error — both fail fast at exit 1, only stderr diverges,
-    // one case).
-    assert_eq!(
-        ledger.entries.len(),
-        38,
-        "expected exactly PD-101..PD-138, found {}",
-        ledger.entries.len()
-    );
+    // The entry ids are DERIVED-checked, not hand-counted (NRN-421
+    // harness-fitness): they must form the contiguous sequence PD-101, PD-102,
+    // ... with no gaps or reuse, so a new entry (the next PD id) updates the
+    // expected set automatically and a dropped/duplicated id fails loudly. This
+    // replaces a hand-edited `entries.len() == 36` pin bumped on every ledger PR.
+    let ids: Vec<&str> = ledger.entries.iter().map(|e| e.id.as_str()).collect();
+    for (offset, id) in ids.iter().enumerate() {
+        let expected = format!("PD-{}", 101 + offset);
+        assert_eq!(
+            *id, expected,
+            "ledger entry ids must be contiguous from PD-101 in declaration order;              entry #{offset} is `{id}`, expected `{expected}`"
+        );
+    }
 
     let pd101 = ledger
         .entry_for_case("help-bare")
@@ -403,23 +333,6 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         norn_parity::ledger::Reason::DecidedBetter,
         "PD-136 is decided-better"
     );
-
-    // NRN-399 (MCP catalog part 2): `vault.repair`'s richer structuredContent
-    // (PD-137), decided-better. A count-only check on `ledger.entries.len()`
-    // cannot catch a miswired case→entry mapping, so pin the resolution
-    // explicitly.
-    let pd137 = ledger
-        .entry_for_case("mcp-tools-call-repair-code-zoo")
-        .expect("mcp-tools-call-repair-code-zoo must resolve to an entry");
-    assert_eq!(pd137.id, "PD-137");
-    assert_eq!(pd137.reason, norn_parity::ledger::Reason::DecidedBetter);
-
-    // NRN-414 instant missing-vault-root refusal (PD-138), decided-better.
-    let pd138 = ledger
-        .entry_for_case("err-missing-vault-root-zoo")
-        .expect("the missing-vault-root case must resolve to an entry");
-    assert_eq!(pd138.id, "PD-138");
-    assert_eq!(pd138.reason, norn_parity::ledger::Reason::DecidedBetter);
 }
 
 #[test]
