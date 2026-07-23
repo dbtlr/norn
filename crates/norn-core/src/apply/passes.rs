@@ -709,10 +709,19 @@ pub(crate) fn run_apply_passes(
     changes_by_path(plan)?;
 
     // NRN-145 containment gate: every op target must resolve inside the vault.
-    let canonical_root = cwd
-        .as_std_path()
-        .canonicalize()
-        .with_context(|| format!("cannot canonicalize vault root {cwd}"))?;
+    // A canonicalize failure means the vault root is missing/unreadable — a USER
+    // fault (NRN-414), not a norn bug: code it `vault-root-unreadable` so the
+    // plan-level refusal names the root instead of flattening to `internal-error`.
+    let canonical_root = match cwd.as_std_path().canonicalize() {
+        Ok(root) => root,
+        Err(e) => {
+            return Err(crate::standards::apply::ApplyError::VaultRootUnreadable {
+                path: cwd.clone(),
+                detail: e.to_string(),
+            }
+            .into());
+        }
+    };
     for change in &plan.changes {
         ensure_within_vault(cwd, &canonical_root, &change.path)?;
         if let Some(dest) = &change.destination {

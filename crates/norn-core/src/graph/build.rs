@@ -38,11 +38,8 @@ pub fn build_index_with_options(
     options: &IndexOptions,
 ) -> Result<GraphIndex, IndexError> {
     let root = root.as_ref().to_path_buf();
-    if !root.exists() {
-        return Err(IndexError::MissingRoot(root));
-    }
-    if !root.is_dir() {
-        return Err(IndexError::RootNotDirectory(root));
+    if let Some(err) = vault_root_error(&root) {
+        return Err(err);
     }
 
     let mut files = Vec::new();
@@ -71,6 +68,23 @@ pub fn build_index_with_options(
         ignored_files,
         documents,
     })
+}
+
+/// The pre-walk vault-root check the graph build enforces before it walks a
+/// single entry: `Some(err)` if the root is absent or is not a directory, else
+/// `None`. Extracted so a caller that must CLASSIFY this fault without paying
+/// for a full build — the owner warm-up's user-vs-internal split (NRN-414) —
+/// shares the exact predicate and the exact message
+/// ([`IndexError::MissingRoot`] / [`IndexError::RootNotDirectory`]) the builder
+/// itself raises, rather than duplicating either.
+pub fn vault_root_error(root: &Utf8Path) -> Option<IndexError> {
+    if !root.exists() {
+        Some(IndexError::MissingRoot(root.to_path_buf()))
+    } else if !root.is_dir() {
+        Some(IndexError::RootNotDirectory(root.to_path_buf()))
+    } else {
+        None
+    }
 }
 
 // Test-only, PER-THREAD tally of documents parsed from disk on the current

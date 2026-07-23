@@ -30,6 +30,15 @@ pub enum ApplyError {
     #[error("repair plan vault root does not match effective cwd: plan {plan}, cwd {cwd}")]
     VaultRootMismatch { plan: Utf8PathBuf, cwd: Utf8PathBuf },
 
+    // A missing or unreadable vault ROOT at apply time (NRN-414): the `-C`/
+    // NORN_ROOT root, or a registered root that vanished after resolution, does
+    // not exist or cannot be canonicalized. This is a USER fault (a bad root),
+    // not a norn bug — formerly a bare `anyhow` context that the apply envelope
+    // flattened to `internal-error`; typed here so the refusal carries the
+    // precise `vault-root-unreadable` code and names the offending root.
+    #[error("cannot access vault root {path}: {detail}")]
+    VaultRootUnreadable { path: Utf8PathBuf, detail: String },
+
     #[error("repair plan targets a document not in the index: {path}")]
     UnknownPath { path: Utf8PathBuf },
 
@@ -154,6 +163,7 @@ impl ApplyError {
                 "unsupported-schema-version"
             }
             ApplyError::VaultRootMismatch { .. } => "vault-root-mismatch",
+            ApplyError::VaultRootUnreadable { .. } => "vault-root-unreadable",
             ApplyError::UnknownPath { .. } => "unknown-path",
             ApplyError::StaleDocumentHash { .. } => "stale-document-hash",
             ApplyError::ConflictingFieldChange { .. } => "conflicting-field-change",
@@ -218,7 +228,10 @@ impl ApplyError {
             | ApplyError::CreateSerializeFailed { .. }
             | ApplyError::UnsupportedSchemaVersion { .. }
             | ApplyError::UnsupportedMigrationPlanSchemaVersion { .. }
-            | ApplyError::VaultRootMismatch { .. } => None,
+            | ApplyError::VaultRootMismatch { .. }
+            // The vault ROOT is an absolute path, not a vault-relative doc path,
+            // so it rides the message (like `vault-root-mismatch`), not `path`.
+            | ApplyError::VaultRootUnreadable { .. } => None,
         }
     }
 
@@ -238,6 +251,9 @@ impl ApplyError {
             ApplyError::UnsupportedSchemaVersion { .. }
             | ApplyError::UnsupportedMigrationPlanSchemaVersion { .. }
             | ApplyError::VaultRootMismatch { .. }
+            // A missing/unreadable root is caught by a pre-write barrier
+            // (executor canonicalize / containment gate), so nothing is written.
+            | ApplyError::VaultRootUnreadable { .. }
             | ApplyError::UnknownPath { .. }
             | ApplyError::StaleDocumentHash { .. }
             | ApplyError::ConflictingFieldChange { .. }

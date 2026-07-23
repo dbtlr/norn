@@ -45,7 +45,7 @@ pub use aliases::parse_aliases;
 pub(crate) use build::overlay_changed_paths;
 pub use build::{
     build_index_with_options, concise_diagnostics, graph_visible_markdown_under, has_errors,
-    is_ignored, is_markdown,
+    is_ignored, is_markdown, vault_root_error,
 };
 #[cfg(test)]
 pub(crate) use build::{docs_parsed_count, docs_parsed_reset};

@@ -85,9 +85,11 @@ struct OwnerState {
     /// only the cache knobs already folded into the slot.
     vault_config: Mutex<Option<Arc<VaultConfig>>>,
     /// A warm-up USER error: a present-but-invalid `.norn/config.yaml` (bad
-    /// YAML, unknown field, malformed rule). When set, every frame is answered
-    /// with [`OwnerFrame::Rejected`] carrying this message — the established
-    /// user-error path (NRN-360). Distinct from [`fatal`](Self::fatal)
+    /// YAML, unknown field, malformed rule; NRN-360), or a missing/non-directory
+    /// vault root (a bad `-C`/NORN_ROOT, or a registered root that vanished after
+    /// resolution; NRN-414). When set, every frame is answered with
+    /// [`OwnerFrame::Rejected`] carrying this message — the established
+    /// user-error path. Distinct from [`fatal`](Self::fatal)
     /// (exit-to-heal): a bad config is a user mistake, not a crashed owner, so
     /// the owner serves the error and exits CLEANLY (exit 0) instead of
     /// `go_fatal`. It also EAGER-REAPS: once a client has the rejection in hand,
@@ -304,30 +306,44 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
             // this the cache would be built under the empty default config and
             // every alias/ignore/index decision would be wrong (ADR 0017).
             //
-            // The two failure classes are kept distinct (NRN-360): a
-            // present-but-invalid config is a USER error (surfaced to the client
-            // as a Rejected, clean exit), while a cache-build fault is
-            // exit-to-heal (the db is disposable derivation).
+            // Two warm-up failure classes are kept distinct: a USER error (a
+            // present-but-invalid config, NRN-360, OR a missing/non-directory
+            // vault root, NRN-414) is surfaced to the client as a Rejected and
+            // exits cleanly, while a cache-build fault is exit-to-heal (the db is
+            // disposable derivation).
             enum WarmUp {
                 // Boxed as one payload: the built slot + parsed config dwarf the
                 // error string, and this enum is a one-shot warm-up return, so the
                 // indirection is free (and keeps the variants size-balanced).
                 Ready(Box<(VaultCacheSlot, Option<VaultConfig>)>),
-                /// A present `.norn/config.yaml` that could not be read/parsed/
-                /// validated — a user mistake, carried out as its message.
-                ConfigInvalid(String),
+                /// A warm-up USER error carried as its message: a present
+                /// `.norn/config.yaml` that could not be read/parsed/validated
+                /// (`invalid config <path>: <detail>`, NRN-360), or a
+                /// missing/non-directory vault root (`vault root does not exist:
+                /// <path>`, NRN-414). Both are user mistakes, not norn bugs.
+                UserError(String),
             }
             let build = tokio::task::spawn_blocking(move || -> anyhow::Result<WarmUp> {
-                // Config load is the user-error boundary: any failure reading or
-                // parsing the vault's own `.norn/config.yaml` is a user mistake,
-                // NOT a disposable-db fault. Its message (`invalid config
+                // Vault-root user-error boundary (NRN-414): a missing or
+                // non-directory vault root is a USER mistake (a bad -C/NORN_ROOT,
+                // or a registered root that vanished after the client resolved
+                // it), NOT a disposable-db fault. Classify it FIRST — before the
+                // config load or the cache build — with the graph builder's own
+                // message, so the graph-build failure never reaches the
+                // exit-to-heal (fatal) arm below.
+                if let Some(err) = norn_core::graph::vault_root_error(&vault_root) {
+                    return Ok(WarmUp::UserError(err.to_string()));
+                }
+                // Config load is the next user-error boundary: any failure reading
+                // or parsing the vault's own `.norn/config.yaml` is a user
+                // mistake, NOT a disposable-db fault. Its message (`invalid config
                 // <path>: <detail>`) is the user-facing config-error surface.
                 let cache_config = match crate::config_load::load_cache_config(
                     &vault_root,
                     config_path.as_deref(),
                 ) {
                     Ok(c) => c,
-                    Err(e) => return Ok(WarmUp::ConfigInvalid(e.to_string())),
+                    Err(e) => return Ok(WarmUp::UserError(e.to_string())),
                 };
                 // The full parsed config is retained for `describe`'s structure
                 // view; the cache load above folds out only the four cache knobs.
@@ -336,7 +352,7 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
                     config_path.as_deref(),
                 ) {
                     Ok(c) => c,
-                    Err(e) => return Ok(WarmUp::ConfigInvalid(e.to_string())),
+                    Err(e) => return Ok(WarmUp::UserError(e.to_string())),
                 };
                 // Only a cache-build failure is exit-to-heal (the `?` below).
                 let slot = VaultCacheSlot::create(&db_path, &vault_root, cache_config)?;
@@ -351,14 +367,16 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
                         vault_config.map(Arc::new);
                     state.set_serving(ServingState::Ready);
                 }
-                // A present-but-invalid config is a USER error (NRN-360): store
-                // it so every frame is answered with Rejected, then exit CLEANLY
-                // (exit 0). NOT go_fatal — a bad config must not crash-loop the
-                // summon; the connecting client surfaces this as the config
-                // error (the `invalid config …` message), and the owner
-                // eager-reaps so a resummon re-reads a fixed config.
-                Ok(Ok(WarmUp::ConfigInvalid(message))) => {
-                    eprintln!("norn owner: warm-up rejected (invalid config): {message}");
+                // A warm-up USER error — a present-but-invalid config (NRN-360)
+                // or a missing/non-directory vault root (NRN-414) — stores its
+                // message so every frame is answered with Rejected, then exits
+                // CLEANLY (exit 0). NOT go_fatal — a user mistake must not
+                // crash-loop the summon; the connecting client surfaces the
+                // message (`invalid config …` / `vault root does not exist: …`),
+                // and the owner eager-reaps so a resummon re-reads a fixed config
+                // or a restored root.
+                Ok(Ok(WarmUp::UserError(message))) => {
+                    eprintln!("norn owner: warm-up rejected (user error): {message}");
                     state.set_warmup_error(message);
                 }
                 // A cache error during warm-up is exit-to-heal (ADR 0017): the
@@ -544,11 +562,13 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
 /// snapshot-then-dispatch split would NOT be caught by CI — it would resurface
 /// as the rare 30s-TTL lingering-owner flake this fix closed.
 async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> (OwnerFrame, bool) {
-    // A warm-up that failed on an invalid config answers EVERY frame with the
-    // config error as a Rejected — the user-error path (NRN-360). The owner is
-    // healthy (not fatal); it simply cannot serve a vault whose `.norn/config.yaml`
-    // it could not parse. The client renders this as the config error;
-    // `handle_connection` then eager-reaps so a resummon re-reads the config.
+    // A warm-up that failed on a USER error answers EVERY frame with that error
+    // as a Rejected — the user-error path (an invalid config, NRN-360, or a
+    // missing/non-directory vault root, NRN-414). The owner is healthy (not
+    // fatal); it simply cannot serve a vault whose `.norn/config.yaml` it could
+    // not parse, or whose root does not exist. The client renders the message;
+    // `handle_connection` then eager-reaps so a resummon re-reads a fixed config
+    // or a restored root.
     if let Some(message) = state.warmup_error() {
         return (
             OwnerFrame::Rejected {
