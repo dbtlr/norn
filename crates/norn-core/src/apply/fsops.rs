@@ -152,9 +152,11 @@ pub fn apply_move(cwd: &Utf8Path, change: &ApplyOp) -> Result<MoveResult, ApplyE
             // Best-effort atomicity: remove destination, then attempt rename.
             // If rename fails after this, destination is gone with no rollback.
             // Future improvement: snapshot-and-restore for true atomicity.
-            fs::remove_file(dest_abs.as_std_path()).map_err(|e| ApplyError::CannotMinimalEdit {
-                path: dest_rel.clone(),
-                reason: format!("force-remove destination failed: {e}"),
+            fs::remove_file(dest_abs.as_std_path()).map_err(|e| {
+                ApplyError::FilesystemOpFailed {
+                    path: dest_rel.clone(),
+                    reason: format!("force-remove destination failed: {e}"),
+                }
             })?;
         } else {
             return Err(ApplyError::MoveDestinationExists {
@@ -163,7 +165,7 @@ pub fn apply_move(cwd: &Utf8Path, change: &ApplyOp) -> Result<MoveResult, ApplyE
         }
     }
     if let Some(parent) = dest_abs.parent() {
-        fs::create_dir_all(parent.as_std_path()).map_err(|e| ApplyError::CannotMinimalEdit {
+        fs::create_dir_all(parent.as_std_path()).map_err(|e| ApplyError::FilesystemOpFailed {
             path: dest_rel.clone(),
             reason: format!("create parent dir failed: {e}"),
         })?;
@@ -177,13 +179,13 @@ pub fn apply_move(cwd: &Utf8Path, change: &ApplyOp) -> Result<MoveResult, ApplyE
         Err(_) => {
             // Cross-device fallback
             fs::copy(source_abs.as_std_path(), dest_abs.as_std_path()).map_err(|e| {
-                ApplyError::CannotMinimalEdit {
+                ApplyError::FilesystemOpFailed {
                     path: dest_rel.clone(),
                     reason: format!("copy failed: {e}"),
                 }
             })?;
             fs::remove_file(source_abs.as_std_path()).map_err(|e| {
-                ApplyError::CannotMinimalEdit {
+                ApplyError::FilesystemOpFailed {
                     path: source_rel.clone(),
                     reason: format!("remove source after copy failed: {e}"),
                 }
@@ -213,7 +215,7 @@ pub fn apply_delete(cwd: &Utf8Path, change: &ApplyOp) -> Result<DeleteResult, Ap
         });
     }
 
-    fs::remove_file(source_abs.as_std_path()).map_err(|e| ApplyError::CannotMinimalEdit {
+    fs::remove_file(source_abs.as_std_path()).map_err(|e| ApplyError::FilesystemOpFailed {
         path: source_rel.clone(),
         reason: format!("delete failed: {e}"),
     })?;

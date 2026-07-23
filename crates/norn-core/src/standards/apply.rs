@@ -115,6 +115,14 @@ pub enum ApplyError {
     #[error("delete source is a symlink, not a regular file: {path}")]
     DeleteSourceIsSymlink { path: Utf8PathBuf },
 
+    // A real filesystem I/O failure while relocating or removing a whole
+    // document (rename/copy/remove/mkdir under `apply::fsops`), distinct from
+    // `cannot-minimal-edit`, which is reserved for a frontmatter/body content
+    // transform that could not be applied byte-minimally (docs/errors.md). The
+    // OS error text rides in `reason`.
+    #[error("filesystem operation failed for {path}: {reason}")]
+    FilesystemOpFailed { path: Utf8PathBuf, reason: String },
+
     #[error("repair plan edits {path} after an earlier {earlier_op} of the same path (change '{earlier_change_id}'); a content op cannot follow a delete/move of its target in the same plan — reorder the edit before the {earlier_op}")]
     ContentOpAfterVacate {
         path: Utf8PathBuf,
@@ -175,6 +183,7 @@ impl ApplyError {
             ApplyError::UnsupportedOperation { .. } => "unsupported-operation",
             ApplyError::UnrepresentableRewriteTarget { .. } => "unrepresentable-rewrite-target",
             ApplyError::CannotMinimalEdit { .. } => "cannot-minimal-edit",
+            ApplyError::FilesystemOpFailed { .. } => "filesystem-op-failed",
             ApplyError::FrontmatterParseFailed { .. } => "frontmatter-parse-failed",
             ApplyError::PostImageVerificationFailed { .. } => "post-image-verification-failed",
             ApplyError::ConcurrentModification { .. } => "concurrent-modification",
@@ -209,6 +218,7 @@ impl ApplyError {
             | ApplyError::UnsupportedOperation { path, .. }
             | ApplyError::UnrepresentableRewriteTarget { path, .. }
             | ApplyError::CannotMinimalEdit { path, .. }
+            | ApplyError::FilesystemOpFailed { path, .. }
             | ApplyError::FrontmatterParseFailed { path, .. }
             | ApplyError::PostImageVerificationFailed { path, .. }
             | ApplyError::ConcurrentModification { path }
@@ -286,7 +296,10 @@ impl ApplyError {
             | ApplyError::CreateDestinationExists { .. }
             | ApplyError::CreateParentMissing { .. }
             // A runtime drift caught mid-apply, not a static plan precondition.
-            | ApplyError::ConcurrentModification { .. } => false,
+            | ApplyError::ConcurrentModification { .. }
+            // A real filesystem I/O failure DURING the write pass (rename/copy/
+            // remove/mkdir) — a `failed` outcome, never a clean pre-write refusal.
+            | ApplyError::FilesystemOpFailed { .. } => false,
         }
     }
 }
@@ -2943,6 +2956,22 @@ mod tests {
             LinkSkipReason::WouldCorruptWikilink.code(),
             "would-corrupt-wikilink"
         );
+    }
+
+    #[test]
+    fn filesystem_op_failed_has_its_own_code_distinct_from_cannot_minimal_edit() {
+        // NRN-402/NRN-387: a real move/delete I/O failure is `filesystem-op-failed`,
+        // NOT `cannot-minimal-edit` (which is reserved for a content-transform
+        // fault). It is a runtime `failed` outcome, never a pre-write precondition,
+        // and it carries the target path.
+        let err = ApplyError::FilesystemOpFailed {
+            path: Utf8PathBuf::from("notes/a.md"),
+            reason: "delete failed: permission denied".into(),
+        };
+        assert_eq!(err.code(), "filesystem-op-failed");
+        assert_ne!(err.code(), "cannot-minimal-edit");
+        assert_eq!(err.path().map(|p| p.as_str()), Some("notes/a.md"));
+        assert!(!err.is_precondition());
     }
 
     #[test]

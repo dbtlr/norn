@@ -71,6 +71,8 @@ pub(crate) fn expand(op: &MigrationOp, index: &GraphIndex) -> Result<Vec<ApplyOp
                 src: f.src,
                 dst: f.dst,
                 parents: f.parents,
+                force: f.force,
+                no_link_rewrite: f.no_link_rewrite,
             },
             index,
         ),

@@ -10,7 +10,7 @@
 use super::{owner_index_options, MutationExecution};
 use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::domain::GraphIndex;
-use crate::target::{backlinks, resolve_target_path};
+use crate::target::{backlinks, resolve_target, TargetResolution};
 use camino::Utf8PathBuf;
 use norn_wire::{ApplyError, ApplyOutcome, ApplyReport};
 use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
@@ -137,45 +137,47 @@ fn preflight(
     index: &GraphIndex,
     params: &norn_wire::DeleteParams,
 ) -> Result<(Utf8PathBuf, Option<Utf8PathBuf>), DeleteRefusal> {
-    let doc_rel = resolve_target_path(index, &params.target).map_err(|e| {
-        if e.to_string().contains("ambiguous") {
-            DeleteRefusal {
+    let doc_rel = match resolve_target(index, &params.target) {
+        TargetResolution::Resolved(path) => path,
+        TargetResolution::NotFound => {
+            return Err(DeleteRefusal {
+                code: "target-not-found",
+                message: format!("document does not exist: {}", params.target),
+            });
+        }
+        TargetResolution::Ambiguous(candidates) => {
+            return Err(DeleteRefusal {
                 code: "target-ambiguous",
                 message: format!(
                     "document resolves ambiguously by stem: {} → {:?}",
-                    params.target,
-                    Vec::<Utf8PathBuf>::new()
+                    params.target, candidates
                 ),
-            }
-        } else {
-            DeleteRefusal {
-                code: "target-not-found",
-                message: format!("document does not exist: {}", params.target),
-            }
+            });
         }
-    })?;
+    };
 
     let incoming = backlinks(index, &doc_rel);
 
     let rewrite_to_rel = match &params.rewrite_to {
         Some(alt) => {
-            let alt_rel = resolve_target_path(index, alt).map_err(|e| {
-                if e.to_string().contains("ambiguous") {
-                    DeleteRefusal {
+            let alt_rel = match resolve_target(index, alt) {
+                TargetResolution::Resolved(path) => path,
+                TargetResolution::NotFound => {
+                    return Err(DeleteRefusal {
+                        code: "rewrite-to-not-found",
+                        message: format!("rewrite-to target does not exist: {alt}"),
+                    });
+                }
+                TargetResolution::Ambiguous(candidates) => {
+                    return Err(DeleteRefusal {
                         code: "rewrite-to-ambiguous",
                         message: format!(
                             "rewrite-to target resolves ambiguously by stem: {} → {:?}",
-                            alt,
-                            Vec::<Utf8PathBuf>::new()
+                            alt, candidates
                         ),
-                    }
-                } else {
-                    DeleteRefusal {
-                        code: "rewrite-to-not-found",
-                        message: format!("rewrite-to target does not exist: {alt}"),
-                    }
+                    });
                 }
-            })?;
+            };
             if alt_rel == doc_rel {
                 return Err(DeleteRefusal {
                     code: "rewrite-to-self",

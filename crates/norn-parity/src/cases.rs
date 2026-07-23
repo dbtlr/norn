@@ -1139,6 +1139,62 @@ const READ_CASES: &[Case] = &[
         normalize: NO_NORM,
         plan: None,
     },
+    Case {
+        // NRN-44 (PD-140): the `--col` "not present in any matching document"
+        // warning is guarded to the FULL, non-empty result set — the same guard
+        // `--sort` already carries. A `--limit 1` truncated page returns ONE doc
+        // that lacks `nosuchfield`, but the field could live on any of the docs
+        // beyond the page boundary, so the rewrite SUPPRESSES the warning; the
+        // oracle emits it (the pre-fix false positive). Identical stdout (the
+        // one returned doc's projection) and exit 0 on both — the sole divergence
+        // is the stderr warning. Gated by PD-140.
+        id: "read-find-col-truncated-page-suppressed-zoo",
+        argv: &[
+            "find",
+            "--all",
+            "--col",
+            "nosuchfield",
+            "--limit",
+            "1",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // NRN-44 (PD-140): the zero-match arm of the same guard. A predicate that
+        // matches no document makes every `--col` field trivially absent, which
+        // is redundant with the `total: 0` signal rather than informative about
+        // the field. The rewrite suppresses the warning; the oracle emits it.
+        // Identical empty-result stdout and exit 0 on both. Gated by PD-140.
+        id: "read-find-col-zero-match-suppressed-zoo",
+        argv: &[
+            "find",
+            "--eq",
+            "type:zzz-nonexistent",
+            "--col",
+            "nosuchfield",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
 ];
 
 /// describe ports for real (NRN-347): the structure view (folders + declared
@@ -1914,11 +1970,16 @@ const WIKILINK_EDGE_1: Fixture = Fixture {
     seed: 1,
 };
 
-/// The trace-id normalization every CONFIRMED-apply case appends: the pinned
-/// oracle mints a random `trace:`/`trace_id` on apply, the rewrite emits an empty
-/// one by contract, so without this an otherwise byte-equal apply would diverge
-/// on the id alone (see [`Normalization::TraceId`]). Only on the applies that
-/// MATCH — a diverged/refused/forecast case carries no id to normalize.
+/// The trace-id normalization every CONFIRMED-apply case appends: it MASKS the
+/// id text on both sides (the pinned oracle's random `trace:`/`trace_id`, and
+/// the rewrite's own — a real 32-hex `EventSink`-derived id on the four
+/// cascade verbs, empty-until-real on `set`/`new`/`edit` until NRN-400 wires
+/// their telemetry) while leaving the marker's PRESENCE pinned, so without
+/// this an otherwise byte-equal apply would diverge on the opaque id value
+/// alone (see [`Normalization::TraceId`]). Applied to every confirmed-apply
+/// case that renders the trace marker — including diverged applies, whose
+/// non-trace bytes are what the ledger entry gates; refusals and forecasts
+/// carry no id to normalize.
 const TRACE_NORM: &[Normalization] = &[Normalization::TraceId];
 
 /// A cascade-verb `--format json` forecast normalizes only the root-dependent
@@ -2260,7 +2321,9 @@ const MUTATE_CASES: &[Case] = &[
     // move: a confirmed single-file move with a backlink rewrite (records). The
     // `✓ moved … / ✓ rewrote 1 backlink across 1 file` summary is compared AND the
     // moved file + rewritten backlink are byte-compared via post-state. TRACE_NORM
-    // collapses the oracle's random applied `trace:` id to the rewrite's empty one.
+    // masks both sides' `trace:` id text — the oracle's random one and the
+    // rewrite's own real `EventSink`-derived id — so the match isn't sensitive
+    // to either opaque value.
     Case {
         id: "mutate-move-apply-cascade-zoo",
         argv: &["move", "cycle-b", "notes/moved-b.md", "--yes"],
@@ -2377,6 +2440,28 @@ const MUTATE_CASES: &[Case] = &[
         normalize: NO_NORM,
         plan: None,
     },
+    // delete: an ambiguous-stem refusal (PD-139/NRN-402). `duplicate` resolves to
+    // both `notes/duplicate.md` and `archive2/duplicate.md`, so both binaries
+    // refuse `target-ambiguous` (exit 2), write-free. The refusal message diverges
+    // on the candidate list: the oracle renders `→ []` (the candidates were
+    // dropped before the message was built), the rewrite the REAL sorted candidate
+    // paths `→ ["archive2/duplicate.md", "notes/duplicate.md"]`. Records format so
+    // the divergence is purely that list (the `error: <msg>` framing is identical
+    // on both); the json refusal envelope difference is PD-135's territory, kept
+    // out of this case. Gated by PD-139.
+    Case {
+        id: "mutate-delete-ambiguous-refusal-zoo",
+        argv: &["delete", "duplicate"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/duplicate.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
     // rewrite-wikilink: a confirmed vault-wide `[[cycle-b]]` → `[[cycle-c]]`
     // rewrite (records). The `rewrote [[…]] → [[…]] in N ops` breakdown is
     // compared and the rewritten backlink is byte-compared via post-state.
@@ -2398,9 +2483,10 @@ const MUTATE_CASES: &[Case] = &[
     // Confirmed applies against the wikilink-edge fixture. The oracle shares all
     // three rewriter bugs, so on these backlink shapes it writes DIFFERENT bytes
     // than the fix — the post-state tree diverges (stdout matches: the plan/report
-    // is computed the same on both sides). Each exits 0, so TRACE_NORM collapses
-    // the oracle's random applied `trace:` id to the rewrite's empty one, isolating
-    // the divergence to the corrected content. Grouped by mechanism: PD-116
+    // is computed the same on both sides). Each exits 0, so TRACE_NORM masks
+    // both sides' `trace:` id text (the oracle's random one and the rewrite's
+    // own real `EventSink`-derived id), isolating the divergence to the
+    // corrected content. Grouped by mechanism: PD-116
     // (embed marker), PD-117 (code opacity, both engines), PD-118 (caret target).
     //
     // NRN-431 — move cascade drops an embed's `!` and `|alias`. The oracle rewrites
@@ -2904,8 +2990,8 @@ const APPLY_CASES: &[Case] = &[
     // separate `rewrite_link` op authored. Post-state byte-compares the moved
     // file AND the rewritten backlink, proving the raw plan bytes — not just a
     // CLI-synthesized one — apply identically on both binaries. TRACE_NORM
-    // collapses the oracle's random applied `trace:` id to the rewrite's empty
-    // one.
+    // masks both sides' `trace:` id text — the oracle's random one and the
+    // rewrite's own real `EventSink`-derived id.
     Case {
         id: "apply-authored-move-plan-zoo",
         argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes"],

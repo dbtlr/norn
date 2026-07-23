@@ -12,10 +12,11 @@
 use super::{owner_index_options, MutationExecution};
 use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::domain::GraphIndex;
+use crate::target::{resolve_target, TargetResolution};
 use camino::Utf8PathBuf;
 use norn_wire::{ApplyError, ApplyOutcome, ApplyReport};
 use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 /// Execute a `move`: forecast (`confirm == false`) or apply (`confirm == true`).
 pub fn execute(
@@ -40,11 +41,7 @@ pub fn execute(
             kind: "move_folder".into(),
             id: None,
             requires: Vec::new(),
-            fields: json!({
-                "src": params.from,
-                "dst": params.to,
-                "parents": params.parents,
-            }),
+            fields: folder_move_fields(params),
             footnote: None,
         };
         one_op_plan(vault_root.to_string(), op)
@@ -123,6 +120,26 @@ fn single_move_fields(
     Value::Object(fields)
 }
 
+/// Build the `move_folder` op fields. `src` / `dst` / `parents` are ALWAYS
+/// present; `force` and `no_link_rewrite` are added ONLY when set — mirroring
+/// `single_move_fields` so a flagless folder move hashes identically to before
+/// the flags were threaded (ADR 0024). The planner reads both off the decoded
+/// [`MoveFolderFields`](norn_wire::MoveFolderFields) and propagates them to every
+/// expanded per-document op.
+fn folder_move_fields(params: &norn_wire::MoveParams) -> Value {
+    let mut fields = serde_json::Map::new();
+    fields.insert("src".into(), Value::String(params.from.clone()));
+    fields.insert("dst".into(), Value::String(params.to.clone()));
+    fields.insert("parents".into(), Value::Bool(params.parents));
+    if params.force {
+        fields.insert("force".into(), Value::Bool(true));
+    }
+    if params.no_link_rewrite {
+        fields.insert("no_link_rewrite".into(), Value::Bool(true));
+    }
+    Value::Object(fields)
+}
+
 /// A coded single-file move preflight refusal — the `MovePreflightError`
 /// codes + Display prose are the wire contract.
 struct MoveRefusal {
@@ -139,7 +156,26 @@ fn preflight_single(
     vault_root: &camino::Utf8Path,
     params: &norn_wire::MoveParams,
 ) -> Result<Utf8PathBuf, MoveRefusal> {
-    let src_rel = resolve_src(index, &params.from)?;
+    let src_rel = match resolve_target(index, &params.from) {
+        TargetResolution::Resolved(path) => path,
+        TargetResolution::NotFound => {
+            return Err(MoveRefusal {
+                code: "target-not-found",
+                message: format!("source does not exist: {}", params.from),
+                path: None,
+            });
+        }
+        TargetResolution::Ambiguous(candidates) => {
+            return Err(MoveRefusal {
+                code: "target-ambiguous",
+                message: format!(
+                    "source resolves ambiguously by stem: {} → {candidates:?}",
+                    params.from
+                ),
+                path: None,
+            });
+        }
+    };
     let dst_rel = Utf8PathBuf::from(&params.to);
 
     // Same-path (no-op) BEFORE the existence check so `--force` cannot silence it.
@@ -192,33 +228,6 @@ fn preflight_single(
     }
 
     Ok(src_rel)
-}
-
-/// Resolve a source specifier to a vault-relative path: exact path first, then a
-/// case-insensitive stem match.
-fn resolve_src(index: &GraphIndex, src: &str) -> Result<Utf8PathBuf, MoveRefusal> {
-    if let Some(doc) = index.documents.iter().find(|d| d.path == src) {
-        return Ok(doc.path.clone());
-    }
-    let candidates: Vec<Utf8PathBuf> = index
-        .documents
-        .iter()
-        .filter(|d| d.stem.eq_ignore_ascii_case(src))
-        .map(|d| d.path.clone())
-        .collect();
-    match candidates.as_slice() {
-        [single] => Ok(single.clone()),
-        [] => Err(MoveRefusal {
-            code: "target-not-found",
-            message: format!("source does not exist: {src}"),
-            path: None,
-        }),
-        _ => Err(MoveRefusal {
-            code: "target-ambiguous",
-            message: format!("source resolves ambiguously by stem: {src} → {candidates:?}"),
-            path: None,
-        }),
-    }
 }
 
 fn one_op_plan(vault_root: String, op: MigrationOp) -> MigrationPlan {

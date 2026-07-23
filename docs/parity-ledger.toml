@@ -800,3 +800,42 @@ old = "the oracle grounds the `-C` path and fails at the low-level canonicalize 
 new = "the rewrite's client-side precheck refuses instantly before summoning any owner: `norn: vault root does not exist: <path> (from -C)` on stderr — naming the actual path and the via — exit 1, no owner spawned and no socket dialed"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-402 (ADR 0018, discovered-inconsistency): the `delete` ambiguous-stem
+# refusal message renders the REAL candidate paths. The oracle resolves the
+# stem, detects the ambiguity, then renders `→ []` — the candidate set was
+# dropped before the message was built, so its own "ambiguous" claim shows no
+# candidates (a self-contradiction that tells the caller nothing about WHICH
+# documents collide). The rewrite carries the resolved candidates through a
+# structured `TargetResolution::Ambiguous` and renders the sorted real paths, so
+# a caller can disambiguate without a second `find`. Records surface only (the
+# `error: <msg>` framing is identical on both); the json refusal ENVELOPE
+# difference is PD-135's territory. See `crates/norn-core/src/target.rs`
+# (`resolve_target`) and `crates/norn-core/src/mutate/delete.rs`.
+[[entry]]
+id = "PD-139"
+surface = "delete ambiguous-stem refusal (records) — real candidate paths in the message"
+cases = ["mutate-delete-ambiguous-refusal-zoo"]
+old = "an ambiguous `delete <stem>` refuses `target-ambiguous` with `document resolves ambiguously by stem: <stem> → []` — the candidate set is dropped before the message is built, so the message names none of the colliding documents"
+new = "the same refusal renders the REAL sorted candidate paths (`… → [\"archive2/duplicate.md\", \"notes/duplicate.md\"]`), threaded through a structured `TargetResolution::Ambiguous`, so a caller sees exactly which documents collide; code / exit / write-free behavior unchanged"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-402 / NRN-44 (ADR 0018, discovered-inconsistency): the `--col` "not present
+# in any matching document" warning is guarded to the FULL, non-empty result set
+# — the same guard `--sort` already carries. The oracle emits the warning even on
+# a `--limit`-truncated page (where a field real but beyond the page boundary
+# false-positives) and on a zero-match result (where every field is trivially
+# absent, redundant with the `total: 0` signal). The rewrite suppresses it in
+# both cases; a genuinely-absent field on a full, non-empty set still warns.
+# stdout / exit unchanged, only the stderr warning diverges. See
+# `crates/norn-cli/src/display/render/find.rs` (`warn_unknown_cols_find`) and
+# `get.rs` (`warn_unknown_cols_get`, empty-guard only — `get` has no paging).
+[[entry]]
+id = "PD-140"
+surface = "find/get --col unknown-field warning (guarded to a full, non-empty result set)"
+cases = ["read-find-col-truncated-page-suppressed-zoo", "read-find-col-zero-match-suppressed-zoo"]
+old = "the `--col field ... not present in any matching document` warning fires even on a `--limit`-truncated page (a field present only beyond the page boundary false-positives) and on a zero-match result (every field is trivially absent) — the same false positive `--sort` was already fixed against"
+new = "the bare-field warning returns early when the page is truncated (`returned < total`) or the match set is empty, so it fires only when every matching document was actually inspected and genuinely lacks the field; the unknown-facet check stays unconditional"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

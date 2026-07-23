@@ -177,6 +177,13 @@ fn render_get_records(
 
 /// Warn for `--col` tokens that won't resolve, on the closed `warning:` prefix
 /// (the same annotation vocabulary `find` and every other verb speaks).
+///
+/// The bare-field "not present in document" check is guarded to a non-empty
+/// record set, matching the sibling `warn_unknown_sort_get` zero-match skip
+/// (NRN-44): every field is trivially absent from an empty set, so the warning
+/// would be noise about the empty result rather than the field. `get` resolves
+/// explicit targets (no `--limit` paging), so there is no truncation guard —
+/// only the empty one. The unknown-FACET check stays unconditional.
 fn warn_unknown_cols_get(
     cols: &[String],
     report: &GetReport,
@@ -187,6 +194,9 @@ fn warn_unknown_cols_get(
         if !KNOWN_FACETS.contains(&facet.as_str()) {
             conv.warning(&unknown_facet_message(facet))?;
         }
+    }
+    if report.records.is_empty() {
+        return Ok(());
     }
     for field in &fields {
         let present_in_any = report.records.iter().any(|r| {
@@ -450,5 +460,39 @@ mod tests {
         let mut conv = Conversation::new(&mut err);
         warn_unknown_sort_get(&report, Some("title"), &mut conv).unwrap();
         assert!(err.is_empty());
+    }
+
+    #[test]
+    fn warn_unknown_cols_get_warns_for_an_absent_field_on_a_resolved_record() {
+        let report = GetReport {
+            records: vec![get_record("a.md", json!({"title": "A"}))],
+            notes: vec![],
+            markdown_content: None,
+        };
+        let mut err = Vec::new();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_cols_get(&["priorty".to_string()], &report, &mut conv).unwrap();
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "warning: --col field 'priorty' not present in document (bare names select frontmatter fields; use '.priorty' for a structural facet)\n"
+        );
+    }
+
+    #[test]
+    fn warn_unknown_cols_get_skips_a_zero_record_set() {
+        // NRN-44: no resolved records means every field is trivially absent —
+        // the warning would be noise about the empty result, not the field.
+        let report = GetReport {
+            records: vec![],
+            notes: vec![],
+            markdown_content: None,
+        };
+        let mut err = Vec::new();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_cols_get(&["priorty".to_string()], &report, &mut conv).unwrap();
+        assert!(
+            err.is_empty(),
+            "an empty record set must not warn on a --col field: {err:?}"
+        );
     }
 }

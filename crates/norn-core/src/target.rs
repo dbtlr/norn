@@ -19,28 +19,55 @@ pub fn backlinks<'a>(index: &'a GraphIndex, target_path: &Utf8PathBuf) -> Vec<&'
         .collect()
 }
 
-pub fn resolve_target_path(index: &GraphIndex, target: &str) -> Result<Utf8PathBuf> {
+/// The outcome of resolving a user-supplied target to a vault path: a unique
+/// match, no match, or an ambiguous stem carrying the real candidate paths. The
+/// `Ambiguous` arm keeps the candidates structured so a caller can name them in
+/// a refusal message rather than reconstructing (or dropping) the set — see
+/// [`resolve_target_path`] for the string-shaped wrapper the read verbs use.
+pub enum TargetResolution {
+    Resolved(Utf8PathBuf),
+    NotFound,
+    Ambiguous(Vec<Utf8PathBuf>),
+}
+
+/// Resolve a target (exact path first, then a case-insensitive stem match) to a
+/// structured outcome. The mutation refusal paths (`delete`) branch on this to
+/// surface the real ambiguous candidates; [`resolve_target_path`] wraps it for
+/// callers that only need the `anyhow` string error.
+pub fn resolve_target(index: &GraphIndex, target: &str) -> TargetResolution {
     if let Some(document) = index
         .documents
         .iter()
         .find(|document| document.path == target)
     {
-        return Ok(document.path.clone());
+        return TargetResolution::Resolved(document.path.clone());
     }
 
-    let matches = index
+    let mut matches = index
         .documents
         .iter()
         .filter(|document| document.stem.eq_ignore_ascii_case(target))
         .map(|document| document.path.clone())
         .collect::<Vec<_>>();
+    // Lexical path order is the refusal contract; sorting here keeps it
+    // independent of the index's own document ordering.
+    matches.sort();
 
     match matches.as_slice() {
-        [path] => Ok(path.clone()),
-        [] => bail!("no document matched path or stem: {target}"),
-        many => bail!(
+        [path] => TargetResolution::Resolved(path.clone()),
+        [] => TargetResolution::NotFound,
+        _ => TargetResolution::Ambiguous(matches),
+    }
+}
+
+pub fn resolve_target_path(index: &GraphIndex, target: &str) -> Result<Utf8PathBuf> {
+    match resolve_target(index, target) {
+        TargetResolution::Resolved(path) => Ok(path),
+        TargetResolution::NotFound => bail!("no document matched path or stem: {target}"),
+        TargetResolution::Ambiguous(candidates) => bail!(
             "ambiguous document stem: {target}; candidates: {}",
-            many.iter()
+            candidates
+                .iter()
                 .map(|path| path.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -119,6 +146,29 @@ mod tests {
         let idx = index(vec![doc("notes/a.md", "a")]);
         let err = resolve_target_path(&idx, "missing").unwrap_err();
         assert!(err.to_string().contains("no document matched"), "{err}");
+    }
+
+    #[test]
+    fn resolve_target_returns_structured_candidates_for_ambiguous_stem() {
+        let idx = index(vec![doc("notes/a.md", "a"), doc("tasks/a.md", "a")]);
+        match resolve_target(&idx, "a") {
+            TargetResolution::Ambiguous(candidates) => assert_eq!(
+                candidates,
+                vec![
+                    Utf8PathBuf::from("notes/a.md"),
+                    Utf8PathBuf::from("tasks/a.md"),
+                ]
+            ),
+            _ => panic!("expected Ambiguous with real candidates, got a different arm"),
+        }
+        assert!(matches!(
+            resolve_target(&idx, "missing"),
+            TargetResolution::NotFound
+        ));
+        assert!(matches!(
+            resolve_target(&idx, "notes/a.md"),
+            TargetResolution::Resolved(_)
+        ));
     }
 
     #[test]

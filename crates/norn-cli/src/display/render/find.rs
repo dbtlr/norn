@@ -131,6 +131,16 @@ fn render_find_records(sink: &mut Sink<'_>, view: &FindView) -> io::Result<()> {
 
 /// Warn for unresolved `--col` tokens: an unknown dot-facet, or a bare field
 /// absent from every match (`warning:` prefix).
+///
+/// The bare-field "not present in any matching document" check is guarded to the
+/// FULL, non-empty result set — the same guard `warn_unknown_sort_find` carries
+/// (NRN-44). A field real but living only beyond the `--limit` page boundary
+/// would otherwise false-positive on a truncated page (`returned < total`), and
+/// on a zero-match result every field is trivially absent, which is redundant
+/// with the `total: 0` signal rather than informative about the field. So the
+/// bare-field loop returns early whenever `report.truncated` or the match set is
+/// empty; the unknown-FACET check above is a static known-facets test and stays
+/// unconditional.
 fn warn_unknown_cols_find(
     report: &FindReport,
     cols: &[String],
@@ -141,6 +151,9 @@ fn warn_unknown_cols_find(
         if !KNOWN_FACETS.contains(&facet.as_str()) {
             conv.warning(&unknown_facet_message(facet))?;
         }
+    }
+    if report.documents.is_empty() || report.truncated {
+        return Ok(());
     }
     for field in &fields {
         let present_in_any = report.documents.iter().any(|d| {
@@ -439,6 +452,68 @@ mod tests {
         assert_eq!(
             String::from_utf8(err).unwrap(),
             "warning: --sort field `priorty` not present in any matching document\n"
+        );
+    }
+
+    // The `--col` bare-field warning carries the SAME truncation/empty guard as
+    // `--sort` (NRN-44): a field real but beyond the `--limit` page must not
+    // false-positive, and a zero-match set must stay silent, while an untruncated
+    // non-empty set with a genuinely absent field still warns.
+
+    #[test]
+    fn warn_unknown_cols_find_skips_a_truncated_page() {
+        let report = FindReport {
+            documents: vec![find_doc_with(json!({"title": "A"}))],
+            total: 12,
+            returned: 1,
+            starts_at: 1,
+            truncated: true,
+            has_diagnostic_errors: false,
+        };
+        let mut err = Vec::new();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_cols_find(&report, &["priorty".to_string()], &mut conv).unwrap();
+        assert!(
+            err.is_empty(),
+            "a truncated page must not warn on a --col field absent only from the page: {err:?}"
+        );
+    }
+
+    #[test]
+    fn warn_unknown_cols_find_skips_a_zero_match_result() {
+        let report = FindReport {
+            documents: vec![],
+            total: 0,
+            returned: 0,
+            starts_at: 0,
+            truncated: false,
+            has_diagnostic_errors: false,
+        };
+        let mut err = Vec::new();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_cols_find(&report, &["priorty".to_string()], &mut conv).unwrap();
+        assert!(
+            err.is_empty(),
+            "a zero-match result must not warn on a --col field: {err:?}"
+        );
+    }
+
+    #[test]
+    fn warn_unknown_cols_find_warns_when_untruncated_and_absent() {
+        let report = FindReport {
+            documents: vec![find_doc_with(json!({"title": "A"}))],
+            total: 1,
+            returned: 1,
+            starts_at: 1,
+            truncated: false,
+            has_diagnostic_errors: false,
+        };
+        let mut err = Vec::new();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_cols_find(&report, &["priorty".to_string()], &mut conv).unwrap();
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "warning: --col field `priorty` not present in any matching document\n"
         );
     }
 
