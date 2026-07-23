@@ -471,6 +471,24 @@ mod tests {
     }
 
     #[test]
+    fn from_anyhow_codes_vault_root_unreadable() {
+        // NRN-414: a missing/unreadable vault root at apply time carries the
+        // typed `vault-root-unreadable` code (naming the root in the message),
+        // never flattening to `internal-error`.
+        let err: anyhow::Error = crate::standards::apply::ApplyError::VaultRootUnreadable {
+            path: camino::Utf8PathBuf::from("/gone/vault"),
+            detail: "No such file or directory (os error 2)".into(),
+        }
+        .into();
+        let envelope = from_anyhow(&err);
+        assert_eq!(envelope.code, "vault-root-unreadable");
+        assert!(envelope.message.contains("/gone/vault"));
+        // The root is absolute, not a vault-relative doc path — it rides the
+        // message, not the envelope `path`.
+        assert!(envelope.path.is_none());
+    }
+
+    #[test]
     fn from_anyhow_falls_back_to_internal_error() {
         let err = anyhow::anyhow!("something unexpected");
         let envelope = from_anyhow(&err);

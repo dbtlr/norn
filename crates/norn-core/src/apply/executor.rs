@@ -122,15 +122,22 @@ pub fn apply_migration_plan(
         return refuse_plan_level(plan, ctx.dry_run, ctx.refuse_as_report, error);
     }
     let vault_root = Utf8PathBuf::from(&plan.vault_root);
-    // The index root is the vault actually being operated on, so it always
-    // exists; a canonicalize failure here is a genuine internal error. Like every
-    // pre-write barrier below, cross it through `refuse_plan_level` so the routed/
-    // MCP surface gets a coded, report-shaped refusal rather than a bare Err.
+    // Canonicalize the index root. A failure here means the vault root does not
+    // exist or cannot be read — a missing/unreadable `-C`/NORN_ROOT root, or a
+    // registered root that vanished after resolution. That is a USER fault
+    // (NRN-414), not a norn bug: code it `vault-root-unreadable` so the refusal
+    // is machine-branchable and names the root, instead of flattening to
+    // `internal-error`. Like every pre-write barrier below, cross it through
+    // `refuse_plan_level` so the routed/MCP surface gets a coded, report-shaped
+    // refusal rather than a bare Err.
     let canonical_index_root = match index.root.as_std_path().canonicalize() {
         Ok(root) => root,
         Err(e) => {
-            let error = anyhow::Error::new(e)
-                .context(format!("cannot canonicalize vault root {}", index.root));
+            let error =
+                anyhow::Error::from(crate::standards::apply::ApplyError::VaultRootUnreadable {
+                    path: index.root.clone(),
+                    detail: e.to_string(),
+                });
             return refuse_plan_level(plan, ctx.dry_run, ctx.refuse_as_report, error);
         }
     };
@@ -1369,6 +1376,56 @@ mod tests {
         assert_eq!(report.operations.len(), 1);
         assert_eq!(report.operations[0].kind, "move_document");
         // Dry-run: file unchanged
+        assert!(tmp.path().join("a.md").exists());
+        assert!(!tmp.path().join("renamed.md").exists());
+    }
+
+    #[test]
+    fn apply_against_a_vanished_root_refuses_vault_root_unreadable_not_internal_error() {
+        // NRN-414: the index root vanished after resolution (a bad -C/NORN_ROOT,
+        // or a TOCTOU delete between resolution and apply). The canonicalize
+        // barrier classifies it as a USER fault carrying `vault-root-unreadable`,
+        // NOT the bare-anyhow `internal-error` it used to flatten to — and the
+        // routed/MCP surface gets it as a coded, report-shaped refusal (nothing
+        // written) rather than a bare Err.
+        let (tmp, mut index) = synth_vault();
+        let vault_root = tmp.path().to_string_lossy().to_string();
+        // Point the index at a root that does not exist on any host.
+        index.root = camino::Utf8PathBuf::from(format!("{vault_root}/nrn414-vanished-root"));
+        let plan = MigrationPlan {
+            schema_version: 2,
+            vault_root,
+            generator: None,
+            generated_at: None,
+            preconditions: Vec::new(),
+            operations: vec![MigrationOp {
+                kind: "move_document".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({"src": "a.md", "dst": "renamed.md"}),
+                footnote: None,
+            }],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+        let ctx = ApplyContext {
+            dry_run: false,
+            parents: false,
+            verbose: false,
+            // The routed/MCP surface: refusals cross as a report, not a bare Err.
+            refuse_as_report: true,
+            owner_index_options: Default::default(),
+        };
+        let report = apply_migration_plan(&plan, &index, ctx, &mut test_sink()).unwrap();
+        assert_eq!(report.outcome, norn_wire::ApplyOutcome::Refused);
+        let failed = report
+            .operations
+            .iter()
+            .find(|op| op.status == norn_wire::OpStatus::Failed)
+            .expect("a vanished root must produce a failed op carrying the coded envelope");
+        let error = failed.error.as_ref().expect("the failed op carries a code");
+        assert_eq!(error.code, "vault-root-unreadable");
+        // Nothing was written: the original file is untouched.
         assert!(tmp.path().join("a.md").exists());
         assert!(!tmp.path().join("renamed.md").exists());
     }

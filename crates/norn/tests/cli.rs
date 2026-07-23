@@ -555,3 +555,67 @@ fn valid_dynamic_field_with_zero_matches_stays_empty_exit_zero() {
         "a known field must not be gated as unknown, got: {stderr:?}"
     );
 }
+
+/// NRN-414: a missing `-C` vault root is refused by the instant client-side
+/// precheck BEFORE any owner is summoned — no connect budget burned, no owner
+/// spawned. This pins the "no-summon" half of that contract end-to-end: not
+/// just the exit code/diagnostic (covered by the `norn-cli` `routed` unit
+/// tests and the `norn-parity` `err-missing-vault-root-zoo` case), but that
+/// summoning genuinely never happens. If an owner had been summoned, its
+/// control socket and per-owner db dir would land directly under
+/// `$XDG_RUNTIME_DIR/norn` (see `norn-owner`'s `vault_root_error_surface`
+/// test for that lifecycle) — that dir is created lazily at first summon, so
+/// its total absence here is the discriminator.
+#[cfg(unix)]
+#[test]
+fn missing_vault_root_precheck_refuses_with_no_owner_summoned() {
+    let runtime_dir = isolated_runtime_dir("nrn414-missing-root");
+    let cfg_home = tempfile::tempdir().unwrap();
+    let missing_root = runtime_dir.join("nrn414-does-not-exist");
+
+    let out = norn()
+        .arg("-C")
+        .arg(&missing_root)
+        .args(["find", "--all"])
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("NORN_CONFIG_DIR", cfg_home.path())
+        .output()
+        .unwrap();
+
+    let norn_runtime_subdir = runtime_dir.join("norn");
+    let leftover: Vec<_> = std::fs::read_dir(&norn_runtime_subdir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.file_name())
+                .collect()
+        })
+        .unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+
+    let stderr = stderr_of(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a missing -C root must exit 1; stderr was: {stderr:?}"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "stdout must stay byte-empty on the precheck refusal, got: {:?}",
+        stdout_of(&out)
+    );
+    assert!(
+        stderr.contains("norn: vault root does not exist"),
+        "expected the precheck's diagnostic, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("(from -C)"),
+        "expected the precheck to name the -C via, got: {stderr:?}"
+    );
+    // No-summon assertion: the owner runtime subdir (created lazily at first
+    // summon) must not exist at all — no control socket, no db dir, nothing.
+    assert!(
+        !norn_runtime_subdir.exists(),
+        "the precheck refusal must summon no owner, but found runtime artifacts: {leftover:?}"
+    );
+}

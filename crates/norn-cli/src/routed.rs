@@ -6,10 +6,11 @@
 //! only crate that spawns owners or dials sockets), and return a live
 //! [`OwnerSession`] the verb sends its `Params` to.
 
+use std::path::Path;
 use std::time::Duration;
 
 use norn_client::{
-    open, ClientError, ConfigHome, OwnerSession, Registry, ResolveInput, SummonConfig,
+    open, ClientError, ConfigHome, OwnerSession, Registry, ResolveInput, ResolvedVia, SummonConfig,
 };
 use norn_config::ConfigError;
 
@@ -47,6 +48,22 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
         .resolve(&input)
         .map_err(|e| config_error_diagnostic(&e))?;
 
+    // Vault-root precheck (NRN-414): the direct-path vias (`-C` and NORN_ROOT)
+    // name a root that never passes through the registry's live-directory gate
+    // (`ensure_live`), so a bad path would otherwise be discovered only when the
+    // summoned owner's warm-up fails — after the full connect budget, blaming the
+    // socket. Check existence here, instantly, BEFORE summoning: a missing or
+    // non-directory root is a clear USER error naming the actual path and how it
+    // was supplied, with no owner spawned and no socket dialed. The registry vias
+    // (name / binding / reverse-lookup) already fail loud via `ensure_live`
+    // (`StaleEntry`, which names the registered vault), so they are not rechecked
+    // here. Post-NRN-415 resolution canonicalizes an existing root and falls back
+    // to the grounded path for a missing one, so this composes cleanly: a
+    // fallback-path root that does not exist IS this user-error case.
+    if let Some(diagnostic) = vault_root_precheck(&resolved.root, &resolved.via) {
+        return Err(diagnostic);
+    }
+
     // A registered vault may carry a `[vaults.<name>].config` override; the
     // summoned owner warms under it (ADR 0017 resolver-derived config). An
     // unregistered cwd (the common ephemeral case) has no override — the owner
@@ -67,6 +84,39 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
         .wait_until_ready(MAX_WAIT)
         .map_err(|e| client_error_diagnostic(&e))?;
     Ok(session)
+}
+
+/// The instant, pre-summon vault-root check for the direct-path resolution vias
+/// (NRN-414). Returns `Some(diagnostic)` when a `-C` or NORN_ROOT root is
+/// missing or is not a directory — naming the actual path and how it was
+/// supplied — so the CLI refuses immediately instead of summoning an owner that
+/// would burn the connect budget and then blame the socket. Returns `None` for
+/// every registry via (their roots are gated by the resolver's `ensure_live`)
+/// and for any direct-path root that exists as a directory (the summon proceeds).
+///
+/// Fail-safe (NRN-414): ambiguity resolves toward the clear refusal — a root the
+/// process cannot confirm is a directory is treated as the user error, which is
+/// strictly better than failing open into the summon timeout.
+fn vault_root_precheck(root: &Path, via: &ResolvedVia) -> Option<Diagnostic> {
+    let source = match via {
+        ResolvedVia::ExplicitPath => "-C",
+        ResolvedVia::NornRootEnv => "NORN_ROOT",
+        // Registry vias are gated by the resolver's `ensure_live`; the
+        // unregistered-cwd root is the process cwd, which necessarily exists.
+        _ => return None,
+    };
+    let shown = root.display();
+    if !root.exists() {
+        Some(Diagnostic::new(format!(
+            "vault root does not exist: {shown} (from {source})"
+        )))
+    } else if !root.is_dir() {
+        Some(Diagnostic::new(format!(
+            "vault root is not a directory: {shown} (from {source})"
+        )))
+    } else {
+        None
+    }
 }
 
 /// Map a summoner [`ClientError`] onto a soft-landing [`Diagnostic`] (NRN-361).
@@ -175,11 +225,97 @@ mod tests {
     }
 
     #[test]
+    fn precheck_flags_a_missing_explicit_path_naming_the_via() {
+        // NRN-414: a `-C` root that does not exist is refused instantly, naming
+        // the path and the `-C` source — no owner summon, no socket dial.
+        let missing = PathBuf::from("/nonexistent/nrn414-vault-root");
+        let diag = vault_root_precheck(&missing, &ResolvedVia::ExplicitPath)
+            .expect("a missing -C root must be flagged before summoning");
+        assert!(
+            diag.message().contains("does not exist"),
+            "got {:?}",
+            diag.message()
+        );
+        assert!(diag.message().contains("/nonexistent/nrn414-vault-root"));
+        assert!(diag.message().contains("(from -C)"));
+    }
+
+    #[test]
+    fn precheck_flags_a_non_directory_norn_root_naming_the_via() {
+        // A NORN_ROOT that points at a FILE (not a directory) is the other
+        // user-error case; the diagnostic names the NORN_ROOT source. The test
+        // binary itself is a convenient always-present regular file.
+        let a_file = std::env::current_exe().unwrap();
+        let diag = vault_root_precheck(&a_file, &ResolvedVia::NornRootEnv)
+            .expect("a file-as-root must be flagged");
+        assert!(
+            diag.message().contains("is not a directory"),
+            "got {:?}",
+            diag.message()
+        );
+        assert!(diag.message().contains("(from NORN_ROOT)"));
+    }
+
+    #[test]
+    fn precheck_passes_an_existing_directory_and_skips_registry_vias() {
+        // An existing directory (this crate's manifest dir) summons normally.
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        assert!(vault_root_precheck(&dir, &ResolvedVia::ExplicitPath).is_none());
+        // A registry via is gated by the resolver's `ensure_live`, so the
+        // precheck never re-flags it — even for a missing path.
+        let missing = PathBuf::from("/nonexistent/nrn414-registered");
+        assert!(vault_root_precheck(&missing, &ResolvedVia::ExplicitName).is_none());
+        assert!(vault_root_precheck(&missing, &ResolvedVia::ReverseLookup).is_none());
+    }
+
+    #[test]
     fn owner_gone_gets_a_rerun_hint_but_raw_io_stays_bare() {
         let gone = client_error_diagnostic(&ClientError::OwnerGone("eof".into()));
         assert_eq!(gone.hints().len(), 1, "owner-gone earns a re-run hint");
 
         let io = client_error_diagnostic(&ClientError::Io(std::io::Error::other("boom")));
         assert!(io.hints().is_empty(), "a raw IO error adds no filler hint");
+    }
+
+    #[test]
+    fn precheck_messages_stay_prefix_aligned_with_index_error_display() {
+        // Drift-seam guard: `vault_root_precheck` hardcodes its own message
+        // strings rather than reusing `norn_core::graph::IndexError`'s Display
+        // (the two diverge for a good reason — the precheck appends the `(from
+        // <via>)` suffix `IndexError` has no business knowing about). If a
+        // future edit to either side's wording drifts the shared headline
+        // out of sync, this test catches it: the owner-side fail-safe classifies
+        // the very same vanished-root fault via `IndexError`, so an operator
+        // reading both a client-side precheck refusal and an owner-side warm-up
+        // failure for the same root sees one consistent headline.
+        let missing = PathBuf::from("/nonexistent/nrn414-vault-root");
+        let precheck_missing = vault_root_precheck(&missing, &ResolvedVia::ExplicitPath)
+            .expect("a missing -C root must be flagged before summoning");
+        let index_missing = norn_core::graph::IndexError::MissingRoot(
+            camino::Utf8PathBuf::from_path_buf(missing.clone()).expect("test path is valid UTF-8"),
+        );
+        assert!(
+            precheck_missing
+                .message()
+                .starts_with(&index_missing.to_string()),
+            "precheck message {:?} must stay prefixed with IndexError::MissingRoot's Display {:?}",
+            precheck_missing.message(),
+            index_missing.to_string()
+        );
+
+        let a_file = std::env::current_exe().unwrap();
+        let precheck_not_dir = vault_root_precheck(&a_file, &ResolvedVia::NornRootEnv)
+            .expect("a file-as-root must be flagged");
+        let index_not_dir = norn_core::graph::IndexError::RootNotDirectory(
+            camino::Utf8PathBuf::from_path_buf(a_file.clone()).expect("test path is valid UTF-8"),
+        );
+        assert!(
+            precheck_not_dir
+                .message()
+                .starts_with(&index_not_dir.to_string()),
+            "precheck message {:?} must stay prefixed with IndexError::RootNotDirectory's Display {:?}",
+            precheck_not_dir.message(),
+            index_not_dir.to_string()
+        );
     }
 }
