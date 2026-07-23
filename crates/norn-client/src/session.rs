@@ -122,6 +122,13 @@ impl OwnerSession {
     }
 
     /// Liveness + serving-state probe.
+    ///
+    /// A warm-up that failed on an invalid `.norn/config.yaml` answers every
+    /// frame — including a ping — with the config error as a `Rejected`
+    /// (NRN-360). The owner is healthy (not exit-to-heal), so [`unexpected_frame`]
+    /// rides it onto the user-error path ([`ClientError::Rejected`]):
+    /// `wait_until_ready` returns it and the CLI renders the config error, never
+    /// a resummon/crash loop.
     pub fn ping(&mut self) -> Result<Pong, ClientError> {
         match self.request(&ClientFrame::Ping {
             protocol: CONTROL_PROTOCOL,
@@ -140,18 +147,7 @@ impl OwnerSession {
                 serving,
                 writer_progress,
             }),
-            // A warm-up that failed on an invalid `.norn/config.yaml` answers
-            // every frame — including a ping — with the config error as a
-            // Rejected (NRN-360). The owner is healthy (not exit-to-heal), so
-            // this rides the user-error path: `wait_until_ready` returns it and
-            // the CLI renders the config error, never a resummon/crash loop.
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected pong, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "pong")),
         }
     }
 
@@ -159,15 +155,7 @@ impl OwnerSession {
     pub fn probe(&mut self) -> Result<u64, ClientError> {
         match self.request(&ClientFrame::Probe)? {
             OwnerFrame::Probe { document_count } => Ok(document_count),
-            // A bad-config warm-up rejects every frame with the config error
-            // (NRN-360) — surface it on the user-error path, like the read verbs.
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected probe report, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "probe report")),
         }
     }
 
@@ -175,13 +163,7 @@ impl OwnerSession {
     pub fn find(&mut self, params: FindParams) -> Result<FindReport, ClientError> {
         match self.request(&ClientFrame::Find { params })? {
             OwnerFrame::Find { report } => Ok(report),
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected find report, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "find report")),
         }
     }
 
@@ -189,13 +171,7 @@ impl OwnerSession {
     pub fn count(&mut self, params: CountParams) -> Result<CountReport, ClientError> {
         match self.request(&ClientFrame::Count { params })? {
             OwnerFrame::Count { report } => Ok(report),
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected count report, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "count report")),
         }
     }
 
@@ -203,13 +179,7 @@ impl OwnerSession {
     pub fn get(&mut self, params: GetParams) -> Result<GetReport, ClientError> {
         match self.request(&ClientFrame::Get { params })? {
             OwnerFrame::Get { report } => Ok(report),
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected get report, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "get report")),
         }
     }
 
@@ -217,13 +187,7 @@ impl OwnerSession {
     pub fn describe(&mut self, params: DescribeParams) -> Result<DescribeReport, ClientError> {
         match self.request(&ClientFrame::Describe { params })? {
             OwnerFrame::Describe { report } => Ok(report),
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected describe report, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "describe report")),
         }
     }
 
@@ -231,13 +195,7 @@ impl OwnerSession {
     pub fn validate(&mut self, params: ValidateParams) -> Result<ValidateReport, ClientError> {
         match self.request(&ClientFrame::Validate { params })? {
             OwnerFrame::Validate { report } => Ok(report),
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected validate report, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "validate report")),
         }
     }
 
@@ -247,13 +205,7 @@ impl OwnerSession {
     pub fn repair(&mut self, params: RepairParams) -> Result<RepairReport, ClientError> {
         match self.request(&ClientFrame::Repair { params })? {
             OwnerFrame::Repair { report } => Ok(report),
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected repair report, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "repair report")),
         }
     }
 
@@ -265,13 +217,7 @@ impl OwnerSession {
     pub fn set(&mut self, params: SetParams) -> Result<SetReport, ClientError> {
         match self.request(&ClientFrame::Set { params })? {
             OwnerFrame::Set { report } => Ok(report),
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected set report, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "set report")),
         }
     }
 
@@ -280,13 +226,7 @@ impl OwnerSession {
     pub fn new_document(&mut self, params: NewParams) -> Result<NewReport, ClientError> {
         match self.request(&ClientFrame::New { params })? {
             OwnerFrame::New { report } => Ok(report),
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected new report, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "new report")),
         }
     }
 
@@ -295,13 +235,7 @@ impl OwnerSession {
     pub fn edit(&mut self, params: EditParams) -> Result<EditReport, ClientError> {
         match self.request(&ClientFrame::Edit { params })? {
             OwnerFrame::Edit { report } => Ok(report),
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected edit report, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "edit report")),
         }
     }
 
@@ -311,13 +245,7 @@ impl OwnerSession {
     pub fn move_document(&mut self, params: MoveParams) -> Result<ApplyReport, ClientError> {
         match self.request(&ClientFrame::Move { params })? {
             OwnerFrame::Move { report } => Ok(report),
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected move report, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "move report")),
         }
     }
 
@@ -326,13 +254,7 @@ impl OwnerSession {
     pub fn delete(&mut self, params: DeleteParams) -> Result<ApplyReport, ClientError> {
         match self.request(&ClientFrame::Delete { params })? {
             OwnerFrame::Delete { report } => Ok(report),
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected delete report, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "delete report")),
         }
     }
 
@@ -344,13 +266,7 @@ impl OwnerSession {
     ) -> Result<ApplyReport, ClientError> {
         match self.request(&ClientFrame::RewriteWikilink { params })? {
             OwnerFrame::RewriteWikilink { report } => Ok(report),
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected rewrite-wikilink report, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "rewrite-wikilink report")),
         }
     }
 
@@ -361,13 +277,7 @@ impl OwnerSession {
     pub fn apply(&mut self, params: ApplyParams) -> Result<ApplyReport, ClientError> {
         match self.request(&ClientFrame::Apply { params })? {
             OwnerFrame::Apply { report } => Ok(report),
-            OwnerFrame::Rejected { message, hints } => {
-                Err(ClientError::Rejected { message, hints })
-            }
-            OwnerFrame::Error { message } => Err(ClientError::OwnerError(message)),
-            other => Err(ClientError::Protocol(format!(
-                "expected apply report, got {other:?}"
-            ))),
+            other => Err(unexpected_frame(other, "apply report")),
         }
     }
 
@@ -474,6 +384,22 @@ impl OwnerSession {
             )),
             Err(e) => Err(classify_io(e)),
         }
+    }
+}
+
+/// Map a reply that is NOT a verb's own success frame onto a client error — the
+/// one shared tail every verb method routes its non-success arm through
+/// (NRN-411). A warm-up/user [`OwnerFrame::Rejected`] rides the user-error path
+/// ([`ClientError::Rejected`], carrying the message + hints); an
+/// [`OwnerFrame::Error`] becomes an [`ClientError::OwnerError`]; any other frame
+/// is a protocol mismatch labelled with `expected` (e.g. `"find report"`). A free
+/// fn, not a `request`-wrapping closure, so no verb closure returns the large
+/// `OwnerFrame` in an `Err` (which `clippy::result_large_err` would flag).
+fn unexpected_frame(frame: OwnerFrame, expected: &str) -> ClientError {
+    match frame {
+        OwnerFrame::Rejected { message, hints } => ClientError::Rejected { message, hints },
+        OwnerFrame::Error { message } => ClientError::OwnerError(message),
+        other => ClientError::Protocol(format!("expected {expected}, got {other:?}")),
     }
 }
 
