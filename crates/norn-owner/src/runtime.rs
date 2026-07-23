@@ -588,22 +588,23 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
             }
         }
         ClientFrame::Probe => {
-            if state.serving() != ServingState::Ready {
-                // The client pings-until-ready before probing; a probe arriving
-                // early is not a cache fault — report, don't exit-to-heal.
-                return OwnerFrame::Error {
-                    message: "vault not ready".to_string(),
-                };
-            }
-            let Some(slot) = state.slot() else {
-                return OwnerFrame::Error {
-                    message: "vault not ready".to_string(),
-                };
+            // The routed-read stand-in (NRN-345). It shares the read verbs'
+            // readiness gate — `ready_slot`/`not_ready`: an early probe is
+            // reported, not a cache fault (the client pings-until-ready first) —
+            // but keeps its own classification below, because it yields a bare
+            // document count rather than a report-or-[`FieldRejection`] and so
+            // does not fit [`classify_read`]'s success/user-rejection shape.
+            let Some(slot) = ready_slot(state) else {
+                return not_ready();
             };
             let result = tokio::task::spawn_blocking(move || {
                 slot.serve_read(|cache| Ok(cache.documents_matching(&Default::default())?.len()))
             })
             .await;
+            // Probe returns a bare count, never a report-or-`FieldRejection`, so it
+            // keeps this local classifier rather than `classify_read` — the same
+            // fault arms (cache error, task panic), minus the `Rejected` arm a
+            // report-shaped read needs.
             match result {
                 Ok(Ok(count)) => OwnerFrame::Probe {
                     document_count: count as u64,
@@ -618,19 +619,18 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                 Err(join_err) => {
                     state.go_fatal();
                     OwnerFrame::Error {
-                        message: format!("read task panicked (exit-to-heal): {join_err}"),
+                        message: format!("probe task panicked (exit-to-heal): {join_err}"),
                     }
                 }
             }
         }
         ClientFrame::Find { params } => {
-            let Some(slot) = ready_slot(state) else {
-                return not_ready();
-            };
             let today = today_local();
             let config = state.vault_config();
-            let result = tokio::task::spawn_blocking(move || {
-                slot.serve_read(|cache| {
+            dispatch_read(
+                state,
+                "find",
+                move |cache| {
                     // NRN-367: gate the desugared dynamic fields against the
                     // vault's field universe BEFORE the query runs, so an unknown
                     // field rejects with a did-you-mean instead of silently
@@ -644,19 +644,18 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                         norn_core::read::find::execute(cache, config.as_deref(), &params, &today)?
                             .map_err(FieldRejection::from),
                     )
-                })
-            })
-            .await;
-            classify_read(state, result, |report| OwnerFrame::Find { report }, "find")
+                },
+                |report| OwnerFrame::Find { report },
+            )
+            .await
         }
         ClientFrame::Count { params } => {
-            let Some(slot) = ready_slot(state) else {
-                return not_ready();
-            };
             let today = today_local();
             let config = state.vault_config();
-            let result = tokio::task::spawn_blocking(move || {
-                slot.serve_read(|cache| {
+            dispatch_read(
+                state,
+                "count",
+                move |cache| {
                     // NRN-367: same field-universe gate as `find`.
                     if let Err(rej) =
                         gate_query_fields(cache, config.as_deref(), &params.dynamic_keys)?
@@ -667,23 +666,17 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                         norn_core::read::count::execute(cache, config.as_deref(), &params, &today)?
                             .map_err(FieldRejection::from),
                     )
-                })
-            })
-            .await;
-            classify_read(
-                state,
-                result,
+                },
                 |report| OwnerFrame::Count { report },
-                "count",
             )
+            .await
         }
         ClientFrame::Get { params } => {
-            let Some(slot) = ready_slot(state) else {
-                return not_ready();
-            };
             let today = today_local();
-            let result = tokio::task::spawn_blocking(move || {
-                slot.serve_read(|cache| {
+            dispatch_read(
+                state,
+                "get",
+                move |cache| {
                     let outcome = norn_core::read::get::execute(cache, &params, &today)?;
                     Ok(match outcome {
                         Ok(mut report) => {
@@ -699,19 +692,18 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                         }
                         Err(msg) => Err(FieldRejection::from(msg)),
                     })
-                })
-            })
-            .await;
-            classify_read(state, result, |report| OwnerFrame::Get { report }, "get")
+                },
+                |report| OwnerFrame::Get { report },
+            )
+            .await
         }
         ClientFrame::Describe { params } => {
-            let Some(slot) = ready_slot(state) else {
-                return not_ready();
-            };
             let config = state.vault_config();
             let today = today_local();
-            let result = tokio::task::spawn_blocking(move || {
-                slot.serve_read(|cache| {
+            dispatch_read(
+                state,
+                "describe",
+                move |cache| {
                     // NRN-374: same field-universe gate as `find`/`count` — an
                     // unknown desugared dynamic field rejects with a did-you-mean
                     // instead of silently filtering the data-mode summary to
@@ -728,24 +720,18 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                         &today,
                     )?
                     .map_err(FieldRejection::from))
-                })
-            })
-            .await;
-            classify_read(
-                state,
-                result,
+                },
                 |report| OwnerFrame::Describe { report },
-                "describe",
             )
+            .await
         }
         ClientFrame::Validate { params } => {
-            let Some(slot) = ready_slot(state) else {
-                return not_ready();
-            };
             let config = state.vault_config();
             let today = today_local();
-            let result = tokio::task::spawn_blocking(move || {
-                slot.serve_read(|cache| {
+            dispatch_read(
+                state,
+                "validate",
+                move |cache| {
                     Ok(norn_core::read::validate::execute(
                         cache,
                         config.as_deref(),
@@ -753,86 +739,70 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                         &today,
                     )?
                     .map_err(FieldRejection::from))
-                })
-            })
-            .await;
-            classify_read(
-                state,
-                result,
+                },
                 |report| OwnerFrame::Validate { report },
-                "validate",
             )
+            .await
         }
         ClientFrame::Repair { params } => {
-            let Some(slot) = ready_slot(state) else {
-                return not_ready();
-            };
             let config = state.vault_config();
             let today = today_local();
             // Read-only (findings → plan, no write) — served through `serve_read`
             // like `validate`, NOT the single-writer mutation path.
-            let result =
-                tokio::task::spawn_blocking(move || {
-                    slot.serve_read(|cache| {
-                        Ok(norn_core::read::repair::execute(
+            dispatch_read(
+                state,
+                "repair",
+                move |cache| {
+                    Ok(
+                        norn_core::read::repair::execute(
                             cache,
                             config.as_deref(),
                             &params,
                             &today,
                         )?
-                        .map_err(FieldRejection::from))
-                    })
-                })
-                .await;
-            classify_read(
-                state,
-                result,
+                        .map_err(FieldRejection::from),
+                    )
+                },
                 |report| OwnerFrame::Repair { report },
-                "repair",
             )
+            .await
         }
         ClientFrame::Set { params } => {
-            let Some(slot) = ready_slot(state) else {
-                return not_ready();
-            };
             let config = state.vault_config();
             let today = today_local();
-            // Serialize every write through the owner's single-writer lock (ADR
-            // 0013/0017). Held across the whole blocking mutation, so a second
-            // mutation waits and `{{seq}}` allocation sees prior creates.
-            let _writer = state.mutation_lock.lock().await;
-            let result = tokio::task::spawn_blocking(move || {
-                run_mutation(&slot, params.confirm, |cache, sink| {
+            dispatch_mutation(
+                state,
+                "set",
+                params.confirm,
+                move |cache, sink| {
                     norn_core::mutate::set::execute(cache, config.as_deref(), &params, &today, sink)
-                })
-            })
-            .await;
-            classify_mutation(state, result, |report| OwnerFrame::Set { report }, "set")
+                },
+                |report| OwnerFrame::Set { report },
+            )
+            .await
         }
         ClientFrame::New { params } => {
-            let Some(slot) = ready_slot(state) else {
-                return not_ready();
-            };
             let config = state.vault_config();
             let today = today_local();
-            let _writer = state.mutation_lock.lock().await;
-            let result = tokio::task::spawn_blocking(move || {
-                run_mutation(&slot, params.confirm, |cache, sink| {
+            dispatch_mutation(
+                state,
+                "new",
+                params.confirm,
+                move |cache, sink| {
                     norn_core::mutate::new::execute(cache, config.as_deref(), &params, &today, sink)
-                })
-            })
-            .await;
-            classify_mutation(state, result, |report| OwnerFrame::New { report }, "new")
+                },
+                |report| OwnerFrame::New { report },
+            )
+            .await
         }
         ClientFrame::Edit { params } => {
-            let Some(slot) = ready_slot(state) else {
-                return not_ready();
-            };
             let config = state.vault_config();
             let today = today_local();
-            let _writer = state.mutation_lock.lock().await;
-            let result = tokio::task::spawn_blocking(move || {
-                run_mutation(&slot, params.confirm, |cache, sink| {
+            dispatch_mutation(
+                state,
+                "edit",
+                params.confirm,
+                move |cache, sink| {
                     norn_core::mutate::edit::execute(
                         cache,
                         config.as_deref(),
@@ -840,20 +810,19 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                         &today,
                         sink,
                     )
-                })
-            })
-            .await;
-            classify_mutation(state, result, |report| OwnerFrame::Edit { report }, "edit")
+                },
+                |report| OwnerFrame::Edit { report },
+            )
+            .await
         }
         ClientFrame::Move { params } => {
-            let Some(slot) = ready_slot(state) else {
-                return not_ready();
-            };
             let config = state.vault_config();
             let today = today_local();
-            let _writer = state.mutation_lock.lock().await;
-            let result = tokio::task::spawn_blocking(move || {
-                run_mutation(&slot, params.confirm, |cache, sink| {
+            dispatch_mutation(
+                state,
+                "move",
+                params.confirm,
+                move |cache, sink| {
                     norn_core::mutate::move_doc::execute(
                         cache,
                         config.as_deref(),
@@ -861,20 +830,19 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                         &today,
                         sink,
                     )
-                })
-            })
-            .await;
-            classify_mutation(state, result, |report| OwnerFrame::Move { report }, "move")
+                },
+                |report| OwnerFrame::Move { report },
+            )
+            .await
         }
         ClientFrame::Delete { params } => {
-            let Some(slot) = ready_slot(state) else {
-                return not_ready();
-            };
             let config = state.vault_config();
             let today = today_local();
-            let _writer = state.mutation_lock.lock().await;
-            let result = tokio::task::spawn_blocking(move || {
-                run_mutation(&slot, params.confirm, |cache, sink| {
+            dispatch_mutation(
+                state,
+                "delete",
+                params.confirm,
+                move |cache, sink| {
                     norn_core::mutate::delete::execute(
                         cache,
                         config.as_deref(),
@@ -882,25 +850,19 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                         &today,
                         sink,
                     )
-                })
-            })
-            .await;
-            classify_mutation(
-                state,
-                result,
+                },
                 |report| OwnerFrame::Delete { report },
-                "delete",
             )
+            .await
         }
         ClientFrame::RewriteWikilink { params } => {
-            let Some(slot) = ready_slot(state) else {
-                return not_ready();
-            };
             let config = state.vault_config();
             let today = today_local();
-            let _writer = state.mutation_lock.lock().await;
-            let result = tokio::task::spawn_blocking(move || {
-                run_mutation(&slot, params.confirm, |cache, sink| {
+            dispatch_mutation(
+                state,
+                "rewrite-wikilink",
+                params.confirm,
+                move |cache, sink| {
                     norn_core::mutate::rewrite_wikilink::execute(
                         cache,
                         config.as_deref(),
@@ -908,25 +870,19 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                         &today,
                         sink,
                     )
-                })
-            })
-            .await;
-            classify_mutation(
-                state,
-                result,
+                },
                 |report| OwnerFrame::RewriteWikilink { report },
-                "rewrite-wikilink",
             )
+            .await
         }
         ClientFrame::Apply { params } => {
-            let Some(slot) = ready_slot(state) else {
-                return not_ready();
-            };
             let config = state.vault_config();
             let today = today_local();
-            let _writer = state.mutation_lock.lock().await;
-            let result = tokio::task::spawn_blocking(move || {
-                run_mutation(&slot, params.confirm, |cache, sink| {
+            dispatch_mutation(
+                state,
+                "apply",
+                params.confirm,
+                move |cache, sink| {
                     norn_core::mutate::apply::execute(
                         cache,
                         config.as_deref(),
@@ -934,56 +890,115 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                         &today,
                         sink,
                     )
-                })
-            })
-            .await;
-            classify_mutation(
-                state,
-                result,
+                },
                 |report| OwnerFrame::Apply { report },
-                "apply",
             )
+            .await
         }
     }
 }
 
-/// Drive a mutation verb's execute seam against the warm slot and, when a
-/// CONFIRMED write landed, commit its cache increment so the next read observes
-/// it (fire-and-degrade — a stale baseline heals on the next read). The mutation
-/// runs inside `serve_read` (the write goes to the filesystem under the index
-/// root, independent of the read connection); the owner's `mutation_lock`
-/// already holds this call exclusive, so no writer races it.
+/// Owns the routed-READ scaffold shared by every read verb (NRN-411): the
+/// ready-slot gate, the blocking `serve_read`, and outcome classification. An arm
+/// supplies only its per-verb `read` body and a report→frame mapping; the
+/// readiness gate ([`ready_slot`]/[`not_ready`]) and the success-vs-fault split
+/// ([`classify_read`]) live here once.
 ///
-/// `confirm` gates the baseline capture: a forecast (`confirm == false`) never
-/// writes and never commits. Returns the verb's report; a clean pre-write
-/// decline is carried IN the report (`outcome = refused`), so only a genuine
-/// cache/read fault is the `Err` (exit-to-heal).
-fn run_mutation<R>(
-    slot: &Arc<VaultCacheSlot>,
-    confirm: bool,
-    execute: impl FnOnce(&Cache, &mut EventSink) -> anyhow::Result<MutationExecution<R>>,
-) -> anyhow::Result<R> {
-    // Telemetry's durable store is deferred with the audit verb; the owner runs a
-    // discard sink so the executor's event emission has a home without persisting.
-    let mut sink = EventSink::discard(
-        IdGen::with_seed(0),
-        Clock::fixed("1970-01-01T00:00:00.000Z"),
-    );
-    // Capture the pre-write baseline for the increment commit BEFORE the write.
-    let baseline = if confirm {
-        Some(slot.serve_read(|cache| cache.load_graph_index())?)
-    } else {
-        None
+/// `read` runs on a blocking thread and returns
+/// `anyhow::Result<Result<R, FieldRejection>>`: the outer `anyhow` is a
+/// cache/read fault (exit-to-heal), the inner `Result` a success or a user
+/// rejection (bad predicate, unknown field). Reads never take the writer lock, so
+/// they stay concurrent.
+async fn dispatch_read<R: Send + 'static>(
+    state: &Arc<OwnerState>,
+    verb: &str,
+    read: impl FnOnce(&Cache) -> anyhow::Result<Result<R, FieldRejection>> + Send + 'static,
+    to_frame: impl FnOnce(R) -> OwnerFrame,
+) -> OwnerFrame {
+    let Some(slot) = ready_slot(state) else {
+        return not_ready();
     };
-    let exec = slot.serve_read(|cache| execute(cache, &mut sink))?;
-    if let Some(baseline) = baseline {
-        if !exec.touched_paths.is_empty() {
-            // Fire-and-degrade: a failed increment leaves the next read's detect
-            // to heal the cache; the write itself already landed on disk.
-            let _ = slot.commit_apply_increments_fire_and_degrade(&exec.touched_paths, baseline);
+    let result = tokio::task::spawn_blocking(move || slot.serve_read(read)).await;
+    classify_read(state, result, to_frame, verb)
+}
+
+/// Owns the routed-MUTATION scaffold shared by every mutation verb AND the
+/// owner's single-writer lock (ADR 0013/0017, NRN-411): the ready-slot gate, lock
+/// acquisition, the blocking critical section, and outcome classification.
+///
+/// `mutation_lock` has exactly one acquisition site: this function. Every
+/// mutation arm that calls through this seam carries no lock line of its own, so
+/// the per-arm "forgot to take the lock" mistake is eliminated for those arms —
+/// there is no lock line left to omit. The guard is held across the whole
+/// blocking section so a second mutation waits and `{{seq}}` allocation observes
+/// prior creates.
+///
+/// This does not make a bypass impossible: a hand-rolled arm could still reach
+/// `slot.serve_read` directly and write without ever calling this seam (the
+/// `Probe` arm above proves the shape compiles). That bypass is closed by
+/// `mutation_dispatch_guard`'s test, not by construction — it scans every
+/// mutation-class `ClientFrame` arm and fails if one does not route through
+/// `dispatch_mutation`.
+async fn dispatch_mutation<R: Send + 'static>(
+    state: &Arc<OwnerState>,
+    verb: &str,
+    confirm: bool,
+    execute: impl FnOnce(&Cache, &mut EventSink) -> anyhow::Result<MutationExecution<R>>
+        + Send
+        + 'static,
+    to_frame: impl FnOnce(R) -> OwnerFrame,
+) -> OwnerFrame {
+    /// Drive a mutation verb's execute seam against the warm slot and, when a
+    /// CONFIRMED write landed, commit its cache increment so the next read
+    /// observes it (fire-and-degrade — a stale baseline heals on the next read).
+    /// The mutation runs inside `serve_read` (the write goes to the filesystem
+    /// under the index root, independent of the read connection); the caller
+    /// ([`dispatch_mutation`]) already holds the owner's `mutation_lock` across
+    /// this call, so no writer races it — and, being nested here, this primitive
+    /// is unreachable without that lock.
+    ///
+    /// `confirm` gates the baseline capture: a forecast (`confirm == false`) never
+    /// writes and never commits. Returns the verb's report; a clean pre-write
+    /// decline is carried IN the report (`outcome = refused`), so only a genuine
+    /// cache/read fault is the `Err` (exit-to-heal).
+    fn run_mutation<R>(
+        slot: &Arc<VaultCacheSlot>,
+        confirm: bool,
+        execute: impl FnOnce(&Cache, &mut EventSink) -> anyhow::Result<MutationExecution<R>>,
+    ) -> anyhow::Result<R> {
+        // Telemetry's durable store is deferred with the audit verb; the owner
+        // runs a discard sink so the executor's event emission has a home without
+        // persisting.
+        let mut sink = EventSink::discard(
+            IdGen::with_seed(0),
+            Clock::fixed("1970-01-01T00:00:00.000Z"),
+        );
+        // Capture the pre-write baseline for the increment commit BEFORE the write.
+        let baseline = if confirm {
+            Some(slot.serve_read(|cache| cache.load_graph_index())?)
+        } else {
+            None
+        };
+        let exec = slot.serve_read(|cache| execute(cache, &mut sink))?;
+        if let Some(baseline) = baseline {
+            if !exec.touched_paths.is_empty() {
+                // Fire-and-degrade: a failed increment leaves the next read's
+                // detect to heal the cache; the write itself already landed.
+                let _ =
+                    slot.commit_apply_increments_fire_and_degrade(&exec.touched_paths, baseline);
+            }
         }
+        Ok(exec.report)
     }
-    Ok(exec.report)
+
+    let Some(slot) = ready_slot(state) else {
+        return not_ready();
+    };
+    // Serialize every write through the owner's single-writer lock, acquired in
+    // this shared seam rather than per-arm so it can never be omitted.
+    let _writer = state.mutation_lock.lock().await;
+    let result = tokio::task::spawn_blocking(move || run_mutation(&slot, confirm, execute)).await;
+    classify_mutation(state, result, to_frame, verb)
 }
 
 /// Classify a routed mutation's outcome. Unlike a read, a mutation never yields a
