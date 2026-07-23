@@ -106,11 +106,23 @@ pub struct SkippedFinding {
 }
 
 impl MigrationPlan {
-    /// Compute the BLAKE3 hash over the canonical JSON serialization.
-    /// YAML and JSON of the same plan produce the same hash — the hash identifies
-    /// the plan's content, not its on-disk representation.
+    /// Compute the BLAKE3 hash over the canonical JSON serialization of the
+    /// plan's SEMANTIC content. YAML and JSON of the same plan produce the
+    /// same hash — the hash identifies the plan's content, not its on-disk
+    /// representation.
+    ///
+    /// `generated_at` is excluded: it is a wall-clock provenance stamp (set by
+    /// the repair generator, `None` for hand-authored/verb-synthesized plans),
+    /// never semantic content, so two otherwise-identical plans stamped at
+    /// different instants must hash identically — the CAS/plan-identity
+    /// contract (ADR 0015/0024) depends on that determinism. Every other field
+    /// (including `generator`, which is a fixed literal per producer) hashes as
+    /// authored.
     pub fn canonical_hash(&self) -> String {
-        let canonical = serde_json::to_string(self).expect("MigrationPlan must always serialize");
+        let mut for_hash = self.clone();
+        for_hash.generated_at = None;
+        let canonical =
+            serde_json::to_string(&for_hash).expect("MigrationPlan must always serialize");
         blake3::hash(canonical.as_bytes()).to_hex().to_string()
     }
 }
@@ -567,6 +579,44 @@ operations:
         )
         .unwrap();
         assert_eq!(a.canonical_hash(), b.canonical_hash());
+    }
+
+    #[test]
+    fn canonical_hash_ignores_generated_at() {
+        // Two plans identical in every field except `generated_at` (the
+        // repair generator's wall-clock stamp, ADR 0024 / NRN-415) must hash
+        // identically — the CAS/plan-identity contract cannot depend on when
+        // the plan was generated.
+        let base = MigrationPlan {
+            schema_version: MIGRATION_PLAN_SCHEMA_VERSION,
+            vault_root: "/abs/vault".into(),
+            generator: Some("norn-repair".into()),
+            generated_at: None,
+            preconditions: vec![],
+            operations: vec![MigrationOp {
+                kind: "move_document".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({"src": "a.md", "dst": "b.md"}),
+                footnote: None,
+            }],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+        let stamped_early = MigrationPlan {
+            generated_at: Some("2026-01-01T00:00:00+00:00".into()),
+            ..base.clone()
+        };
+        let stamped_late = MigrationPlan {
+            generated_at: Some("2026-12-31T23:59:59+00:00".into()),
+            ..base.clone()
+        };
+        assert_eq!(
+            stamped_early.canonical_hash(),
+            stamped_late.canonical_hash()
+        );
+        // Also matches the unstamped (`None`) plan the existing tests cover.
+        assert_eq!(base.canonical_hash(), stamped_early.canonical_hash());
     }
 
     #[test]
