@@ -40,6 +40,16 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         );
     }
 
+    // The MCP schema-surface divergence (PD-141): the tools/list case is gated
+    // by the zero-indexed `get.starts_at` extension of PD-105.
+    assert_eq!(
+        ledger
+            .entry_for_case("mcp-initialize-tools-list-zoo")
+            .map(|e| e.id.as_str()),
+        Some("PD-141"),
+        "the tools/list case is gated by PD-141"
+    );
+
     let pd101 = ledger
         .entry_for_case("help-bare")
         .expect("help-bare must resolve to an entry");
