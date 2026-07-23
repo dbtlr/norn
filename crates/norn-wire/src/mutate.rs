@@ -29,13 +29,23 @@ use serde_json::Value;
 
 use crate::MigrationPlan;
 
-/// The apply outcome of a mutation — mirrors the core `ApplyOutcome` on the
-/// wire. `applied`/dry-run success is `Applied`; a clean pre-write decline is
+/// The apply outcome of a mutation — the present-tense-honest verdict every
+/// `set` / `new` / `edit` report carries. A confirmed write is `Applied`; a
+/// `confirm: false` preview is `Forecast` (nothing was written — the report
+/// describes what a confirmed apply *would* do); a clean pre-write decline is
 /// `Refused` (paired with a [`CodedError`]).
+///
+/// `Forecast` exists so a consumer keying on `outcome` alone tells a preview
+/// from a real write: these reports have no separate `dry_run` field, so a
+/// forecast that reported `outcome: applied` (with `applied: false`)
+/// contradicted itself. `outcome` is the authority; each report's `applied`
+/// bool stays alongside it as a direct convenience a consumer can read without
+/// matching the enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MutationOutcome {
     Applied,
+    Forecast,
     Refused,
 }
 

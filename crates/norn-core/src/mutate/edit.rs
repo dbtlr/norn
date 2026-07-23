@@ -220,7 +220,11 @@ pub fn execute(
             body_bytes_old,
             body_bytes_new,
             applied,
-            outcome: MutationOutcome::Applied,
+            outcome: if applied {
+                MutationOutcome::Applied
+            } else {
+                MutationOutcome::Forecast
+            },
             error: None,
         },
         touched_paths,
@@ -320,7 +324,7 @@ mod tests {
             false,
         );
         let exec = execute(&cache, None, &params, TODAY, &mut sink()).unwrap();
-        assert_eq!(exec.report.outcome, MutationOutcome::Applied);
+        assert_eq!(exec.report.outcome, MutationOutcome::Forecast);
         assert!(!exec.report.applied, "forecast");
         assert!(exec.report.body_changed);
         assert_eq!(exec.report.edits.len(), 1);

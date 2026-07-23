@@ -709,3 +709,50 @@ old = "the oracle has a service-local `--vault <PATH>` and no global `--vault`: 
 new = "the service-local `--vault <PATH>` is deleted (NRN-417); `--vault` is unambiguously the global `Option<String>` NAME selector (ADR 0017) everywhere, which `service` never consults: both orderings now parse cleanly and reach the same uniform not-yet-ported outcome (exit 1, `` `service` is not yet ported in this build ``) — a wholly different stderr in both cases, and a different exit code (1, not 2) in the before-subcommand ordering"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-408 (ADR 0016, decided-better): one mutation-report JSON serializer policy.
+# Every mutation verb's `--format json` — `set` / `new` / `edit` and the cascade
+# verbs `move` / `delete` / `rewrite-wikilink` / `apply` — serializes the FULL
+# report envelope on EVERY outcome path (applied / forecast / refused),
+# pretty-printed in serde struct-field order with exactly one trailing newline,
+# through the single `render::shared::write_report_json` seam. The pinned oracle
+# is a three-way zoo: `set` refuses as a bare `{code,message}` fragment stripped
+# of the report envelope; `new` and `edit` refuse as bare `error: <message>`
+# prose even under `--format json`; and an applied `set --format json` is compact
+# (no indentation) rather than pretty. The rewrite collapses all of these onto
+# the one envelope-and-framing policy, so a JSON consumer parses ONE shape on
+# every verb and every outcome. The `--out` file projection stays pretty (already
+# consistent); records refusals stay `error: <message>` on stderr. See
+# `crates/norn-cli/src/display/render/shared.rs` (`write_report_json` /
+# `render_apply_refusal`) and the per-verb renderers `set` / `new` / `edit`.
+[[entry]]
+id = "PD-135"
+surface = "mutation-report --format json (one serializer policy: full envelope, pretty, struct order, trailing newline)"
+cases = ["mutate-set-push-apply-json-zoo", "mutate-set-refusal-json-zoo", "mutate-new-refusal-json-zoo", "edit-refusal-json-zoo", "mutate-move-refusal-json-zoo"]
+old = "the JSON shape is a per-verb zoo: an applied `set --format json` is compact (single line, no indentation); a `set` refusal is a bare pretty `{code,message}` fragment with no report envelope; `new` and `edit` refuse as bare `error: <message>` prose on stderr even under `--format json`; and a `move` refusal is a bare pretty `{code,message}` fragment — four different refusal shapes across the mutation verbs"
+new = "every mutation verb's `--format json` emits the FULL report envelope on every outcome path, pretty-printed in serde struct-field order with one trailing newline: an applied `set` report is now pretty rather than compact, and every refusal (`set` / `new` / `edit` / `move`) carries the whole report (`outcome: refused` plus the coded error in its failed op / `error` field) instead of a bare fragment or bare prose — one shape a consumer parses on every verb and outcome; exit codes are unchanged (2 on refusal, 0 otherwise)"
+reason = "decided-better"
+decision = "docs/decisions/0016-surface-neutral-command-core.md"
+
+# NRN-408 (ADR 0016, decided-better): `MutationOutcome::Forecast`. A `set` / `new`
+# / `edit` dry-run (a `confirm: false` preview that writes nothing) now reports
+# `outcome: forecast`, not `outcome: applied`. These reports have no separate
+# `dry_run` field, so the pinned oracle's `applied: false` paired with `outcome:
+# applied` contradicted itself — a consumer keying on `outcome` alone could not
+# tell a preview from a real write. `outcome` is now the present-tense-honest
+# authority (the redundant `applied` bool is retained for field presence).
+# Surfaces on the CLI `edit --dry-run --format json` and on the MCP `vault.set`
+# forecast's `structuredContent`. The cascade verbs (`move` / `delete` /
+# `rewrite-wikilink` / `apply`) already carry an explicit `dry_run: true` preview
+# signal on their `ApplyReport`; their top-level `outcome` honesty and the deeper
+# cascade-count forecast fidelity remain NRN-161. See `crates/norn-wire/src/
+# mutate.rs` (`MutationOutcome::Forecast`) and `crates/norn-core/src/mutate/
+# {set,new,edit}.rs`.
+[[entry]]
+id = "PD-136"
+surface = "set/new/edit forecast outcome (MutationOutcome::Forecast — dry-run reports outcome: forecast)"
+cases = ["edit-json-ops-forecast-zoo", "mcp-tools-call-set-forecast-zoo"]
+old = "a `set` / `new` / `edit` dry-run forecast reports `outcome: applied` while `applied: false` — a self-contradiction (there is no separate `dry_run` field), so a consumer keying on `outcome` sees a preview as a completed write; the `edit --format json` forecast additionally serializes compact"
+new = "a forecast reports `outcome: forecast` (present-tense honest, distinct from a confirmed `applied`), on both the CLI `edit --dry-run --format json` (now also pretty per PD-135) and the MCP `vault.set` forecast `structuredContent`; a consumer tells a preview from a real write by `outcome` alone"
+reason = "decided-better"
+decision = "docs/decisions/0016-surface-neutral-command-core.md"

@@ -9,7 +9,9 @@ use crate::display::emit::render_outcome;
 use crate::display::format::Format;
 use crate::display::output::EditMutationView;
 use crate::display::sink::Sink;
-use crate::display::{EXIT_OK, EXIT_USAGE};
+use crate::display::EXIT_USAGE;
+
+use super::shared::{mutation_exit, write_report_json};
 
 pub(crate) fn render_edit(
     view: EditMutationView,
@@ -19,10 +21,22 @@ pub(crate) fn render_edit(
 ) -> i32 {
     let report = &view.report;
 
-    // A refusal is format-INDEPENDENT for edit: `error: <message>` on stderr,
-    // exit 2, for records AND json alike — unlike set/new, which emit a
-    // structured JSON refusal object. `error.message` is the same `Display`
-    // prose the routed and direct arms interpolate, so both render identically.
+    // JSON: the whole-report serialization under the one mutation-report policy
+    // (`write_report_json`: pretty, struct-field order, one trailing newline),
+    // on EVERY outcome path INCLUDING refusal. `edit` previously refused as bare
+    // `error: <message>` prose even under `--format json`; it now carries the
+    // same full envelope (`outcome: refused` + the coded error) `set` / `new` /
+    // the cascade verbs do, so a JSON consumer parses one shape on every path.
+    if format == Format::Json {
+        let result: io::Result<i32> = (|| {
+            write_report_json(sink.writer(), report)?;
+            Ok(mutation_exit(report.outcome))
+        })();
+        return render_outcome(result, conv.writer());
+    }
+
+    // Records: a refusal prints `error: <message>` on stderr, exit 2. The
+    // message is the same `Display` prose the routed and direct arms interpolate.
     if report.outcome == MutationOutcome::Refused {
         let msg = report
             .error
@@ -32,16 +46,6 @@ pub(crate) fn render_edit(
         let result: io::Result<i32> = (|| {
             conv.line(&format!("error: {msg}"))?;
             Ok(EXIT_USAGE)
-        })();
-        return render_outcome(result, conv.writer());
-    }
-
-    // JSON: the compact whole-report serialization is the contract
-    // (`serde_json::to_writer` + one trailing newline).
-    if format == Format::Json {
-        let result: io::Result<i32> = (|| {
-            writeln!(sink.writer(), "{}", serde_json::to_string(report)?)?;
-            Ok(EXIT_OK)
         })();
         return render_outcome(result, conv.writer());
     }
@@ -75,7 +79,7 @@ pub(crate) fn render_edit(
             writeln!(sink.writer())?;
             writeln!(sink.writer(), "Apply with --yes")?;
         }
-        Ok(EXIT_OK)
+        Ok(crate::display::EXIT_OK)
     })();
     render_outcome(result, conv.writer())
 }

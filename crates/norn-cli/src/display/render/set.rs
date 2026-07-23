@@ -11,7 +11,7 @@ use crate::display::output::SetMutationView;
 use crate::display::sink::Sink;
 use crate::output::glyphs;
 
-use super::shared::{mutation_exit, value_repr, warning_short};
+use super::shared::{mutation_exit, value_repr, warning_short, write_report_json};
 
 pub(crate) fn render_set(
     view: SetMutationView,
@@ -21,12 +21,14 @@ pub(crate) fn render_set(
 ) -> i32 {
     let report = &view.report;
 
-    // JSON: the compact whole-report serialization is the contract (struct field
-    // order). Structured on refusal too (ADR 0016 unifies the
+    // JSON: the whole-report serialization under the one mutation-report policy
+    // (`write_report_json`: pretty, struct-field order, one trailing newline),
+    // on EVERY outcome path including refusal — the full envelope carries the
+    // coded error, never a bare `{code,message}` fragment (ADR 0016 unifies the
     // surfaces on the structured envelope).
     if format == Format::Json {
         let result: io::Result<i32> = (|| {
-            writeln!(sink.writer(), "{}", serde_json::to_string(report)?)?;
+            write_report_json(sink.writer(), report)?;
             Ok(mutation_exit(report.outcome))
         })();
         return render_outcome(result, conv.writer());

@@ -42,7 +42,7 @@ pub(super) fn value_repr(v: &Value) -> String {
 pub(super) fn mutation_exit(outcome: MutationOutcome) -> i32 {
     match outcome {
         MutationOutcome::Refused => EXIT_USAGE,
-        MutationOutcome::Applied => EXIT_OK,
+        MutationOutcome::Applied | MutationOutcome::Forecast => EXIT_OK,
     }
 }
 
@@ -69,9 +69,13 @@ pub(super) fn apply_report_exit(report: &ApplyReport) -> i32 {
     report.exit_code()
 }
 
-/// Render a refused cascade `ApplyReport`: the pretty
-/// coded error envelope on stdout for `--format json`, else `error: <message>` on
-/// stderr. Exit 2.
+/// Render a refused cascade `ApplyReport`. `--format json` carries the FULL
+/// report envelope (`outcome: refused` plus the failed op holding the coded
+/// `{code,message,path?}` error) — the one serializer policy every mutation
+/// verb's JSON refusal now follows, so a consumer parses ONE shape on every
+/// path (applied / forecast / refused) and never a bare `{code,message}`
+/// fragment stripped of the envelope. Records prints `error: <message>` on
+/// stderr. Exit 2 either way.
 pub(super) fn render_apply_refusal(
     report: &ApplyReport,
     format: Format,
@@ -79,21 +83,18 @@ pub(super) fn render_apply_refusal(
     conv: &mut Conversation,
 ) -> i32 {
     let json = matches!(format, Format::Json);
-    let error = report
-        .operations
-        .iter()
-        .find_map(|o| o.error.as_ref())
-        .or_else(|| report.preconditions.iter().find_map(|p| p.error.as_ref()));
     if json {
         let result: std::io::Result<i32> = (|| {
-            match error {
-                Some(e) => writeln!(out, "{}", serde_json::to_string_pretty(e)?)?,
-                None => writeln!(out, "{{}}")?,
-            }
-            Ok(EXIT_USAGE)
+            write_report_json(out, report)?;
+            Ok(report.exit_code())
         })();
         crate::display::emit::render_outcome(result, conv.writer())
     } else {
+        let error = report
+            .operations
+            .iter()
+            .find_map(|o| o.error.as_ref())
+            .or_else(|| report.preconditions.iter().find_map(|p| p.error.as_ref()));
         let msg = error
             .map(|e| e.message.clone())
             .unwrap_or_else(|| "refused".to_string());
@@ -113,19 +114,31 @@ pub(super) fn truncation_note(report: &FindReport) -> String {
     )
 }
 
-/// Write an `ApplyReport`'s pretty JSON serialization plus a trailing newline —
-/// the `--format json` stdout path shared by every cascade verb
-/// (`apply`/`move`/`delete`/`rewrite-wikilink`).
-pub(super) fn write_report_json(out: &mut dyn Write, report: &ApplyReport) -> io::Result<()> {
+/// The ONE mutation-report JSON serializer policy (NRN-408): a report's
+/// pretty-printed serialization in serde struct-field order plus exactly one
+/// trailing newline. Every mutation verb's `--format json` — `set` / `new` /
+/// `edit` and the cascade verbs `apply` / `move` / `delete` /
+/// `rewrite-wikilink` — writes through here on EVERY outcome path
+/// (applied / forecast / refused), so the compactness, key ordering, and
+/// trailing-newline rules are defined in exactly one place. Generic over the
+/// report type because the compact `SetReport` / `NewReport` / `EditReport`
+/// and the nested `ApplyReport` all serialize under the same rule.
+pub(super) fn write_report_json<T: serde::Serialize>(
+    out: &mut dyn Write,
+    report: &T,
+) -> io::Result<()> {
     writeln!(out, "{}", serde_json::to_string_pretty(report)?)
 }
 
 /// Write an `ApplyReport`'s pretty JSON serialization to the `--out` file path —
 /// the write shared by the cascade verbs that accept `--out` (`apply`,
-/// `rewrite-wikilink`); the caller silences stdout on this path.
+/// `rewrite-wikilink`); the caller silences stdout on this path. Routes through
+/// `write_report_json` so the file projection and the stdout projection are the
+/// same one-policy serialization, never two independent implementations.
 pub(super) fn write_report_to_out_file(path: &str, report: &ApplyReport) -> io::Result<()> {
-    let json = serde_json::to_string_pretty(report)?;
-    std::fs::write(path, format!("{json}\n"))
+    let mut buf: Vec<u8> = Vec::new();
+    write_report_json(&mut buf, report)?;
+    std::fs::write(path, buf)
 }
 
 /// The status-label vocabulary an `ApplyReport`'s outcome maps to in a TTY

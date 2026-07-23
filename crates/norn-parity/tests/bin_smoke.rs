@@ -116,8 +116,12 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // NRN-417 adds two `errors` cases (the two service-local `--vault` flag
     // collision orderings) taking the total to 136; self-check runs oracle vs.
     // itself, so both Match.
+    // NRN-408 adds four mutation refusal `--format json` cases (`set` / `new` /
+    // `move` refusals + an `edit` refusal) taking the total to 140; self-check
+    // runs oracle vs. itself (both emit the oracle's own bare refusal shape), so
+    // all 140 Match.
     assert!(
-        stdout.contains("136 cases: 136 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("140 cases: 140 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -295,8 +299,21 @@ fn default_mode_gates_help_cases_exit_0() {
     // outcome instead of the oracle's real local-flag behavior. The gated total
     // grows to 135 and the diverged count from 60 to 62; the match count stays
     // 73.
+    // NRN-408 (ADR 0016, one mutation-report JSON policy) RE-ANCHORS three
+    // already-gated cases from MATCH to DIVERGE and adds four DIVERGING
+    // refusal-json cases, under two ledger entries: PD-135 (the serializer policy
+    // — every mutation verb's `--format json` emits the full report envelope,
+    // pretty in struct order with one trailing newline, on every outcome path:
+    // the re-anchored `mutate-set-push-apply-json-zoo` plus the new
+    // `mutate-set-refusal-json-zoo` / `mutate-new-refusal-json-zoo` /
+    // `edit-refusal-json-zoo` / `mutate-move-refusal-json-zoo`) and PD-136
+    // (`MutationOutcome::Forecast` — a `set`/`new`/`edit` dry-run reports
+    // `outcome: forecast`, re-anchoring `edit-json-ops-forecast-zoo` and the MCP
+    // `mcp-tools-call-set-forecast-zoo`). The gated total grows to 139, the match
+    // count settles at 70 and the diverged count at 69 (the three former MATCH
+    // cases become diverged, plus the four new refusal-json cases).
     assert!(
-        stdout.contains("135 cases: 73 match, 62 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("139 cases: 70 match, 69 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -333,6 +350,15 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-134",
         "err-service-status-local-vault-flag-deleted-zoo",
         "err-service-vault-global-flag-before-subcommand-zoo",
+        "PD-135",
+        "PD-136",
+        "mutate-set-refusal-json-zoo",
+        "mutate-new-refusal-json-zoo",
+        "edit-refusal-json-zoo",
+        "mutate-move-refusal-json-zoo",
+        "mutate-set-push-apply-json-zoo",
+        "edit-json-ops-forecast-zoo",
+        "mcp-tools-call-set-forecast-zoo",
         "read-get-ambiguous-json-zoo",
         "read-get-unknown-col-warning-zoo",
         "mcp-tools-call-get-missing-zoo",

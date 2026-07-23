@@ -217,7 +217,11 @@ pub fn execute(
             body_bytes_new,
             body_bytes_old,
             applied,
-            outcome: MutationOutcome::Applied,
+            outcome: if applied {
+                MutationOutcome::Applied
+            } else {
+                MutationOutcome::Forecast
+            },
             error: None,
             warnings: synthed.warnings,
         },
@@ -790,7 +794,7 @@ mod tests {
         };
         let exec = execute(&cache, None, &params, TODAY, &mut sink()).unwrap();
         let r = &exec.report;
-        assert_eq!(r.outcome, MutationOutcome::Applied);
+        assert_eq!(r.outcome, MutationOutcome::Forecast);
         assert!(!r.applied); // forecast
         let by_field: BTreeMap<_, _> = r
             .frontmatter_changes
@@ -862,7 +866,8 @@ mod tests {
             ..Default::default()
         };
         let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
-        assert_eq!(exec.report.outcome, MutationOutcome::Applied);
+        // No `confirm` → a forecast; the unknown-field warning still surfaces.
+        assert_eq!(exec.report.outcome, MutationOutcome::Forecast);
         assert!(exec
             .report
             .warnings

@@ -238,7 +238,11 @@ pub fn execute(
             operation: "new".into(),
             path,
             applied,
-            outcome: MutationOutcome::Applied,
+            outcome: if applied {
+                MutationOutcome::Applied
+            } else {
+                MutationOutcome::Forecast
+            },
             frontmatter_created: built.created,
             body_bytes,
             warnings,
@@ -1088,7 +1092,7 @@ validate:
             ..Default::default()
         };
         let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
-        assert_eq!(exec.report.outcome, MutationOutcome::Applied);
+        assert_eq!(exec.report.outcome, MutationOutcome::Forecast);
         assert!(!exec.report.applied);
         assert_eq!(
             exec.report.predicted_path.as_deref(),
