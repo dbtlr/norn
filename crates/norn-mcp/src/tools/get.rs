@@ -183,7 +183,8 @@ fn record_json(rec: &GetRecord, want_body: bool, want_hash: bool) -> Value {
 }
 
 /// Project the wire report into the typed [`GetOutput`], deriving the `isError`
-/// bit from the report's `error:`-prefixed notes (a target that did not resolve).
+/// bit from whether any report note carries error [`Severity`](norn_wire::Severity)
+/// (`Note::is_error`) — a target that did not resolve.
 pub(crate) fn envelope(p: &GetParams, report: GetReport) -> MutationResult<GetOutput> {
     let want_body = p.all_cols || col_wants(&p.col, ".body");
     let want_hash = col_wants(&p.col, ".document_hash");
