@@ -3,7 +3,7 @@
 //! Unknown keys — top-level and per-vault — are captured into `#[serde(flatten)]`
 //! `extra` maps and re-serialized on write, so an older binary editing the file
 //! never destroys future keys (auth tokens, centrally-located per-vault config).
-//! This is data round-trip, not byte-for-byte formatting preservation.
+//! This is data round-trip, not verbatim formatting preservation.
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;

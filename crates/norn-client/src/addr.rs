@@ -8,9 +8,9 @@
 //! ## Why this shape (decided, NRN-345)
 //!
 //! - **Fixed-width names in a short base dir structurally eliminate the
-//!   `sockaddr_un` `SUN_LEN` overflow class.** A `sun_path` is ~104 bytes; the
-//!   donor derived sockets under long per-vault cache paths and papered over the
-//!   overflow with a silent fallback (a real bug). Hashing the root to 16 hex
+//!   `sockaddr_un` `SUN_LEN` overflow class.** A `sun_path` is ~104 bytes;
+//!   deriving sockets under long per-vault cache paths risks overflow, which a
+//!   silent fallback would mask (a real bug). Hashing the root to 16 hex
 //!   chars gives a bounded name regardless of how long or unicode-heavy the real
 //!   root path is; a short runtime base keeps the whole path well under the cap.
 //! - **The fingerprint isolates builds.** It keys the socket by ADR 0012 build
