@@ -50,6 +50,7 @@ fn unknown_dynamic_field_is_rejected_with_a_did_you_mean_hint() {
         idle_ttl: Duration::from_secs(2),
         build: None,
         config_path: None,
+        events_dir: None,
     };
     let handle = std::thread::spawn(move || norn_owner::run(config).expect("owner run"));
 
@@ -162,6 +163,7 @@ fn describe_unknown_dynamic_field_is_rejected_with_a_did_you_mean_hint() {
         idle_ttl: Duration::from_secs(2),
         build: None,
         config_path: None,
+        events_dir: None,
     };
     let handle = std::thread::spawn(move || norn_owner::run(config).expect("owner run"));
 

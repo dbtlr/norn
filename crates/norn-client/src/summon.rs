@@ -27,6 +27,7 @@ pub fn spawn_owner(
     idle_ttl: Duration,
     build: &str,
     config_override: Option<&Path>,
+    events_dir: Option<&Path>,
 ) -> Result<(), ClientError> {
     let mut command = Command::new(owner_exe);
     command
@@ -44,6 +45,11 @@ pub fn spawn_owner(
     // to `<vault_root>/.norn/config.yaml`.
     if let Some(config) = config_override {
         command.arg("--config").arg(config);
+    }
+    // The durable telemetry events dir (NRN-400), passed only for a registered
+    // vault; its absence tells the owner to keep in-memory (ephemeral) telemetry.
+    if let Some(events) = events_dir {
+        command.arg("--events-dir").arg(events);
     }
     command
         .stdin(Stdio::null())

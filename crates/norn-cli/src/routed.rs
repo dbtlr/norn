@@ -73,11 +73,36 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
         None => None,
     };
 
+    // Registration is what unlocks durable telemetry (NRN-400): a registered
+    // vault resolves an events dir (honoring a `logs` override) the owner writes
+    // the mutation event stream under and `audit` reads back; an unregistered
+    // root resolves `None`, so its owner keeps in-memory (ephemeral) telemetry.
+    //
+    // Durability is keyed on whether the RESOLVED ROOT is registered, NOT on how
+    // this invocation addressed it — an owner is keyed by vault root + build, so
+    // a registered root reached by `-C <path>` (resolver name `None`) must
+    // resolve the SAME events dir as one reached by `--vault <name>`, or the
+    // first summon would decide durability by luck of addressing. A reverse
+    // lookup over the canonical root answers "is this root registered?"
+    // independent of the addressing.
+    let events_dir = registry
+        .reverse_lookup(&resolved.root)
+        .ok()
+        .flatten()
+        .and_then(|vault| {
+            norn_config::events_dir_for(
+                |key| std::env::var_os(key),
+                &resolved.root,
+                vault.logs.as_deref(),
+            )
+        });
+
     let exe = std::env::current_exe()
         .map_err(|e| Diagnostic::new(format!("cannot locate the norn executable: {e}")))?;
     let config = SummonConfig::for_vault(resolved.root, exe)
         .map_err(|e| client_error_diagnostic(&e))?
-        .with_config_override(config_override);
+        .with_config_override(config_override)
+        .with_events_dir(events_dir);
 
     let mut session = open(&config).map_err(|e| client_error_diagnostic(&e))?;
     session

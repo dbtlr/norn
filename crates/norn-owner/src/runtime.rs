@@ -68,6 +68,11 @@ pub struct OwnerConfig {
     /// client passed one. `None` → the warm-up loads `<vault_root>/.norn/config.yaml`
     /// (the default) if present, else runs under the empty default config.
     pub config_path: Option<Utf8PathBuf>,
+    /// The durable telemetry events dir (NRN-400), set ONLY for a registered
+    /// vault. `Some` → confirmed mutations append to a daily JSONL file here and
+    /// `audit` reads it back; `None` → the owner keeps in-memory (ephemeral)
+    /// telemetry and `audit` returns an empty stream.
+    pub events_dir: Option<Utf8PathBuf>,
 }
 
 /// The owner-lifetime lock path sits next to the socket: `<socket>.lock`.
@@ -116,10 +121,14 @@ struct OwnerState {
     /// critical section, so writes serialize and `{{seq}}` allocation observes
     /// prior creates. Reads never take it, so they stay concurrent.
     mutation_lock: tokio::sync::Mutex<()>,
+    /// The durable telemetry events dir (NRN-400), `Some` only for a registered
+    /// vault. A confirmed mutation appends to a daily JSONL file here; `audit`
+    /// reads it back. `None` → in-memory telemetry, `audit` yields empty.
+    events_dir: Option<Utf8PathBuf>,
 }
 
 impl OwnerState {
-    fn new(build: Option<String>) -> Self {
+    fn new(build: Option<String>, events_dir: Option<Utf8PathBuf>) -> Self {
         Self {
             serving: Mutex::new(ServingState::Cold),
             slot: Mutex::new(None),
@@ -132,7 +141,13 @@ impl OwnerState {
             shutdown_requested: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
             mutation_lock: tokio::sync::Mutex::new(()),
+            events_dir,
         }
+    }
+
+    /// The durable telemetry events dir, `Some` only for a registered vault.
+    fn events_dir(&self) -> Option<Utf8PathBuf> {
+        self.events_dir.clone()
     }
 
     fn is_shutdown(&self) -> bool {
@@ -279,7 +294,10 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
 
     let listener = lifecycle::bind_listener(&config.socket_path)?;
 
-    let state = Arc::new(OwnerState::new(config.build.clone()));
+    let state = Arc::new(OwnerState::new(
+        config.build.clone(),
+        config.events_dir.clone(),
+    ));
 
     // Warm-up on summon: cold -> opening -> ready, on a blocking thread. The
     // JoinHandle is RETAINED (finding 2) so shutdown can await it before the db
@@ -787,6 +805,43 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
             )
             .await
         }
+        ClientFrame::Audit { params } => {
+            // Read-only over the durable event stream. The events dir is
+            // owner-held (registration-gated); the cache is not consulted, so
+            // the `dispatch_read` closure ignores it — but the readiness gate +
+            // fault classification are still shared. A bad `--since`/`--until`
+            // is a clean rejection (exit 2), never a cache fault.
+            let events_dir = state.events_dir();
+            dispatch_read(
+                state,
+                "audit",
+                move |_cache| {
+                    use norn_core::telemetry::read;
+                    let since = match params.since.as_deref().map(read::parse_since).transpose() {
+                        Ok(v) => v,
+                        Err(msg) => return Ok(Err(FieldRejection::from(msg))),
+                    };
+                    let until = match params.until.as_deref().map(read::parse_until).transpose() {
+                        Ok(v) => v,
+                        Err(msg) => return Ok(Err(FieldRejection::from(msg))),
+                    };
+                    let filter = read::Filter {
+                        trace: params.trace.clone(),
+                        status: params.status.clone(),
+                        target: params.target.clone(),
+                        since,
+                        until,
+                    };
+                    let events = match &events_dir {
+                        Some(dir) => read::read_events(dir, &filter, params.limit),
+                        None => Vec::new(),
+                    };
+                    Ok(Ok(norn_wire::AuditReport { events }))
+                },
+                |report| OwnerFrame::Audit { report },
+            )
+            .await
+        }
         ClientFrame::Set { params } => {
             let config = state.vault_config();
             let today = today_local();
@@ -984,15 +1039,34 @@ async fn dispatch_mutation<R: Send + 'static>(
     fn run_mutation<R>(
         slot: &Arc<VaultCacheSlot>,
         confirm: bool,
+        events_dir: Option<&Utf8Path>,
         execute: impl FnOnce(&Cache, &mut EventSink) -> anyhow::Result<MutationExecution<R>>,
     ) -> anyhow::Result<R> {
-        // Telemetry's durable store is deferred with the audit verb; the owner
-        // runs a discard sink so the executor's event emission has a home without
-        // persisting.
-        let mut sink = EventSink::discard(
-            IdGen::with_seed(0),
-            Clock::fixed("1970-01-01T00:00:00.000Z"),
-        );
+        // Durable telemetry (NRN-400) is registration-gated AND confirmed-only:
+        // a registered vault's CONFIRMED mutation appends to the daily JSONL
+        // store under `events_dir`, minting a real trace id the report carries;
+        // a forecast (writes nothing) and an ephemeral vault (no events dir) both
+        // keep the in-memory discard sink. `IdGen::new()` gives a process-unique
+        // trace id so distinct invocations never collide in the store.
+        let mut sink = match (confirm, events_dir) {
+            (true, Some(dir)) => {
+                let start_ts = Clock::System.now_rfc3339();
+                // Best-effort retention sweep before opening today's file.
+                norn_core::telemetry::store::prune_events(
+                    dir,
+                    norn_core::telemetry::store::DEFAULT_RETENTION,
+                    &start_ts[..10],
+                );
+                norn_core::telemetry::store::enforce_size_cap(
+                    dir,
+                    norn_core::telemetry::store::EVENTS_SIZE_CAP_BYTES,
+                    &start_ts[..10],
+                );
+                EventSink::open(dir, start_ts, IdGen::new(), Clock::System)
+                    .unwrap_or_else(|_| EventSink::discard(IdGen::new(), Clock::System))
+            }
+            _ => EventSink::discard(IdGen::new(), Clock::System),
+        };
         // Capture the pre-write baseline for the increment commit BEFORE the write.
         let baseline = if confirm {
             Some(slot.serve_read(|cache| cache.load_graph_index())?)
@@ -1017,7 +1091,11 @@ async fn dispatch_mutation<R: Send + 'static>(
     // Serialize every write through the owner's single-writer lock, acquired in
     // this shared seam rather than per-arm so it can never be omitted.
     let _writer = state.mutation_lock.lock().await;
-    let result = tokio::task::spawn_blocking(move || run_mutation(&slot, confirm, execute)).await;
+    let events_dir = state.events_dir();
+    let result = tokio::task::spawn_blocking(move || {
+        run_mutation(&slot, confirm, events_dir.as_deref(), execute)
+    })
+    .await;
     classify_mutation(state, result, to_frame, verb)
 }
 
@@ -1216,7 +1294,7 @@ mod tests {
     /// config message (the user-error path), never a `go_fatal` Error frame.
     #[test]
     fn warmup_config_error_rejects_every_frame() {
-        let state = Arc::new(OwnerState::new(None));
+        let state = Arc::new(OwnerState::new(None, None));
         state.set_warmup_error(
             "invalid config /vault/.norn/config.yaml: unknown field `not`".to_string(),
         );

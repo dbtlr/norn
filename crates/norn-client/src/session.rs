@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use norn_wire::{
-    ApplyParams, ApplyReport, ClientFrame, CountParams, CountReport, DeleteParams, DescribeParams,
-    DescribeReport, EditParams, EditReport, FindParams, FindReport, GetParams, GetReport,
-    MoveParams, NewParams, NewReport, OwnerFrame, RepairParams, RepairReport,
+    ApplyParams, ApplyReport, AuditParams, AuditReport, ClientFrame, CountParams, CountReport,
+    DeleteParams, DescribeParams, DescribeReport, EditParams, EditReport, FindParams, FindReport,
+    GetParams, GetReport, MoveParams, NewParams, NewReport, OwnerFrame, RepairParams, RepairReport,
     RewriteWikilinkParams, ServingState, SetParams, SetReport, ValidateParams, ValidateReport,
     WriterProgress, CONTROL_PROTOCOL,
 };
@@ -206,6 +206,18 @@ impl OwnerSession {
         match self.request(&ClientFrame::Repair { params })? {
             OwnerFrame::Repair { report } => Ok(report),
             other => Err(unexpected_frame(other, "repair report")),
+        }
+    }
+
+    /// Run an `audit` read against the owner's durable mutation event stream.
+    /// Read-only: the OWNER reads the per-vault JSONL store (it is co-located
+    /// with the vault's state home; an off-filesystem client could not) and
+    /// returns the newest-first matched events. An empty stream yields an empty
+    /// report, never an error.
+    pub fn audit(&mut self, params: AuditParams) -> Result<AuditReport, ClientError> {
+        match self.request(&ClientFrame::Audit { params })? {
+            OwnerFrame::Audit { report } => Ok(report),
+            other => Err(unexpected_frame(other, "audit report")),
         }
     }
 

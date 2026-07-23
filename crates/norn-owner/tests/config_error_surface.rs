@@ -56,6 +56,7 @@ fn bad_config_warm_up_rejects_the_client_then_eager_reaps() {
         idle_ttl: TTL,
         build: None,
         config_path: None,
+        events_dir: None,
     };
 
     let run_started = Instant::now();
