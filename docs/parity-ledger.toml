@@ -839,3 +839,24 @@ old = "the `--col field ... not present in any matching document` warning fires 
 new = "the bare-field warning returns early when the page is truncated (`returned < total`) or the match set is empty, so it fires only when every matching document was actually inspected and genuinely lacks the field; the unknown-facet check stays unconditional"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-400 (decided-better): the `tools/list` catalog now serves all 14 tool
+# names (`vault.audit` is the 14th, ported this task), so the rewrite's published
+# schema surface can finally be gated against the pinned oracle. The one
+# STRUCTURAL divergence among the shared tools is the zero-indexed paging
+# redesign (NRN-332) surfacing in `get`'s published `inputSchema`: the rewrite's
+# `starts_at` default is `0` where the oracle's is `1`. This entry extends PD-105
+# (the same redesign on the CLI's `--starts-at`) to the MCP schema surface — a
+# ledger DECLARATION, not a normalization rule (normalizers hide, ledger entries
+# declare). The rest of the `tools/list` delta is incidental prose (tool
+# descriptions, the typed-note schemas PD-133 already covers on the call
+# surface). See `crates/norn-mcp/src/tools/get.rs` (the `starts_at` default) and
+# `crates/norn-mcp/src/server.rs` (the served catalog).
+[[entry]]
+id = "PD-141"
+surface = "mcp tools/list (published inputSchema — zero-indexed get.starts_at)"
+cases = ["mcp-initialize-tools-list-zoo"]
+old = "the full `tools/list` catalog is 14 tools whose `get` `inputSchema` documents `starts_at` as a 1-indexed default (`default: 1`), matching the oracle's paging"
+new = "the catalog is the same 14 tools, but `get`'s published `inputSchema` documents `starts_at` as a zero-indexed default (`default: 0`, NRN-332) — the MCP-surface face of PD-105; the remaining catalog delta is incidental prose (descriptions / typed-note schemas)"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

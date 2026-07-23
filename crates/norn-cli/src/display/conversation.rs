@@ -69,6 +69,23 @@ impl<'a> Conversation<'a> {
         writeln!(self.err, "warning: {msg}")
     }
 
+    /// The trust-posture operator advisory for a degraded telemetry sink
+    /// (NRN-400 review): a CONFIRMED apply whose durable events dir/file could
+    /// not be opened, or whose write mid-failed, still mints and prints a real
+    /// `trace_id` — the executor never blocks a write on telemetry — but that
+    /// id correlates to no durable audit line, so the operator gets nothing
+    /// back from a later `norn audit --trace <id>`. This is the ONE signal
+    /// they get on the CLI surface (the owner log carries the underlying IO
+    /// error); shares the closed `warning:` vocabulary rather than inventing a
+    /// new prefix. Call only when the report's `telemetry_degraded` flag is
+    /// set — a no-op call site would print a false alarm.
+    pub fn telemetry_degraded_warning(&mut self) -> io::Result<()> {
+        writeln!(
+            self.err,
+            "warning: audit trail not persisted for this apply (durable write failed)"
+        )
+    }
+
     /// One `error: <msg>` annotation — a fatal condition the verb reports before
     /// exiting non-zero.
     pub fn error(&mut self, msg: &str) -> io::Result<()> {

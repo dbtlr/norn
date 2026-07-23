@@ -46,12 +46,14 @@ pub const CONTRACT: &str = "norn-config: central config, resolution order, rever
 
 mod error;
 mod home;
+mod logs;
 mod model;
 mod registry;
 mod resolve;
 
 pub use error::ConfigError;
 pub use home::ConfigHome;
+pub use logs::{events_dir_for, XDG_STATE_HOME_ENV};
 pub use registry::{
     validate_name, RegisteredVault, Registry, SetOutcome, VaultChanges, VaultOverrides,
 };

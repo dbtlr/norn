@@ -264,6 +264,7 @@ fn refused_output(args: &EditArgs, message: &str) -> Output {
     let report = EditReport {
         schema_version: EDIT_REPORT_SCHEMA_VERSION,
         trace_id: String::new(),
+        telemetry_degraded: false,
         operation: "edit".into(),
         target: args.target.clone(),
         edits: Vec::new(),

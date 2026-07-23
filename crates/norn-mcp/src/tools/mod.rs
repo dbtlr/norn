@@ -15,7 +15,7 @@
 //! `structuredContent` has exactly two shapes across the whole tool surface,
 //! by verb family — this is the deliberate contract, not an accident of
 //! per-tool authoring: every READ tool (`count` / `find` / `get` / `describe`
-//! / `validate` / `repair`) projects its report FLAT — the report's own
+//! / `validate` / `repair` / `audit`) projects its report FLAT — the report's own
 //! fields sit at the top level of `structuredContent`. Every MUTATION tool
 //! (`set` / `new` / `edit` / `move` / `delete` / `rewrite_wikilink` / `apply`)
 //! wraps its report under one `{ report: … }` envelope key. The split tracks
@@ -28,6 +28,7 @@
 //! the flat shape.
 
 pub mod apply;
+pub mod audit;
 pub mod count;
 pub mod delete;
 pub mod describe;

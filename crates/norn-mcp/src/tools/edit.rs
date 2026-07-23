@@ -89,6 +89,7 @@ mod tests {
         EditReport {
             schema_version: norn_wire::EDIT_REPORT_SCHEMA_VERSION,
             trace_id: String::new(),
+            telemetry_degraded: false,
             operation: "edit".into(),
             target: "notes/a.md".into(),
             edits: vec![],

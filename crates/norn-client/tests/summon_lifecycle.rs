@@ -29,6 +29,7 @@ fn base_config(vault_root: PathBuf, runtime_dir: PathBuf, ttl: Duration) -> Summ
         owner_exe: common::norn_bin(),
         connect_budget: Duration::from_secs(15),
         config_override: None,
+        events_dir: None,
     }
 }
 

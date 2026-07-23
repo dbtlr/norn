@@ -4,20 +4,27 @@
 //! seams ([`IdGen`], [`Clock`]), and the in-memory [`EventSink`] the mutation
 //! executor emits through and reads back to fold an [`norn_wire::ApplyReport`].
 //!
-//! # Ported seam (ADR 0018)
+//! # Two halves (ADR 0018)
 //!
 //! The executor needs the event STREAM in memory: it emits `op_planned` /
 //! per-action / retry events and then folds them back into cascade summaries and
-//! per-op statuses. That in-memory stream ports here whole. The DURABLE side —
-//! the daily-file JSONL store (`store::daily_file_name`) and the `norn audit`
-//! READ verb over it (`telemetry::read`) — is audit-command surface that ports
-//! with the telemetry + CLI layer. It is not dropped:
-//! the sink keeps a value-in `writer` seam so the owner can attach a durable
-//! `Write` sink later ([`EventSink::with_writer`]), and every event is always
-//! retained in [`EventSink::events`] regardless of the writer state.
+//! per-op statuses — the in-memory stream, always retained in
+//! [`EventSink::events`] regardless of the durable writer state.
+//!
+//! The DURABLE side (NRN-400) sits behind the value-in `writer` seam: for a
+//! REGISTERED vault the owner attaches a daily-file JSONL sink via
+//! [`EventSink::open`] (the `store` submodule names the file and owns
+//! retention), so every CONFIRMED mutation appends one OTEL Logs object per
+//! line; an ephemeral (unregistered) tier keeps the in-memory
+//! [`EventSink::discard`]. The `read` submodule is the mirror image — the
+//! `norn audit` read verb parses those lines back into
+//! [`norn_wire::AuditEvent`] rows. norn-core stays root-free: the events dir
+//! arrives as a value.
 
 pub mod event;
 pub mod ids;
+pub mod read;
+pub mod store;
 
 pub use event::{Event, Severity};
 pub use ids::{Clock, IdGen};
@@ -39,10 +46,18 @@ pub struct EventSink {
     /// the mutation stream persisted; norn-core never opens a file itself.
     writer: Option<Box<dyn Write + Send>>,
     service_version: String,
+    /// Set when a durable writer was ATTEMPTED (a registered vault) but failed —
+    /// an `open()` dir-create/file-open failure, or a later `emit()` write
+    /// failure — never for a by-design in-memory sink ([`Self::discard`] called
+    /// directly for a forecast or an unregistered vault, where no durable
+    /// attempt was ever made). See [`degraded`](Self::degraded).
+    degraded: bool,
 }
 
 impl EventSink {
-    /// In-memory-only sink (dry-run, tests, degraded). Never touches disk.
+    /// In-memory-only sink (dry-run, tests, an unregistered vault). Never
+    /// touches disk, and never counts as [`degraded`](Self::degraded) — there
+    /// was no durable attempt to fail.
     pub fn discard(ids: IdGen, clock: Clock) -> Self {
         Self::with_writer(ids, clock, None)
     }
@@ -63,12 +78,68 @@ impl EventSink {
             events: Vec::new(),
             writer,
             service_version: env!("CARGO_PKG_VERSION").to_string(),
+            degraded: false,
+        }
+    }
+
+    /// File-backed sink for a registered vault's durable telemetry. Best-effort:
+    /// if the events dir can't be created or the daily file can't be opened, one
+    /// stderr warning is emitted and an in-memory ([`Self::discard`]-style) sink
+    /// is returned instead — this NEVER returns `Err` for an IO problem, so a
+    /// telemetry hiccup can never fail a mutation. The returned sink's
+    /// [`degraded`](Self::degraded) flag is set in that fallback case, so the
+    /// caller can surface the loss to the operator instead of silently minting
+    /// a trace id that correlates to nothing.
+    ///
+    /// `start_ts` is the invocation start timestamp (RFC-3339 UTC); it selects
+    /// the daily file via [`store::daily_file_name`]. The `events_dir` arrives as
+    /// a value (the owner resolved it from the vault's state/logs home).
+    pub fn open(
+        events_dir: &camino::Utf8Path,
+        start_ts: String,
+        ids: IdGen,
+        clock: Clock,
+    ) -> std::io::Result<Self> {
+        if let Err(e) = std::fs::create_dir_all(events_dir.as_std_path()) {
+            eprintln!(
+                "warning: could not create telemetry events dir {events_dir}: {e}; \
+                 continuing without the log"
+            );
+            let mut sink = Self::discard(ids, clock);
+            sink.degraded = true;
+            return Ok(sink);
+        }
+        let file_path = events_dir.join(store::daily_file_name(&start_ts));
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file_path.as_std_path())
+        {
+            Ok(file) => Ok(Self::with_writer(ids, clock, Some(Box::new(file)))),
+            Err(e) => {
+                eprintln!(
+                    "warning: could not open telemetry events file {file_path}: {e}; \
+                     continuing without the log"
+                );
+                let mut sink = Self::discard(ids, clock);
+                sink.degraded = true;
+                Ok(sink)
+            }
         }
     }
 
     /// The trace ID shared by every event in this invocation.
     pub fn trace_id(&self) -> &str {
         &self.trace_id
+    }
+
+    /// Whether the durable writer degraded: it was attempted (a registered
+    /// vault) but either failed to open ([`open`](Self::open)'s fallback) or
+    /// failed mid-write (`emit`'s fallback). `false` for a by-design in-memory
+    /// sink (forecast, or an unregistered vault) — there, no durable write was
+    /// ever attempted, so there is nothing to have degraded FROM.
+    pub fn degraded(&self) -> bool {
+        self.degraded
     }
 
     /// All events recorded so far, in emit order.
@@ -139,9 +210,15 @@ impl EventSink {
         };
         if let Some(w) = self.writer.as_mut() {
             let line = ev.to_json(&self.service_version).to_string();
+            // Two owners on DIFFERENT builds (a mid-upgrade window) can append to
+            // the same daily file concurrently; a line longer than PIPE_BUF is not
+            // guaranteed atomic and the two writers' bytes can interleave into one
+            // torn line — the reader (`telemetry::read`) skips any line it cannot
+            // parse rather than failing the whole read. Tracked: NRN-464.
             if writeln!(w, "{line}").and_then(|_| w.flush()).is_err() {
                 eprintln!("warning: mutation telemetry write failed; continuing without the log");
                 self.writer = None;
+                self.degraded = true;
             }
         }
         self.events.push(ev);

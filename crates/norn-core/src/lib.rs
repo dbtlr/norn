@@ -63,15 +63,17 @@
 //! - [`cache`] — the cache engine: an owner-opened SQLite projection of the vault
 //!   graph with predicate SQL emission over [`query::DocumentQuery`], paged find,
 //!   deep projection, and the freshness/refresh trust seam.
-//! - [`telemetry`] — the in-memory mutation event stream the applier emits
-//!   through and folds into an `ApplyReport` (the durable JSONL store + the
-//!   `norn audit` read verb are not here yet — see below).
+//! - [`telemetry`] — the mutation event stream the applier emits through and
+//!   folds into an `ApplyReport`, plus the durable side (NRN-400): the daily-file
+//!   JSONL store ([`telemetry::store`], written through
+//!   [`telemetry::EventSink::open`] for a registered vault) and the read-back
+//!   ([`telemetry::read`]) the `norn audit` verb runs over it. The events dir is
+//!   value-in (the owner resolves the root); norn-core reads the files but never
+//!   resolves XDG/CWD.
 //! - [`seq_alloc`] — apply-time `{{seq}}` id allocation (filesystem max+1),
 //!   coupled to the writer boundary the owner holds.
 //!
-//! Deliberately NOT here yet (later port phases): the
-//! durable daily-file JSONL telemetry store and the `norn audit` read verb over
-//! it (only the in-memory event stream is ported); the `init` / `init_scan`
+//! Deliberately NOT here yet (later port phases): the `init` / `init_scan`
 //! vault-scaffolding and staging surface; on-disk config *resolution* (the
 //! central config home is `norn-config`'s job, injected as a value here); and the
 //! owner's warm-cache serve loop — held-open cache, generations, read pool,

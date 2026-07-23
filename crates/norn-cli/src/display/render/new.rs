@@ -113,11 +113,15 @@ pub(crate) fn render_new(
         let shorts: Vec<String> = report.warnings.iter().map(warning_short).collect();
         sink.mutation_warnings_aligned(&shorts)?;
 
-        // `new`'s verb path doesn't route through `EventSink` yet, so `trace_id` is
-        // `String::new()` here — an empty-until-real placeholder line until telemetry
-        // wires through (NRN-400).
+        // A confirmed `new` routes through the shared `apply_migration_plan`
+        // executor (NRN-400), which mints a real `EventSink`-derived trace id —
+        // never the empty placeholder a pre-NRN-400 forecast-only wiring would
+        // have left here.
         if report.applied {
             sink.trace_footer(&report.trace_id)?;
+            if report.telemetry_degraded {
+                conv.telemetry_degraded_warning()?;
+            }
         } else {
             writeln!(sink.writer())?;
             writeln!(sink.writer(), "Apply with --yes")?;
@@ -189,6 +193,7 @@ mod tests {
         let report = NewReport {
             schema_version: 2,
             trace_id: String::new(),
+            telemetry_degraded: false,
             operation: "new".into(),
             path: Some("a.md".into()),
             applied: false,

@@ -1617,28 +1617,28 @@ const MCP_FIXTURE: Fixture = Fixture {
 /// argv/stdout/stderr comparison every other case uses.
 ///
 /// NRN-384 ported the MCP catalog over the owner session (see `norn-mcp`), so the
-/// `tools/call` cases are now `ported: true` and gated against the oracle. The
-/// lone `tools/list` case (`mcp-initialize-tools-list-zoo`) stays `ported: false`
-/// DELIBERATELY: the full catalog cannot byte-match the pinned oracle, for two
-/// structural reasons, so gating it would force ledger entries this task does not
-/// own. First, `vault.audit` — the oracle serves 14 tools, but the rewrite's audit
-/// VERB is not yet ported (no `session.audit`, no durable telemetry store), so the
-/// catalog omits it (13 tools); advertising a dead tool would violate the
-/// thin-adapter contract. Second, the published `inputSchema` reflects the
-/// rewrite's DELIBERATE param redesigns — most visibly zero-indexed paging
-/// (NRN-332), which changes `get`'s `starts_at` default. Both are flagged for
-/// adjudication (audit-verb port; a tools/list ledger entry or a normalization
-/// rule) rather than silently ledgered here. `--self-check` (oracle vs. itself)
-/// still runs and Matches this case, keeping the frame-driving harness exercised
-/// over the full catalog.
+/// `tools/call` cases are `ported: true` and gated against the oracle. NRN-400
+/// closed the catalog: `vault.audit` is now the 14th tool, so the rewrite serves
+/// the same 14 tool NAMES the pinned oracle does, and the `tools/list` case
+/// (`mcp-initialize-tools-list-zoo`) is now `ported: true`. It DIVERGES from the
+/// oracle by exactly one structural difference among the shared tools — the
+/// published `get` `inputSchema` reflects zero-indexed paging (NRN-332), so its
+/// `starts_at` default is `0` where the oracle's is `1` — plus incidental prose
+/// (descriptions, typed-note schemas). That single structural divergence is
+/// declared, not normalized: PD-141 extends PD-105 (the CLI's zero-indexed
+/// `--starts-at`) to the MCP schema surface, so the case passes as a ledgered
+/// divergence rather than a byte match. `--self-check` (oracle vs. itself) still
+/// Matches the case, keeping the frame-driving harness exercised over the full
+/// catalog.
 const MCP_CASES: &[Case] = &[
     Case {
         // The MCP session lifecycle anchor: `initialize` (id 1) then
         // `tools/list` (id 2), with the standard `notifications/initialized`
         // in between (a notification — no `id`, no response expected, so
-        // `crate::mcp::run_case` excludes it from pairing). Stays `ported:
-        // false` — see the module note above (audit-tool absence + intentional
-        // schema divergences make the full catalog un-byte-matchable).
+        // `crate::mcp::run_case` excludes it from pairing). `ported: true`
+        // (NRN-400): the catalog now serves all 14 tool names; the case DIVERGES
+        // from the oracle only on the zero-indexed `get` `starts_at` default (+
+        // incidental prose), declared by PD-141 (see the module note above).
         id: "mcp-initialize-tools-list-zoo",
         argv: &["mcp"],
         fixture: MCP_FIXTURE,
@@ -1648,7 +1648,7 @@ const MCP_CASES: &[Case] = &[
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
         ]),
         mutating: false,
-        ported: false,
+        ported: true,
         expect_oracle_exit: 0,
         requires_doc: None,
         requires_code: None,

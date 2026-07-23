@@ -126,9 +126,9 @@ fn render_post_state(out: &mut String, report: &RunReport) {
 /// driving found any difference: frame content (JSON-RPC id, method, and a
 /// concise pointer to where the two responses first differ — never a full
 /// frame dump), a process exit-code mismatch, and any extra/duplicate
-/// response ids. Nothing is emitted when no MCP case diverged (every
-/// current MCP case is `ported: false`, so a gated run never even drives
-/// one; `--self-check`/`--all` can).
+/// response ids. The MCP catalog is ported, so a gated run drives these cases
+/// (the `tools/list` case diverges under PD-141); nothing is emitted only when
+/// no MCP case actually diverged.
 fn render_mcp_divergences(out: &mut String, report: &RunReport) {
     let diverged: Vec<(&str, &McpDivergence)> = report
         .outcomes

@@ -68,6 +68,11 @@ pub struct OwnerConfig {
     /// client passed one. `None` → the warm-up loads `<vault_root>/.norn/config.yaml`
     /// (the default) if present, else runs under the empty default config.
     pub config_path: Option<Utf8PathBuf>,
+    /// The durable telemetry events dir (NRN-400), set ONLY for a registered
+    /// vault. `Some` → confirmed mutations append to a daily JSONL file here and
+    /// `audit` reads it back; `None` → the owner keeps in-memory (ephemeral)
+    /// telemetry and `audit` returns an empty stream.
+    pub events_dir: Option<Utf8PathBuf>,
 }
 
 /// The owner-lifetime lock path sits next to the socket: `<socket>.lock`.
@@ -116,10 +121,19 @@ struct OwnerState {
     /// critical section, so writes serialize and `{{seq}}` allocation observes
     /// prior creates. Reads never take it, so they stay concurrent.
     mutation_lock: tokio::sync::Mutex<()>,
+    /// The durable telemetry events dir (NRN-400), `Some` only for a registered
+    /// vault. A confirmed mutation appends to a daily JSONL file here; `audit`
+    /// reads it back. `None` → in-memory telemetry, `audit` yields empty.
+    events_dir: Option<Utf8PathBuf>,
+    /// The `YYYY-MM-DD` day the retention sweep (`prune_events` +
+    /// `enforce_size_cap`) last ran for, `None` before the first confirmed
+    /// mutation. Amortizes the sweep to once per new day rather than once per
+    /// mutation — see [`mark_swept_if_new_day`](Self::mark_swept_if_new_day).
+    swept_day: Mutex<Option<String>>,
 }
 
 impl OwnerState {
-    fn new(build: Option<String>) -> Self {
+    fn new(build: Option<String>, events_dir: Option<Utf8PathBuf>) -> Self {
         Self {
             serving: Mutex::new(ServingState::Cold),
             slot: Mutex::new(None),
@@ -132,6 +146,29 @@ impl OwnerState {
             shutdown_requested: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
             mutation_lock: tokio::sync::Mutex::new(()),
+            events_dir,
+            swept_day: Mutex::new(None),
+        }
+    }
+
+    /// The durable telemetry events dir, `Some` only for a registered vault.
+    fn events_dir(&self) -> Option<Utf8PathBuf> {
+        self.events_dir.clone()
+    }
+
+    /// Whether the retention sweep should run for `today` (a `YYYY-MM-DD`
+    /// string): `true` (and caches `today`) the first time this is called for
+    /// a given day, `false` on every later call for the same day. Confirmed
+    /// mutations are already serialized through `mutation_lock`, so this needs
+    /// no synchronization beyond the plain `Mutex` — there is never a race
+    /// between two callers deciding the same day is new.
+    fn mark_swept_if_new_day(&self, today: &str) -> bool {
+        let mut swept = self.swept_day.lock().unwrap_or_else(|p| p.into_inner());
+        if swept.as_deref() == Some(today) {
+            false
+        } else {
+            *swept = Some(today.to_string());
+            true
         }
     }
 
@@ -279,7 +316,10 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
 
     let listener = lifecycle::bind_listener(&config.socket_path)?;
 
-    let state = Arc::new(OwnerState::new(config.build.clone()));
+    let state = Arc::new(OwnerState::new(
+        config.build.clone(),
+        config.events_dir.clone(),
+    ));
 
     // Warm-up on summon: cold -> opening -> ready, on a blocking thread. The
     // JoinHandle is RETAINED (finding 2) so shutdown can await it before the db
@@ -787,6 +827,52 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
             )
             .await
         }
+        ClientFrame::Audit { params } => {
+            // Read-only over the durable event stream. The events dir is
+            // owner-held (registration-gated); the cache is not consulted, so
+            // the `dispatch_read` closure ignores it — but the readiness gate +
+            // fault classification are still shared. A bad `--since`/`--until`
+            // is a clean rejection (exit 1, the read-verb convention), never a
+            // cache fault.
+            let events_dir = state.events_dir();
+            dispatch_read(
+                state,
+                "audit",
+                move |_cache| {
+                    use norn_core::telemetry::read;
+                    let since = match params.since.as_deref().map(read::parse_since).transpose() {
+                        Ok(v) => v,
+                        Err(msg) => return Ok(Err(FieldRejection::from(msg))),
+                    };
+                    let until = match params.until.as_deref().map(read::parse_until).transpose() {
+                        Ok(v) => v,
+                        Err(msg) => return Ok(Err(FieldRejection::from(msg))),
+                    };
+                    // A reversed range (`--since` after `--until`) can never
+                    // match an event — silently returning an empty report would
+                    // read as "no events in range" rather than "the range is
+                    // backwards". Reject it the same way as an unparseable date
+                    // (exit 1, the read-verb convention) instead of failing open.
+                    if let Err(msg) = read::validate_bounds(since, until) {
+                        return Ok(Err(FieldRejection::from(msg)));
+                    }
+                    let filter = read::Filter {
+                        trace: params.trace.clone(),
+                        status: params.status.clone(),
+                        target: params.target.clone(),
+                        since,
+                        until,
+                    };
+                    let events = match &events_dir {
+                        Some(dir) => read::read_events(dir, &filter, params.limit),
+                        None => Vec::new(),
+                    };
+                    Ok(Ok(norn_wire::AuditReport { events }))
+                },
+                |report| OwnerFrame::Audit { report },
+            )
+            .await
+        }
         ClientFrame::Set { params } => {
             let config = state.vault_config();
             let today = today_local();
@@ -984,15 +1070,48 @@ async fn dispatch_mutation<R: Send + 'static>(
     fn run_mutation<R>(
         slot: &Arc<VaultCacheSlot>,
         confirm: bool,
+        events_dir: Option<&Utf8Path>,
+        mark_swept_if_new_day: impl FnOnce(&str) -> bool,
         execute: impl FnOnce(&Cache, &mut EventSink) -> anyhow::Result<MutationExecution<R>>,
     ) -> anyhow::Result<R> {
-        // Telemetry's durable store is deferred with the audit verb; the owner
-        // runs a discard sink so the executor's event emission has a home without
-        // persisting.
-        let mut sink = EventSink::discard(
-            IdGen::with_seed(0),
-            Clock::fixed("1970-01-01T00:00:00.000Z"),
-        );
+        // Durable telemetry (NRN-400) is registration-gated AND confirmed-only:
+        // a registered vault's CONFIRMED mutation appends to the daily JSONL
+        // store under `events_dir`, minting a real trace id the report carries;
+        // a forecast (writes nothing) and an ephemeral vault (no events dir) both
+        // keep the in-memory discard sink. `IdGen::new()` gives a process-unique
+        // trace id so distinct invocations never collide in the store.
+        let mut sink = match (confirm, events_dir) {
+            (true, Some(dir)) => {
+                let start_ts = Clock::System.now_rfc3339();
+                // Best-effort retention sweep, amortized to once per new day (not
+                // once per mutation, NRN-400 review): the sweep only visits the
+                // events dir the first time a confirmed mutation lands on a day
+                // the owner has not yet swept.
+                //
+                // Deliberate bound: both `prune_events` (age) and
+                // `enforce_size_cap` (total bytes) constrain PRIOR days' files
+                // only — today's file is never removed by either, so it is
+                // unbounded by design. The store never drops a record from the
+                // day still being written; `enforce_size_cap` fires a distinct
+                // warning when today's file alone is already over the cap
+                // (retention cannot correct that by sweeping older days).
+                if mark_swept_if_new_day(&start_ts[..10]) {
+                    norn_core::telemetry::store::prune_events(
+                        dir,
+                        norn_core::telemetry::store::DEFAULT_RETENTION,
+                        &start_ts[..10],
+                    );
+                    norn_core::telemetry::store::enforce_size_cap(
+                        dir,
+                        norn_core::telemetry::store::EVENTS_SIZE_CAP_BYTES,
+                        &start_ts[..10],
+                    );
+                }
+                EventSink::open(dir, start_ts, IdGen::new(), Clock::System)
+                    .unwrap_or_else(|_| EventSink::discard(IdGen::new(), Clock::System))
+            }
+            _ => EventSink::discard(IdGen::new(), Clock::System),
+        };
         // Capture the pre-write baseline for the increment commit BEFORE the write.
         let baseline = if confirm {
             Some(slot.serve_read(|cache| cache.load_graph_index())?)
@@ -1017,7 +1136,18 @@ async fn dispatch_mutation<R: Send + 'static>(
     // Serialize every write through the owner's single-writer lock, acquired in
     // this shared seam rather than per-arm so it can never be omitted.
     let _writer = state.mutation_lock.lock().await;
-    let result = tokio::task::spawn_blocking(move || run_mutation(&slot, confirm, execute)).await;
+    let events_dir = state.events_dir();
+    let sweep_state = Arc::clone(state);
+    let result = tokio::task::spawn_blocking(move || {
+        run_mutation(
+            &slot,
+            confirm,
+            events_dir.as_deref(),
+            move |today| sweep_state.mark_swept_if_new_day(today),
+            execute,
+        )
+    })
+    .await;
     classify_mutation(state, result, to_frame, verb)
 }
 
@@ -1216,7 +1346,7 @@ mod tests {
     /// config message (the user-error path), never a `go_fatal` Error frame.
     #[test]
     fn warmup_config_error_rejects_every_frame() {
-        let state = Arc::new(OwnerState::new(None));
+        let state = Arc::new(OwnerState::new(None, None));
         state.set_warmup_error(
             "invalid config /vault/.norn/config.yaml: unknown field `not`".to_string(),
         );
@@ -1263,6 +1393,37 @@ mod tests {
         assert!(
             !state.is_shutdown(),
             "recording a config error must not itself latch shutdown"
+        );
+    }
+
+    /// NRN-400 (review): the retention sweep (`prune_events` +
+    /// `enforce_size_cap`) is amortized to once per new day, not once per
+    /// confirmed mutation. `mark_swept_if_new_day` is the gate `run_mutation`
+    /// consults — this pins its own trigger logic directly, independent of the
+    /// filesystem-touching sweep functions themselves.
+    #[test]
+    fn mark_swept_if_new_day_fires_once_per_day() {
+        let state = OwnerState::new(None, None);
+
+        assert!(
+            state.mark_swept_if_new_day("2026-07-23"),
+            "the first call for a day must trigger the sweep"
+        );
+        assert!(
+            !state.mark_swept_if_new_day("2026-07-23"),
+            "a second call for the SAME day must not re-trigger the sweep"
+        );
+        assert!(
+            !state.mark_swept_if_new_day("2026-07-23"),
+            "repeated calls for the same day stay suppressed"
+        );
+        assert!(
+            state.mark_swept_if_new_day("2026-07-24"),
+            "a new day must trigger the sweep again"
+        );
+        assert!(
+            !state.mark_swept_if_new_day("2026-07-24"),
+            "the new day is cached in turn"
         );
     }
 }

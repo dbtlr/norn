@@ -28,6 +28,7 @@
 //!   the distinction by construction so a re-rendered routed result cannot lose
 //!   it.
 
+mod audit;
 mod control;
 mod filter;
 mod finding;
@@ -38,6 +39,7 @@ mod presence;
 mod read;
 mod report;
 
+pub use audit::{AuditEvent, AuditParams, AuditReport};
 pub use control::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
 pub use filter::FilterParams;
 pub use finding::{Finding, Note, Severity};

@@ -758,6 +758,7 @@ dependencies = [
 name = "norn-config"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "fs2",
  "serde",
  "tempfile",

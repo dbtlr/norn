@@ -9,7 +9,8 @@
 //!
 //! The summoner (`norn-client`) spawns the current executable in *owner mode* —
 //! `norn __norn-owner --socket <path> --vault-root <path> --ttl-secs <n>
-//! [--build <fp>] [--config <path>]`. That argv shape is an internal contract between the client
+//! [--build <fp>] [--config <path>] [--events-dir <path>]`. That argv shape is
+//! an internal contract between the client
 //! (which builds it) and this crate (which parses it); it is deliberately NOT a
 //! clap subcommand, so it never touches the CLI grammar.
 //! The bin calls [`run_if_owner_mode`] before `norn_cli::run`; a non-owner argv
@@ -90,6 +91,7 @@ struct ParsedOwnerArgs {
     ttl_secs: u64,
     build: Option<String>,
     config: Option<camino::Utf8PathBuf>,
+    events_dir: Option<camino::Utf8PathBuf>,
 }
 
 #[cfg(unix)]
@@ -100,6 +102,7 @@ impl ParsedOwnerArgs {
         let mut ttl_secs: Option<u64> = None;
         let mut build: Option<String> = None;
         let mut config: Option<camino::Utf8PathBuf> = None;
+        let mut events_dir: Option<camino::Utf8PathBuf> = None;
 
         let mut it = args.iter();
         while let Some(flag) = it.next() {
@@ -123,6 +126,9 @@ impl ParsedOwnerArgs {
                 "--config" => {
                     config = Some(next_value(&mut it, flag)?.into());
                 }
+                "--events-dir" => {
+                    events_dir = Some(next_value(&mut it, flag)?.into());
+                }
                 other => return Err(format!("unknown owner arg: {other}")),
             }
         }
@@ -133,6 +139,7 @@ impl ParsedOwnerArgs {
             ttl_secs: ttl_secs.ok_or("missing --ttl-secs")?,
             build,
             config,
+            events_dir,
         })
     }
 
@@ -143,6 +150,7 @@ impl ParsedOwnerArgs {
             idle_ttl: Duration::from_secs(self.ttl_secs),
             build: self.build,
             config_path: self.config,
+            events_dir: self.events_dir,
         }
     }
 }
@@ -176,6 +184,38 @@ mod tests {
         assert_eq!(config.vault_root.as_str(), "/vault");
         assert_eq!(config.idle_ttl, Duration::from_secs(120));
         assert_eq!(config.build.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn parses_the_optional_events_dir() {
+        let args = vec![
+            "--socket".to_string(),
+            "/s.sock".to_string(),
+            "--vault-root".to_string(),
+            "/v".to_string(),
+            "--ttl-secs".to_string(),
+            "5".to_string(),
+            "--events-dir".to_string(),
+            "/state/norn/hash/events".to_string(),
+        ];
+        let config = ParsedOwnerArgs::parse(&args).unwrap().into_config();
+        assert_eq!(
+            config.events_dir.as_deref().map(|p| p.as_str()),
+            Some("/state/norn/hash/events")
+        );
+    }
+
+    #[test]
+    fn events_dir_is_optional() {
+        let args = vec![
+            "--socket".to_string(),
+            "/s.sock".to_string(),
+            "--vault-root".to_string(),
+            "/v".to_string(),
+            "--ttl-secs".to_string(),
+            "5".to_string(),
+        ];
+        assert!(ParsedOwnerArgs::parse(&args).unwrap().events_dir.is_none());
     }
 
     #[test]

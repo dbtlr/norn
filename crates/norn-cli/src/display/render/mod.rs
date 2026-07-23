@@ -9,6 +9,7 @@
 //! their bespoke text unstyled (they never resolve a palette).
 
 pub(crate) mod apply;
+pub(crate) mod audit;
 pub(crate) mod count;
 pub(crate) mod delete;
 pub(crate) mod describe;

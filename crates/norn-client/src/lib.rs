@@ -102,6 +102,12 @@ pub struct SummonConfig {
     /// `<vault_root>/.norn/config.yaml` (the default). Passed to a freshly
     /// summoned owner; an already-live owner keeps the config it warmed under.
     pub config_override: Option<PathBuf>,
+    /// The durable telemetry events directory (NRN-400), set ONLY for a
+    /// registered vault — registration is what unlocks the durable event
+    /// stream. `None` → the summoned owner keeps in-memory (ephemeral)
+    /// telemetry. Passed to a freshly summoned owner; an already-live owner
+    /// keeps the events dir it started under.
+    pub events_dir: Option<PathBuf>,
 }
 
 impl SummonConfig {
@@ -117,12 +123,20 @@ impl SummonConfig {
             owner_exe,
             connect_budget: DEFAULT_CONNECT_BUDGET,
             config_override: None,
+            events_dir: None,
         })
     }
 
     /// Set the resolver-derived config override the summoned owner warms under.
     pub fn with_config_override(mut self, config_override: Option<PathBuf>) -> Self {
         self.config_override = config_override;
+        self
+    }
+
+    /// Set the durable telemetry events dir a registered vault's owner writes
+    /// under (NRN-400). Left `None` for an ephemeral vault.
+    pub fn with_events_dir(mut self, events_dir: Option<PathBuf>) -> Self {
+        self.events_dir = events_dir;
         self
     }
 }
@@ -153,6 +167,7 @@ pub(crate) fn connect_or_summon(
         config.idle_ttl,
         &config.fingerprint,
         config.config_override.as_deref(),
+        config.events_dir.as_deref(),
     )?;
 
     // Connect with bounded retry as it binds. A losing-flock racer's client

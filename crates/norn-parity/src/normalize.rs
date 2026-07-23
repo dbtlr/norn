@@ -17,22 +17,18 @@ pub enum Normalization {
     VaultRoot,
     /// Mask the telemetry trace id from a CONFIRMED-apply mutation report, on
     /// both surfaces it appears: the records footer `trace: <hex>` and the JSON
-    /// `"trace_id":"<hex>"` field. Keyed precisely to the donor's two spellings
-    /// — the run of ascii-hexdigits immediately following each marker is
-    /// removed, nothing else; the marker itself is left in place, so whether
-    /// the line/field is PRESENT AT ALL stays a pinned, un-normalized part of
-    /// the comparison. The pinned oracle mints a fresh random id on every apply
-    /// (empirically non-deterministic: 3 runs of one op yield 3 distinct ids).
-    /// The rewrite's own id varies by verb: `set`/`new`/`edit` carry an
-    /// empty-until-real id (their verb paths don't yet route through
-    /// `EventSink` — NRN-400 wires it), while the four cascade verbs
-    /// (`apply`/`move`/`delete`/`rewrite-wikilink`) already emit a real 32-hex
-    /// `EventSink`-derived id on a confirmed apply. Masking both sides' id text
-    /// makes a confirmed apply that is otherwise byte-equal Match regardless of
-    /// which of those the rewrite's id happens to be, without over-normalizing
-    /// anything but the id run itself. Applied per-case, only on the
-    /// confirmed-apply cases that need it — never a read case, and never a
-    /// refusal/forecast (which carry no id on either side).
+    /// `"trace_id":"<hex>"` field. Keyed precisely to the two spellings — the run
+    /// of ascii-hexdigits immediately following each marker is removed, nothing
+    /// else. BOTH binaries now mint a non-deterministic hex id on a confirmed
+    /// apply (the oracle always did; the rewrite mints a real id from its
+    /// `EventSink` since NRN-400 wired the durable telemetry store — every
+    /// mutation report's `trace_id`, not just the four cascade verbs), so the
+    /// id run differs run to run on each side and must be collapsed to compare
+    /// the rest of an otherwise byte-equal apply. Normalizing each side's id to
+    /// empty leaves the PRESENCE of the marker pinned while masking only the id
+    /// text. Applied per-case, only on the confirmed-apply cases that carry a
+    /// trace — never a read case, and never a refusal/forecast (which carry no
+    /// id on either side).
     TraceId,
     /// Strip the `plan_hash` hex from a cascade-verb `--format json` report (the
     /// pretty `"plan_hash": "<hex>"` field). `plan_hash` is
@@ -103,10 +99,9 @@ pub fn normalize_text(text: &str, vault_roots: &[&Path], steps: &[Normalization]
 /// applied trace id is a fixed-format hex run right after a literal marker on
 /// both the records (`trace: `) and JSON (`"trace_id":"`) surfaces on EITHER
 /// side, so this masks whatever id text follows the marker — the oracle's
-/// random hex, the rewrite's own real `EventSink`-derived hex on the four
-/// cascade verbs, or `set`/`new`/`edit`'s empty-until-real id — without
-/// touching anything but the id run itself. A marker followed by no hexdigit
-/// (an empty id) is a no-op.
+/// random hex, or the rewrite's own real `EventSink`-derived hex on any verb's
+/// confirmed apply — without touching anything but the id run itself. A
+/// marker followed by no hexdigit (an empty id, e.g. a forecast) is a no-op.
 fn strip_hex_run_after(text: &str, marker: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -158,8 +153,9 @@ mod tests {
 
     #[test]
     fn trace_id_records_footer_hex_is_stripped_to_empty() {
-        // The oracle's applied records footer carries a random hex id; strip it
-        // to the rewrite's empty form so an otherwise byte-equal apply matches.
+        // A confirmed-apply records footer carries a hex id on each side; both
+        // strip to the bare `trace: ` marker so an otherwise byte-equal apply
+        // matches. Here the second operand shows the already-stripped form.
         let oracle = "set notes/a.md\n  x: 1 → 2\ntrace: 30b8c28c3eafd385c63aca6850a209fa\n";
         let rewrite = "set notes/a.md\n  x: 1 → 2\ntrace: \n";
         assert_eq!(

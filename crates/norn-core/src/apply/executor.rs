@@ -493,10 +493,16 @@ pub fn apply_migration_plan(
     } else {
         sink.trace_id().to_string()
     };
+    // A dry-run never touches the sink's durable writer, so it is never
+    // "degraded" in a way worth surfacing; a confirmed apply mirrors the
+    // sink's own degraded flag straight through (NRN-400 review: the operator
+    // advisory).
+    let telemetry_degraded = !ctx.dry_run && sink.degraded();
     Ok(assemble_report(
         plan,
         ctx.dry_run,
         trace_id,
+        telemetry_degraded,
         ops,
         preconditions,
         warnings,
@@ -520,6 +526,7 @@ fn assemble_report(
     plan: &MigrationPlan,
     dry_run: bool,
     trace_id: String,
+    telemetry_degraded: bool,
     ops: Vec<ApplyReportOp>,
     preconditions: Vec<ApplyReportPrecondition>,
     warnings: Vec<ApplyWarning>,
@@ -534,6 +541,7 @@ fn assemble_report(
     ApplyReport {
         schema_version: APPLY_REPORT_SCHEMA_VERSION,
         trace_id,
+        telemetry_degraded,
         plan_hash: plan.canonical_hash(),
         vault_root: plan.vault_root.clone(),
         dry_run,
@@ -696,10 +704,13 @@ fn build_refusal_report(
 
     // A refusal writes nothing: exactly one op `failed`, the rest `not_run`, no
     // touched paths. Tallies and the common envelope come from `assemble_report`.
+    // No sink was ever consulted for a refusal, so `telemetry_degraded` stays
+    // false — mirroring the empty `trace_id`.
     assemble_report(
         plan,
         dry_run,
         String::new(),
+        false,
         ops,
         preconditions,
         Vec::new(),
@@ -802,10 +813,12 @@ fn build_plan_refusal_report(
     }
 
     // A refusal writes nothing; tallies + envelope come from `assemble_report`.
+    // No sink was ever consulted, so `telemetry_degraded` stays false.
     assemble_report(
         plan,
         dry_run,
         String::new(),
+        false,
         ops,
         Vec::new(),
         Vec::new(),

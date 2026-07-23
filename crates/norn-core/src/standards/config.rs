@@ -33,9 +33,6 @@ pub struct VaultConfig {
     pub repair: RepairConfig,
     #[serde(default)]
     pub templates: TemplatesConfig,
-    /// Mutation-telemetry settings; wired into the applier-path event sink.
-    #[serde(default)]
-    pub telemetry: Option<TelemetryConfig>,
     /// Cache-lifecycle settings; see CacheConfig.
     #[serde(default)]
     pub cache: Option<CacheConfig>,
@@ -65,7 +62,6 @@ impl Default for VaultConfig {
             validate: ValidateConfig::default(),
             repair: RepairConfig::default(),
             templates: TemplatesConfig::default(),
-            telemetry: None,
             cache: None,
             inbox: InboxConfig::default(),
             index: IndexConfig::default(),
@@ -100,26 +96,13 @@ fn default_time_format() -> String {
     "HH:mm".into()
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TelemetryConfig {
-    #[serde(default)]
-    pub location: Option<String>,
-    /// Parsed from a duration string (e.g. "90d"); None when absent or
-    /// unparseable (best-effort — a malformed value does not fail config load).
-    #[serde(default, deserialize_with = "de_opt_duration")]
-    pub retention: Option<std::time::Duration>,
-}
-
-/// Default mutation-telemetry retention when unconfigured: 90 days.
-pub const DEFAULT_RETENTION: std::time::Duration = std::time::Duration::from_secs(90 * 86_400);
-
 /// Cache-lifecycle settings; wired into `norn cache prune` and the lazy sweep.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheConfig {
-    /// Age-eviction window, parsed from a duration string (e.g. "90d");
-    /// None when absent or unparseable (best-effort, like telemetry.retention).
+    /// Age-eviction window, parsed from a duration string (e.g. "90d"); None
+    /// when absent or unparseable (best-effort — a malformed value does not
+    /// fail config load).
     #[serde(default, deserialize_with = "de_opt_duration")]
     pub retention: Option<std::time::Duration>,
     /// "lazy" (default) or "manual". Unknown values fall back to lazy.
@@ -143,13 +126,12 @@ impl CacheConfig {
 }
 
 /// Default cache age-eviction window when unconfigured: 90 days.
-/// Deliberately its own constant — `DEFAULT_RETENTION` stays event-scoped.
 pub const DEFAULT_CACHE_RETENTION: std::time::Duration =
     std::time::Duration::from_secs(90 * 86_400);
 
-/// serde adapter for the duration-string fields `TelemetryConfig::retention`
-/// and `CacheConfig::retention`. Best-effort: a malformed duration string
-/// falls back to `None` rather than failing the whole config load.
+/// serde adapter for `CacheConfig::retention`'s duration-string field.
+/// Best-effort: a malformed duration string falls back to `None` rather than
+/// failing the whole config load.
 fn de_opt_duration<'de, D>(d: D) -> Result<Option<std::time::Duration>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1998,30 +1980,6 @@ templates:
         let cfg = parse_config(yaml, camino::Utf8Path::new(".norn/config.yaml")).unwrap();
         assert_eq!(cfg.templates.date_format, "YYYY-MM-DD");
         assert_eq!(cfg.templates.time_format, "HH:mm");
-    }
-
-    #[test]
-    fn telemetry_config_parses_location_and_retention() {
-        let cfg = parse("telemetry:\n  location: /tmp/foo\n  retention: 30d\n").unwrap();
-        let t = cfg.telemetry.expect("telemetry section");
-        assert_eq!(t.location.as_deref(), Some("/tmp/foo"));
-        assert_eq!(
-            t.retention,
-            Some(std::time::Duration::from_secs(30 * 86_400))
-        );
-    }
-
-    #[test]
-    fn telemetry_absent_is_none() {
-        let cfg = parse("validate: {}\n").unwrap();
-        assert!(cfg.telemetry.is_none());
-    }
-
-    #[test]
-    fn telemetry_malformed_retention_is_ignored_not_fatal() {
-        let cfg = parse("telemetry:\n  retention: not-a-duration\n").unwrap();
-        let t = cfg.telemetry.unwrap();
-        assert!(t.retention.is_none(), "bad duration -> None, no error");
     }
 
     #[test]
