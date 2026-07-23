@@ -109,8 +109,7 @@ struct OwnerState {
     /// notification landing between `select!` iterations is not lost — the next
     /// `notified()` returns immediately from the stored permit.
     wake: tokio::sync::Notify,
-    /// The owner's in-process single-writer lock (ADR 0013/0017 — the successor
-    /// to the donor's cross-process mutation flock). Every mutation frame
+    /// The owner's in-process single-writer lock (ADR 0013/0017). Every mutation frame
     /// (`set`/`new`/…) holds it across its whole build-plan → apply → cache-commit
     /// critical section, so writes serialize and `{{seq}}` allocation observes
     /// prior creates. Reads never take it, so they stay concurrent.
@@ -322,7 +321,7 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
                 // Config load is the user-error boundary: any failure reading or
                 // parsing the vault's own `.norn/config.yaml` is a user mistake,
                 // NOT a disposable-db fault. Its message (`invalid config
-                // <path>: <detail>`) is the oracle's config-error surface.
+                // <path>: <detail>`) is the user-facing config-error surface.
                 let cache_config = match crate::config_load::load_cache_config(
                     &vault_root,
                     config_path.as_deref(),
@@ -356,7 +355,7 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
                 // it so every frame is answered with Rejected, then exit CLEANLY
                 // (exit 0). NOT go_fatal — a bad config must not crash-loop the
                 // summon; the connecting client surfaces this as the config
-                // error (the oracle's `invalid config …` message), and the owner
+                // error (the `invalid config …` message), and the owner
                 // eager-reaps so a resummon re-reads a fixed config.
                 Ok(Ok(WarmUp::ConfigInvalid(message))) => {
                     eprintln!("norn owner: warm-up rejected (invalid config): {message}");
@@ -1121,10 +1120,9 @@ fn classify_read<R>(
 /// Today's date as `%Y-%m-%d` in the caller's LOCAL timezone, injected into the
 /// read verbs so `--on today` resolves against the user's wall clock (NRN-359).
 ///
-/// This matches the oracle, which resolves `today` locally — the previous port
-/// used UTC as a "no timezone dependency" simplification, which silently shifted
-/// the boundary by up to a day near midnight. No ledger entry: this returns to
-/// the oracle's behavior rather than diverging from it.
+/// Local, not UTC: `--on today` must resolve against the user's wall clock. A
+/// UTC resolution silently shifts the day boundary by up to a day near midnight,
+/// which is wrong for a user asking about "today".
 ///
 /// jiff over chrono: jiff is a single, focused datetime crate with first-class
 /// local-zone support — `TimeZone::system()` reads the system zone (honoring
@@ -1204,7 +1202,7 @@ mod tests {
             OwnerFrame::Rejected { message, .. } => {
                 assert!(
                     message.starts_with("invalid config "),
-                    "expected the oracle-shaped config message, got {message:?}"
+                    "expected the `invalid config` message, got {message:?}"
                 );
             }
             other => panic!("expected Rejected, got {other:?}"),
