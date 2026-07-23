@@ -124,6 +124,7 @@ CHANGELOG breaking change.
 |---|---|
 | `unsupported-schema-version` | the plan's `schema_version` is not supported by this build |
 | `vault-root-mismatch` | the plan's `vault_root` does not match the effective cwd |
+| `vault-root-unreadable` | the vault root fails to canonicalize at apply time — a missing root or a non-searchable parent directory. A root that itself canonicalizes but has unreadable *contents* is not this: it currently surfaces as an owner cache-build failure, not an apply-time refusal |
 | `unknown-path` | the plan targets a document not in the index |
 | `conflicting-field-change` | two ops change the same field of the same document |
 | `conflicting-hashes` | two ops assert divergent document hashes for one path |

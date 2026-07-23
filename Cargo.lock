@@ -729,6 +729,7 @@ name = "norn-cli"
 version = "0.0.0"
 dependencies = [
  "anstyle",
+ "camino",
  "clap",
  "norn-client",
  "norn-config",

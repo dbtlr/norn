@@ -30,13 +30,16 @@ pub enum ApplyError {
     #[error("repair plan vault root does not match effective cwd: plan {plan}, cwd {cwd}")]
     VaultRootMismatch { plan: Utf8PathBuf, cwd: Utf8PathBuf },
 
-    // A missing or unreadable vault ROOT at apply time (NRN-414): the `-C`/
-    // NORN_ROOT root, or a registered root that vanished after resolution, does
-    // not exist or cannot be canonicalized. This is a USER fault (a bad root),
-    // not a norn bug — formerly a bare `anyhow` context that the apply envelope
-    // flattened to `internal-error`; typed here so the refusal carries the
-    // precise `vault-root-unreadable` code and names the offending root.
-    #[error("cannot access vault root {path}: {detail}")]
+    // The vault ROOT fails to canonicalize at apply time (NRN-414): the `-C`/
+    // NORN_ROOT root, or a registered root that vanished after resolution, is
+    // missing or sits under a non-searchable parent, so `canonicalize()` errors.
+    // This is a USER fault (a bad root), not a norn bug — formerly a bare
+    // `anyhow` context that the apply envelope flattened to `internal-error`;
+    // typed here so the refusal carries the precise `vault-root-unreadable`
+    // code and names the offending root. NOT covered: a root that itself
+    // canonicalizes but has unreadable *contents* — that surfaces as an owner
+    // cache-build failure, not this variant.
+    #[error("vault root failed to canonicalize {path}: {detail}")]
     VaultRootUnreadable { path: Utf8PathBuf, detail: String },
 
     #[error("repair plan targets a document not in the index: {path}")]

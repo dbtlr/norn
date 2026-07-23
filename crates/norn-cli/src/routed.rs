@@ -276,4 +276,46 @@ mod tests {
         let io = client_error_diagnostic(&ClientError::Io(std::io::Error::other("boom")));
         assert!(io.hints().is_empty(), "a raw IO error adds no filler hint");
     }
+
+    #[test]
+    fn precheck_messages_stay_prefix_aligned_with_index_error_display() {
+        // Drift-seam guard: `vault_root_precheck` hardcodes its own message
+        // strings rather than reusing `norn_core::graph::IndexError`'s Display
+        // (the two diverge for a good reason — the precheck appends the `(from
+        // <via>)` suffix `IndexError` has no business knowing about). If a
+        // future edit to either side's wording drifts the shared headline
+        // out of sync, this test catches it: the owner-side fail-safe classifies
+        // the very same vanished-root fault via `IndexError`, so an operator
+        // reading both a client-side precheck refusal and an owner-side warm-up
+        // failure for the same root sees one consistent headline.
+        let missing = PathBuf::from("/nonexistent/nrn414-vault-root");
+        let precheck_missing = vault_root_precheck(&missing, &ResolvedVia::ExplicitPath)
+            .expect("a missing -C root must be flagged before summoning");
+        let index_missing = norn_core::graph::IndexError::MissingRoot(
+            camino::Utf8PathBuf::from_path_buf(missing.clone()).expect("test path is valid UTF-8"),
+        );
+        assert!(
+            precheck_missing
+                .message()
+                .starts_with(&index_missing.to_string()),
+            "precheck message {:?} must stay prefixed with IndexError::MissingRoot's Display {:?}",
+            precheck_missing.message(),
+            index_missing.to_string()
+        );
+
+        let a_file = std::env::current_exe().unwrap();
+        let precheck_not_dir = vault_root_precheck(&a_file, &ResolvedVia::NornRootEnv)
+            .expect("a file-as-root must be flagged");
+        let index_not_dir = norn_core::graph::IndexError::RootNotDirectory(
+            camino::Utf8PathBuf::from_path_buf(a_file.clone()).expect("test path is valid UTF-8"),
+        );
+        assert!(
+            precheck_not_dir
+                .message()
+                .starts_with(&index_not_dir.to_string()),
+            "precheck message {:?} must stay prefixed with IndexError::RootNotDirectory's Display {:?}",
+            precheck_not_dir.message(),
+            index_not_dir.to_string()
+        );
+    }
 }

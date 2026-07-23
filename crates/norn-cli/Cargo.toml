@@ -17,3 +17,6 @@ anstyle = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
+
+[dev-dependencies]
+camino = "1.1"
