@@ -65,7 +65,7 @@ pub enum ApplyOutcome {
     /// At least one op FAILED at runtime after the apply began — exit 1.
     Failed,
     /// A validation-phase precondition refused the plan before any write; the
-    /// vault is byte-identical — exit 2.
+    /// vault is unchanged — exit 2.
     Refused,
     /// RESERVED for rebase-on-drift (NRN-152): a plan whose stale-hash
     /// precondition was auto-rebased onto current content and re-applied. NOT
@@ -99,7 +99,7 @@ impl ApplyReport {
     /// Build a minimal REFUSED report (`outcome: refused`, exit 2) carrying a
     /// coded [`ApplyError`] envelope, for a mutation whose PREFLIGHT (or mutation-lock
     /// acquisition) refused BEFORE any plan/apply context existed. A refusal
-    /// writes nothing, so the vault is byte-identical: one `failed` op holds the
+    /// writes nothing, so the vault is unchanged: one `failed` op holds the
     /// `{code, message, path?}` envelope.
     ///
     /// `dry_run` records whether the refused call was a `confirm: false` forecast,
@@ -192,7 +192,7 @@ pub struct ApplyReportOp {
     /// which reports apply-time ACTUALS: `link_impact` is what the graph index said
     /// BEFORE the delete (identical on the dry-run forecast and the confirmed
     /// apply), computed once in the applier so both the direct and warm-owner
-    /// paths render byte-identically without re-consulting the index. Populated
+    /// paths render identically without re-consulting the index. Populated
     /// ONLY for `delete_document` ops; `None` for every other op kind, so their
     /// serialized bytes are unchanged.
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -218,7 +218,7 @@ pub struct ApplyReportOp {
 ///
 /// Computed once in the applier from the graph index, so it rides the wire
 /// `ApplyReport` and the routed (warm-owner) records path reproduces the direct
-/// path byte-for-byte. Distinct from `cascade` (apply-time actuals): this is the
+/// path exactly. Distinct from `cascade` (apply-time actuals): this is the
 /// pre-delete index view, identical on a dry-run forecast and a confirmed apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkImpact {
@@ -312,7 +312,7 @@ pub enum OpStatus {
 /// refusal by comparing `code`, never the prose.
 ///
 /// The surface glue that DOWNCASTS a typed engine error into this envelope
-/// (`from_rich` / `from_anyhow` in the donor) lives in the presentation / wire
+/// (`from_rich` / `from_anyhow`) lives in the presentation / wire
 /// crates that own those error types, not here — this module owns only the
 /// value shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -520,9 +520,9 @@ mod tests {
         assert!(bare_json.get("cascade").is_none());
     }
 
-    /// NRN-175: the additive `path` / `stem` fields serialize only when
-    /// populated, so an op with no natural resolved path stays byte-identical to
-    /// the pre-NRN-175 shape.
+    /// The additive `path` / `stem` fields serialize only when populated, so an
+    /// op with no natural resolved path serializes identically to the shape
+    /// without those fields.
     #[test]
     fn path_and_stem_skip_serialize_when_none_present_when_some() {
         let bare = ApplyReportOp {
@@ -592,8 +592,8 @@ mod tests {
         );
     }
 
-    /// NRN-237: `link_impact` serializes only when populated (a `delete_document`
-    /// op), so a sibling verb's op stays byte-identical to the pre-NRN-237 shape;
+    /// `link_impact` serializes only when populated (a `delete_document` op), so
+    /// a sibling verb's op serializes identically to the shape without it;
     /// `redirect_to` is omitted when the delete carried no `--rewrite-to`.
     #[test]
     fn link_impact_skips_serialize_when_none_present_when_some() {

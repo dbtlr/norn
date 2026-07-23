@@ -73,15 +73,15 @@ pub enum OwnerSelector {
 }
 
 /// One operation. On the wire / on disk, `kind` is a sibling of the `fields`
-/// JSON payload (this shape is parity-pinned — an authored plan's `kind`+`fields`
-/// layout is a contract). At the EXECUTION boundary the executor resolves an op
+/// JSON payload (an authored plan's `kind`+`fields` layout is a stable
+/// on-disk/wire contract). At the EXECUTION boundary the executor resolves an op
 /// to the typed [`TypedOp`] vocabulary via `TypedOp::try_from(&op)`, so untyped
 /// `fields` indexing does not flow into the applier (NRN-405 part b / ADR 0016).
 ///
 /// `kind` stays a free `String` (not a closed enum) on purpose: an UNRECOGNIZED
 /// kind must still PARSE — it is refused later, at the [`TypedOp`] conversion, so
 /// the "unknown kind is an executor refusal, not a deserialize rejection" contract
-/// holds (parity-pinned).
+/// holds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MigrationOp {
     pub kind: String,
@@ -126,7 +126,7 @@ impl MigrationPlan {
 //
 // The structs mirror the keys of the `fields` object the on-disk plan carries.
 // They are a construction-time view, never serialized — typing the vocabulary does
-// NOT change the parity-pinned plan JSON (`MigrationOp.fields` stays the raw
+// NOT change the on-disk plan JSON (`MigrationOp.fields` stays the raw
 // `Value` envelope). `Value` survives ONLY at genuinely-arbitrary-JSON leaves
 // (`ChangeFields::expected_old_value` / `new_value` — a frontmatter value is any
 // JSON, exactly as `ApplyOp` types it), never as an opaque whole-op map.
@@ -297,12 +297,12 @@ pub enum TypedOp {
 }
 
 /// Why a [`MigrationOp`] could not resolve to a [`TypedOp`]. The `Display` strings
-/// are the EXACT messages the executor previously produced from its ad-hoc
-/// indexing, so a routed/refused apply reconstructs byte-identically.
+/// are the exact messages the executor produces during indexing, so a
+/// routed/refused apply reconstructs them identically.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypedOpError {
     /// The op `kind` is not one the executor knows. Message:
-    /// `unknown operation kind: {0}` (parity-pinned).
+    /// `unknown operation kind: {0}`.
     UnknownKind(String),
     /// A structural op is missing a required string field. Message:
     /// `{kind} missing {field}`.

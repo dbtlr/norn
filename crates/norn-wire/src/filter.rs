@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 /// The filter predicates shared by the read verbs (`find`, `count`, …), one
 /// field per predicate, wire-named exactly as the tool surface expects.
 ///
-/// This is the typed successor to the donor's `insert_filter_args` — the same
-/// wire encoding expressed as serde attributes instead of imperative map
-/// inserts. Every default/empty predicate is OMITTED from the wire (an empty
+/// This is the typed wire encoding, expressed as serde attributes instead of
+/// imperative map inserts. Every default/empty predicate is OMITTED from the
+/// wire (an empty
 /// list or `text: None` sends nothing), and deserialization treats an absent key
 /// as the default, so a fully-default value round-trips through `{}`.
 ///

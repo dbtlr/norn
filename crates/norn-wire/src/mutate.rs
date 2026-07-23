@@ -56,18 +56,14 @@ pub struct CodedError {
 /// affected frontmatter key when the warning is scoped to one, and `message` the
 /// operator-facing detail.
 ///
-/// # DELIBERATE DIVERGENCE from the donor (reason: discovered-inconsistency)
+/// # Unified warning envelope
 ///
-/// The donor's per-kind warning JSON is internally inconsistent — `set` tagged
-/// its unknown-field warning `kind: "unknown_field"` (snake_case) while `new`
-/// tagged the same class `"unknown-field"` (kebab), and different kinds carried
-/// different member sets (`{kind, field, message}` vs `{kind, title}`). This is
-/// donor slop, not a contract worth replicating. The rewrite emits ONE unified
-/// envelope for every warning kind — `{ code: <kebab>, field?: <key>, message }`
-/// — so a consumer parses one shape. A parity ledger entry (reason
-/// discovered-inconsistency, unified) attaches the moment a warning-bearing
-/// `--format json` parity case lands; the records short forms are donor-faithful
-/// and already covered.
+/// Every warning kind serializes as ONE shape — `{ code: <kebab>, field?: <key>,
+/// message }` — so a consumer parses a single record. The rejected alternative,
+/// a per-kind JSON with different tag spellings and member sets per class (e.g.
+/// `kind: "unknown_field"` for one verb, `"unknown-field"` for another, and
+/// `{kind, field, message}` vs `{kind, title}` member sets), forces consumers to
+/// branch on kind and is a source of drift.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationWarning {
     pub code: String,
@@ -107,23 +103,23 @@ pub struct SetParams {
     pub confirm: bool,
 }
 
-/// A `set` response — the donor `SetReport` (schema v2) shape. `--format json`
-/// serializes this directly, so field order is the JSON contract.
+/// A `set` response (schema v2). `--format json` serializes this directly, so
+/// field order is the JSON contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetReport {
     pub schema_version: u32,
     /// The telemetry trace id. Empty on EVERY outcome — forecast, refusal, AND
     /// applied — until the durable telemetry store lands with the audit verb; the
     /// owner's discard sink deliberately does not mint a placeholder on apply, so
-    /// the contract holds one shape and confirmed-apply parity needs no trace
-    /// normalization. Donor-parity ids return when telemetry ports. Serialized
-    /// right after `schema_version` to match the donor's compact struct-order JSON.
+    /// the contract holds one shape and a confirmed apply needs no trace
+    /// normalization. Serialized right after `schema_version` so it holds a
+    /// stable position in the struct-order JSON.
     #[serde(default)]
     pub trace_id: String,
     pub operation: String,
     pub target: String,
-    /// Always serialized — the donor emits `"frontmatter_changes":[]` on a no-op
-    /// (e.g. a pop that matched nothing), never omits the key.
+    /// Always serialized — a no-op (e.g. a pop that matched nothing) emits
+    /// `"frontmatter_changes":[]`, never omits the key.
     #[serde(default)]
     pub frontmatter_changes: Vec<FrontmatterChange>,
     pub body_changed: bool,
@@ -190,7 +186,7 @@ pub struct NewParams {
     pub confirm: bool,
 }
 
-/// A `new` response — the donor `NewReport` (schema v2) shape.
+/// A `new` response (schema v2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewReport {
     pub schema_version: u32,
@@ -248,10 +244,10 @@ pub struct EditParams {
     pub confirm: bool,
 }
 
-/// An `edit` response — the donor `EditReport` (schema v1) shape. Same outer
+/// An `edit` response (schema v1). Same outer
 /// envelope as [`SetReport`] with an `edits` array (one entry per applied op)
 /// replacing `frontmatter_changes`. `--format json` serializes this directly, so
-/// the field order below IS the JSON contract (donor struct order).
+/// the field order below IS the JSON contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditReport {
     pub schema_version: u32,
@@ -287,12 +283,12 @@ pub struct EditChange {
     pub applied: bool,
 }
 
-/// The `edit` report schema version (donor `edit::report::SCHEMA_VERSION`).
+/// The `edit` report schema version.
 pub const EDIT_REPORT_SCHEMA_VERSION: u32 = 1;
 
 // ── move / delete / rewrite-wikilink ──────────────────────────────────────────
 //
-// Unlike `set`/`new` — whose donor reports are compact verb-specific structs —
+// Unlike `set`/`new` — whose reports are compact verb-specific structs —
 // the `move`/`delete`/`rewrite-wikilink` verbs answer with the shared
 // [`ApplyReport`](crate::ApplyReport) (its `--format json` IS
 // `serde_json::to_string_pretty(&report)`). That report lives in this crate (the
@@ -304,9 +300,9 @@ pub const EDIT_REPORT_SCHEMA_VERSION: u32 = 1;
 //
 // The typed frame does NOT by itself guarantee the plan-DERIVED fields match —
 // chiefly `plan_hash` (`MigrationPlan::canonical_hash()`): that depends on the
-// execute seam constructing the plan's op FIELD SET donor-identically. See
-// `norn-core::mutate::{move_doc::single_move_fields, delete::delete_fields}`,
-// which are pinned to the donor's `mcp/tools/*` field sets (unit-tested) so the
+// execute seam constructing the plan's op FIELD SET the same way on every path.
+// See `norn-core::mutate::{move_doc::single_move_fields, delete::delete_fields}`,
+// which are pinned to fixed field sets (unit-tested) so the
 // hash matches. See `norn-owner`'s mutation dispatch and the CLI
 // `commands::{move_doc,delete,rewrite_wikilink}`.
 
@@ -365,7 +361,7 @@ pub struct RewriteWikilinkParams {
 /// from a handful of arguments — the CLI reads the plan source (file or stdin),
 /// detects its format, parses it into a `MigrationPlan`, and validates its
 /// `schema_version` BEFORE the wire (a malformed plan or a schema mismatch refuses
-/// client-side, byte-identical to the donor preamble). The parsed plan then crosses
+/// client-side, before the wire). The parsed plan then crosses
 /// TYPED as `plan: MigrationPlan` — the exact plan the direct `--format json`
 /// serializes and exactly what `repair` emits, so a repair→apply composition
 /// round-trips (ADR 0011: the plan bytes reviewed are the plan bytes applied). The
@@ -404,9 +400,8 @@ mod tests {
         );
     }
 
-    // Pins the PD-111 unified warning envelope's exact JSON keys. A parity
-    // diverged-verdict is keyed by case id and cannot see WHICH divergence the
-    // candidate emitted — this is the independent positive assertion.
+    // Pins the unified warning envelope's exact JSON keys — the single shape
+    // every warning kind serializes to.
     #[test]
     fn warning_envelope_serializes_to_the_unified_shape() {
         let w = MutationWarning {

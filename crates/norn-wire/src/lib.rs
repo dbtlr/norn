@@ -5,10 +5,10 @@
 //!
 //! # Shipped vocabulary
 //!
-//! This crate is the typed successor to the donor tree's `route_wire.rs`: the
-//! same wire encoding the CLI, MCP, and daemon sides exchange, expressed as
-//! serde structs instead of imperative `serde_json::Map` inserts. A new
-//! predicate is a struct field, not a forgotten map key.
+//! This crate is the typed wire encoding the CLI, MCP, and daemon sides
+//! exchange, expressed as serde structs instead of imperative
+//! `serde_json::Map` inserts. A new predicate is a struct field, not a
+//! forgotten map key.
 //!
 //! Phase 1 ships the SHARED vocabulary — verb-specific `Params`/`Report` types
 //! land with their verbs:

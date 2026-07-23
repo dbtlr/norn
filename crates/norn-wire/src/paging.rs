@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// The sort, limit, and paging knobs shared by the read verbs (`find`, `get`,
 /// …), wire-named exactly as the tool surface expects.
 ///
-/// The typed successor to the donor's `insert_paging`. Defaults are OMITTED from
+/// Defaults are OMITTED from
 /// the wire: `sort: None`, `desc: false`, `limit: None`, `no_limit: false`, and
 /// `starts_at == 0` (the zero-indexed default) all send nothing, so a
 /// fully-default value serializes to `{}`. An absent key deserializes to the

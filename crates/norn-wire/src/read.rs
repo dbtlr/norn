@@ -1,6 +1,6 @@
 //! The `find` / `count` request (`Params`) and response (`Report`) vocabulary.
 //!
-//! Pure serde types — the typed successor to the donor's `find`/`count` route
+//! Pure serde types — the typed `find`/`count` request/response
 //! envelopes. The owner executes a request against its warm cache and answers
 //! with the matching `Report`; the CLI renders that `Report` into the
 //! user-facing formats. No logic, no IO, no dependency on any other norn crate.
@@ -81,8 +81,8 @@ pub struct FindReport {
 /// can project any `--col` field or emit the whole block. The deep connection
 /// facets (headings + the three link sets) are carried as pre-serialized JSON
 /// values (`serde_json::to_value` of the cache's `Heading` / `Link` /
-/// `IncomingLink`), so the CLI's `--format json` emission is byte-identical to
-/// the cache's own serialization; they are populated only when the request set
+/// `IncomingLink`), so the CLI's `--format json` emission matches
+/// the cache's own serialization exactly; they are populated only when the request set
 /// [`FindParams::with_connections`], and are empty otherwise.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FindDoc {
@@ -156,8 +156,8 @@ pub struct GetReport {
 }
 
 /// One resolved document with its full facet set. The deep facets (headings +
-/// the three link sets) are pre-serialized JSON values, byte-identical to the
-/// cache's own serialization. `frontmatter` keys the absent-vs-null distinction
+/// the three link sets) are pre-serialized JSON values matching the
+/// cache's own serialization exactly. `frontmatter` keys the absent-vs-null distinction
 /// on key presence: an absent key is a source with no frontmatter block, a
 /// present `null` is an empty `---`/`---` block. `hash` / `stem` / `body` are
 /// always carried; the CLI emits them only when the projection asks (opt-in
@@ -212,8 +212,8 @@ pub struct DescribeParams {
     pub dynamic_keys: Vec<String>,
 }
 
-/// A `describe` response — the donor `DescribeOutput`, field order preserved so
-/// `--format json` (which serializes the struct directly) is byte-identical.
+/// A `describe` response. Field order is part of the JSON contract, since
+/// `--format json` serializes the struct directly.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DescribeReport {
     pub folders: Vec<String>,
@@ -306,7 +306,7 @@ pub struct CountParams {
 }
 
 /// A `count` response. `#[serde(untagged)]` so the serialized form is exactly
-/// the `count --format json` output the oracle produces:
+/// the `count --format json` output:
 ///
 /// - no `--by` → `{"total":N}`
 /// - one `--by` field → `{"by":"status","total":N,"groups":{…}}`
@@ -363,7 +363,7 @@ pub struct ValidateParams {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<String>,
     /// Keep graph-diagnostic `detail` in findings (default trims to the concise
-    /// coded form — the donor `--verbose` gate).
+    /// coded form — the `--verbose` gate).
     #[serde(skip_serializing_if = "is_false")]
     pub verbose: bool,
     /// Compute the grouped-count summary body (`--summary`). When false the owner
@@ -425,7 +425,7 @@ pub struct RepairParams {
     /// `--confidence high`: keep only High-confidence closest-match proposals.
     #[serde(default, skip_serializing_if = "is_false")]
     pub confidence_high: bool,
-    /// Keep graph-diagnostic `detail` in findings (the donor `--verbose` gate);
+    /// Keep graph-diagnostic `detail` in findings (the `--verbose` gate);
     /// mirrors [`ValidateParams::verbose`].
     #[serde(default, skip_serializing_if = "is_false")]
     pub verbose: bool,
@@ -434,14 +434,13 @@ pub struct RepairParams {
 /// A `repair` response: the deterministic [`MigrationPlan`](crate::MigrationPlan)
 /// the findings produced, carried TYPED (it lives in this crate — NRN-405 part b).
 /// The CLI serializes it with `serde_json::to_string_pretty` for the verbatim
-/// `--format json` passthrough (byte-identical to what `norn repair --plan
+/// `--format json` passthrough (identical to what `norn repair --plan
 /// --format json` prints) and reads its fields directly for the `report` / `paths`
 /// formats and the bare-summary counts. The bare-`norn repair` summary also needs
 /// the by-code finding tally and the run header counts, which the plan does not
 /// carry, so those ride alongside. `has_diagnostic_errors` is the single exit-code
 /// driver (an error-severity graph diagnostic anywhere in the FULL index, computed
-/// BEFORE triage filtering so a `--code` narrow never changes the exit code — the
-/// donor's `exit_code_for`).
+/// BEFORE triage filtering so a `--code` narrow never changes the exit code).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RepairReport {
     /// The deterministic [`MigrationPlan`](crate::MigrationPlan) the findings
