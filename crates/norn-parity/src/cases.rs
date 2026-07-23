@@ -947,8 +947,11 @@ const READ_CASES: &[Case] = &[
         plan: None,
     },
     Case {
-        // Ambiguous stem: one record per candidate + a `note:` on stderr, exit 0.
-        // `duplicate` resolves to archive2/duplicate.md and notes/duplicate.md.
+        // Ambiguous stem: one record per candidate + an ambiguity annotation on
+        // stderr, exit 0. `duplicate` resolves to archive2/duplicate.md and
+        // notes/duplicate.md. The oracle emits `note:`; the rewrite carries the
+        // ambiguity as a `warning`-severity note and renders `warning:` — the
+        // closed prefix set (PD-131).
         id: "read-get-ambiguous-json-zoo",
         argv: &["get", "duplicate", "--format", "json"],
         fixture: ZOO_1,
@@ -972,6 +975,23 @@ const READ_CASES: &[Case] = &[
         ported: true,
         expect_oracle_exit: 1,
         requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // An unknown `--col` field on a resolved doc: identical stdout on both
+        // sides (the projection of an absent field), diverging only on the
+        // stderr annotation prefix — the oracle emits `warn:`, the rewrite the
+        // closed `warning:` vocabulary (PD-131). Exit 0 on both.
+        id: "read-get-unknown-col-warning-zoo",
+        argv: &["get", "alpha", "--col", "nosuchfield", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
         requires_code: None,
         normalize: NO_NORM,
         plan: None,
@@ -1526,9 +1546,11 @@ const MCP_CASES: &[Case] = &[
     },
     Case {
         // A `vault.get` for a target that does not resolve: the report's
-        // `error:`-prefixed missing-target note maps to `isError: true` while the
-        // envelope still carries the (empty) records + notes — the NRN-214 signal,
-        // proven byte-identical on the MCP surface.
+        // `error`-severity missing-target note maps to `isError: true` while the
+        // envelope still carries the (empty) records + notes — the NRN-214 signal.
+        // The oracle serializes each note as a prose string; the rewrite carries
+        // typed `{severity, code, message}` notes, so `structuredContent.notes`
+        // diverges (PD-133).
         id: "mcp-tools-call-get-missing-zoo",
         argv: &["mcp"],
         fixture: MCP_FIXTURE,
@@ -2643,9 +2665,10 @@ const APPLY_CASES: &[Case] = &[
     // path for the real owner of stem `alpha` (`notes/alpha.md`) — a plan
     // authored against a stale planning-time snapshot. The barrier evaluates
     // before any operation writes (even under `--yes`), so the whole plan
-    // refuses (`owner-set-mismatch`, exit 2) with every operation `not_run`,
-    // write-free on both binaries — proving the precondition barrier itself,
-    // not just operation execution, is donor-faithful for an authored plan.
+    // refuses (`owner-set-mismatch`, exit 2) with every operation not-run,
+    // write-free on both binaries. The records output diverges only on the
+    // not-run op's label: the oracle prints `[notrun]`, the rewrite the
+    // serde-kebab `[not-run]` (PD-132).
     Case {
         id: "apply-authored-precondition-mismatch-refusal-zoo",
         argv: &["apply", PLAN_ARGV_PLACEHOLDER, "--yes"],

@@ -39,6 +39,32 @@ pub use output::{
 pub use presenter::{Presenter, HINT, PROGRAM};
 pub use sink::Sink;
 
+/// The user-facing label for a serde-kebab enum value — its serialized name.
+///
+/// A records renderer that needs the printed word for an [`OpStatus`] /
+/// [`PreconditionStatus`] (`applied`, `not-run`, …) asks this rather than
+/// `format!("{value:?}")`, whose `Debug` derives the VARIANT identifier
+/// (`NotRun`) and only accidentally lowercases to a hyphen-free `notrun`. This
+/// returns the enum's own `#[serde(rename_all = "kebab-case")]` name, so the
+/// printed label and the wire value are one string by construction. The value
+/// must serialize to a bare JSON string (every unit-variant enum does); a
+/// non-string serialization yields an empty label.
+///
+/// [`OpStatus`]: norn_wire::OpStatus
+/// [`PreconditionStatus`]: norn_wire::PreconditionStatus
+pub(crate) fn serde_label<T: serde::Serialize>(value: &T) -> String {
+    let label = serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    debug_assert!(
+        !label.is_empty(),
+        "serde_label is for a unit-variant enum serializing to a bare string; \
+         got a value that did not (empty label)"
+    );
+    label
+}
+
 /// Clean success: every operation applied (or a dry-run forecast). Produced by
 /// clap for `--help` / `--version`; a ported verb returns it on success.
 pub const EXIT_OK: i32 = 0;
@@ -50,3 +76,20 @@ pub const EXIT_OPERATIONAL: i32 = 1;
 /// Bad invocation — unparseable argv, unknown command, or a bad flag. Produced
 /// by clap itself before dispatch (`docs/errors.md`).
 pub const EXIT_USAGE: i32 = 2;
+
+#[cfg(test)]
+mod label_tests {
+    use super::serde_label;
+    use norn_wire::{OpStatus, PreconditionStatus, Severity};
+
+    #[test]
+    fn serde_label_renders_the_kebab_serde_name_not_the_debug_variant() {
+        // The load-bearing case: `NotRun` serializes to `not-run`, where the old
+        // `Debug`-lowercase path produced the hyphen-free `notrun`.
+        assert_eq!(serde_label(&OpStatus::NotRun), "not-run");
+        assert_eq!(serde_label(&PreconditionStatus::NotRun), "not-run");
+        assert_eq!(serde_label(&OpStatus::Applied), "applied");
+        assert_eq!(serde_label(&PreconditionStatus::Passed), "passed");
+        assert_eq!(serde_label(&Severity::Warning), "warning");
+    }
+}

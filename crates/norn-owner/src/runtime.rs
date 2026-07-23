@@ -1013,9 +1013,9 @@ fn classify_mutation<R>(
 }
 
 /// Fill `markdown_content` with the exact source bytes for a single-doc
-/// `--format markdown` request. A read failure becomes an `error:` note (the CLI
-/// exits 1 on it) rather than a cache fault — the db is intact; the file just
-/// could not be read.
+/// `--format markdown` request. A read failure becomes an `error`-severity note
+/// (the CLI exits 1 on it) rather than a cache fault — the db is intact; the file
+/// just could not be read.
 fn read_markdown_source(cache: &norn_core::cache::Cache, report: &mut norn_wire::GetReport) {
     if report.records.len() != 1 {
         return;
@@ -1024,9 +1024,10 @@ fn read_markdown_source(cache: &norn_core::cache::Cache, report: &mut norn_wire:
     let full = cache.vault_root().join(&path);
     match std::fs::read_to_string(full.as_std_path()) {
         Ok(raw) => report.markdown_content = Some(raw),
-        Err(_) => report
-            .notes
-            .push(format!("error: could not read source file for '{path}'")),
+        Err(_) => report.notes.push(norn_wire::Note::error(
+            "source-read-failed",
+            format!("could not read source file for '{path}'"),
+        )),
     }
 }
 

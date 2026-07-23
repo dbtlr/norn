@@ -110,8 +110,11 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // NRN-164 adds one `edit` case (a `replace_section` anchored on the ATX-
     // prefixed `## Section One` form) taking the total to 133; self-check runs
     // oracle vs. itself (both refuse the markdown form), so all 133 Match.
+    // NRN-407 adds one `get` case (an unknown `--col` field warning) taking the
+    // total to 134; self-check runs oracle vs. itself (both emit the `warn:`
+    // annotation), so all 134 Match.
     assert!(
-        stdout.contains("133 cases: 133 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("134 cases: 134 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -271,8 +274,19 @@ fn default_mode_gates_help_cases_exit_0() {
     // refuses `heading not found` (exit 2, write-free), the rewrite strips the ATX
     // prefix and applies (exit 0); stdout, exit, and post-state all diverge. The
     // gated total grows to 132, the diverged count from 55 to 56; match stays 76.
+    // NRN-407 (ADR 0022, typed severity channel) RE-ANCHORS three already-gated
+    // cases from MATCH to DIVERGE and adds one DIVERGING `get` case, under three
+    // ledger entries: PD-131 (get's ambiguity `note:` and unknown-`--col` `warn:`
+    // annotations both converge onto the closed `warning:` prefix — the
+    // re-anchored `read-get-ambiguous-json-zoo` plus the new
+    // `read-get-unknown-col-warning-zoo`), PD-132 (a records not-run label prints
+    // the serde-kebab `[not-run]`, not the Debug-lowered `[notrun]` —
+    // `apply-authored-precondition-mismatch-refusal-zoo`), and PD-133 (MCP
+    // `vault.get` notes cross as typed `{severity, code, message}` objects —
+    // `mcp-tools-call-get-missing-zoo`). The gated total grows to 133, the match
+    // count drops from 76 to 73 and the diverged count grows from 56 to 60.
     assert!(
-        stdout.contains("132 cases: 76 match, 56 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("133 cases: 73 match, 60 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -303,6 +317,12 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-123",
         "PD-124",
         "PD-125",
+        "PD-131",
+        "PD-132",
+        "PD-133",
+        "read-get-ambiguous-json-zoo",
+        "read-get-unknown-col-warning-zoo",
+        "mcp-tools-call-get-missing-zoo",
         "read-find-eq-numeric-quoted-value-zoo",
         "read-find-not-eq-numeric-quoted-value-zoo",
         "read-find-declared-date-eq-refuses-zoo",

@@ -113,3 +113,16 @@ enforces it.
 
 Divergences from the pinned 0.48.1 oracle (which still reports `internal-error`
 for these families) are deliberate and ledgered against this decision (PD-125).
+
+## Amendment (2026-07-23): typed severity channel for read-verb notes
+
+NRN-407 extends this decision's typed-`severity` pattern from findings to the
+read-verb annotation channel: `norn_wire::Note { severity, code, message }`
+reuses the same kebab `Severity` enum, so a read report's notes and the MCP
+`vault.get` `structuredContent.notes` carry a typed severity a consumer decides
+`isError` / CLI exit from (`Note::is_error`), never a message-text prefix
+sniff. The typed `Severity` enum is deliberately closed to `warning` / `error`
+— there is no informational rung on the wire. The CLI's `note:` stderr prefix
+(`Conversation::note`) stays a presentation-layer-only informational
+annotation (e.g. a truncation notice) with no typed `Severity` behind it; it is
+not a third wire variant.

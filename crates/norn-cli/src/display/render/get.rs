@@ -50,12 +50,12 @@ pub(crate) fn render_get(
         }
 
         let paths_inert = (format == Format::Paths).then_some("paths");
-        warn_col_ignored(&view.cols, paths_inert, conv.writer())?;
-        warn_section_ignored(&view.sections, paths_inert, conv.writer())?;
-        warn_unknown_cols_get(&view.cols, &view.report, conv.writer())?;
-        warn_unknown_sort_get(&view.report, view.sort_field.as_deref(), conv.writer())?;
+        warn_col_ignored(&view.cols, paths_inert, conv)?;
+        warn_section_ignored(&view.sections, paths_inert, conv)?;
+        warn_unknown_cols_get(&view.cols, &view.report, conv)?;
+        warn_unknown_sort_get(&view.report, view.sort_field.as_deref(), conv)?;
         for note in &view.report.notes {
-            conv.line(note)?;
+            conv.report_note(note)?;
         }
 
         Ok(if has_error(&view.report) {
@@ -72,10 +72,10 @@ pub(crate) fn render_get(
 /// unless exactly one document resolved; `--col`/`--section` are ignored (warned).
 fn render_get_markdown(view: &GetView, out: &mut dyn Write, conv: &mut Conversation<'_>) -> i32 {
     let result: io::Result<i32> = (|| {
-        warn_col_ignored(&view.cols, Some("markdown"), conv.writer())?;
-        warn_section_ignored(&view.sections, Some("markdown"), conv.writer())?;
+        warn_col_ignored(&view.cols, Some("markdown"), conv)?;
+        warn_section_ignored(&view.sections, Some("markdown"), conv)?;
         for note in &view.report.notes {
-            conv.line(note)?;
+            conv.report_note(note)?;
         }
 
         if let Some(content) = &view.report.markdown_content {
@@ -92,8 +92,8 @@ fn render_get_markdown(view: &GetView, out: &mut dyn Write, conv: &mut Conversat
             // failure): the per-target `error:` notes are already printed.
             0 | 1 => EXIT_OPERATIONAL,
             n => {
-                conv.line(&format!(
-                    "error: --format markdown returns a single document; {n} selected \
+                conv.error(&format!(
+                    "--format markdown returns a single document; {n} selected \
                      — request one target at a time"
                 ))?;
                 EXIT_OPERATIONAL
@@ -104,9 +104,11 @@ fn render_get_markdown(view: &GetView, out: &mut dyn Write, conv: &mut Conversat
     render_outcome(result, conv.writer())
 }
 
-/// The single get "failure" signal: an `error:`-prefixed note drives exit 1.
+/// The single get "failure" signal: an `error`-severity note drives exit 1. The
+/// decision reads the note's typed [`Severity`](norn_wire::Severity), never its
+/// message text (ADR 0022).
 fn has_error(report: &GetReport) -> bool {
-    report.notes.iter().any(|n| n.starts_with("error:"))
+    report.notes.iter().any(|n| n.is_error())
 }
 
 fn render_get_json(report: &GetReport, cols: &[String]) -> String {
@@ -173,17 +175,17 @@ fn render_get_records(
     String::from_utf8(buf).unwrap_or_default()
 }
 
-/// Warn for `--col` tokens that won't resolve (`warn:` prefix — distinct from
-/// find's `warning:`).
+/// Warn for `--col` tokens that won't resolve, on the closed `warning:` prefix
+/// (the same annotation vocabulary `find` and every other verb speaks).
 fn warn_unknown_cols_get(
     cols: &[String],
     report: &GetReport,
-    err: &mut dyn Write,
+    conv: &mut Conversation<'_>,
 ) -> io::Result<()> {
     let (facets, fields) = split_cols(cols);
     for facet in &facets {
         if !KNOWN_FACETS.contains(&facet.as_str()) {
-            writeln!(err, "warn: {}", unknown_facet_message(facet))?;
+            conv.warning(&unknown_facet_message(facet))?;
         }
     }
     for field in &fields {
@@ -194,10 +196,9 @@ fn warn_unknown_cols_get(
                 .is_some_and(|obj| obj.contains_key(field))
         });
         if !present_in_any {
-            writeln!(
-                err,
-                "warn: --col field '{field}' not present in document (bare names select frontmatter fields; use '.{field}' for a structural facet)"
-            )?;
+            conv.warning(&format!(
+                "--col field '{field}' not present in document (bare names select frontmatter fields; use '.{field}' for a structural facet)"
+            ))?;
         }
     }
     Ok(())
@@ -205,11 +206,11 @@ fn warn_unknown_cols_get(
 
 /// `get`'s counterpart to `warn_unknown_sort_find` (NRN-374): same field-absent
 /// check over the resolved records, same `path`/`stem` exemption and zero-match
-/// skip, but the `warn:` prefix matching `get`'s own `--col` convention above.
+/// skip, on the closed `warning:` prefix.
 fn warn_unknown_sort_get(
     report: &GetReport,
     sort_field: Option<&str>,
-    err: &mut dyn Write,
+    conv: &mut Conversation<'_>,
 ) -> io::Result<()> {
     let Some(field) = sort_field else {
         return Ok(());
@@ -224,7 +225,7 @@ fn warn_unknown_sort_get(
             .is_some_and(|obj| obj.contains_key(field))
     });
     if !present_in_any {
-        writeln!(err, "warn: --sort field '{field}' not present in document")?;
+        conv.warning(&format!("--sort field '{field}' not present in document"))?;
     }
     Ok(())
 }
@@ -251,6 +252,7 @@ mod tests {
     use crate::display::format::{FormatChoice, FormatSpec};
     use crate::display::Presenter;
     use crate::test_support::{global_args, FailingWriter};
+    use norn_wire::Note;
     use serde_json::json;
 
     /// Drive `render_get` through the same resolution `emit` performs.
@@ -320,13 +322,16 @@ mod tests {
     fn has_error_drives_the_failure_signal() {
         let report = GetReport {
             records: vec![],
-            notes: vec!["error: 'x' did not resolve to any doc".into()],
+            notes: vec![Note::error(
+                "target-not-found",
+                "'x' did not resolve to any doc",
+            )],
             markdown_content: None,
         };
         assert!(has_error(&report));
         let ok = GetReport {
             records: vec![],
-            notes: vec!["note: 'x' resolved to 2 docs".into()],
+            notes: vec![Note::warning("target-ambiguous", "'x' resolved to 2 docs")],
             markdown_content: None,
         };
         assert!(!has_error(&ok));
@@ -426,10 +431,11 @@ mod tests {
             markdown_content: None,
         };
         let mut err = Vec::new();
-        warn_unknown_sort_get(&report, Some("priorty"), &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_sort_get(&report, Some("priorty"), &mut conv).unwrap();
         assert_eq!(
             String::from_utf8(err).unwrap(),
-            "warn: --sort field 'priorty' not present in document\n"
+            "warning: --sort field 'priorty' not present in document\n"
         );
     }
 
@@ -441,7 +447,8 @@ mod tests {
             markdown_content: None,
         };
         let mut err = Vec::new();
-        warn_unknown_sort_get(&report, Some("title"), &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_sort_get(&report, Some("title"), &mut conv).unwrap();
         assert!(err.is_empty());
     }
 }

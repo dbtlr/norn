@@ -1,7 +1,7 @@
 //! `describe` (NRN-409).
 
 use std::fmt::Write as _;
-use std::io::{self, Write};
+use std::io;
 
 use norn_wire::DescribeReport;
 
@@ -28,7 +28,7 @@ pub(crate) fn render_describe(
         } else {
             writeln!(sink.writer(), "{text}")?;
         }
-        warn_unknown_by_describe(&view.report, &view.by, conv.writer())?;
+        warn_unknown_by_describe(&view.report, &view.by, conv)?;
         Ok(EXIT_OK)
     })();
     render_outcome(result, conv.writer())
@@ -48,7 +48,7 @@ pub(crate) fn render_describe(
 fn warn_unknown_by_describe(
     report: &DescribeReport,
     by: &[String],
-    err: &mut dyn Write,
+    conv: &mut Conversation<'_>,
 ) -> io::Result<()> {
     let Some(data) = &report.data else {
         return Ok(());
@@ -59,10 +59,9 @@ fn warn_unknown_by_describe(
     for field in by.iter().map(|f| f.trim()).filter(|f| !f.is_empty()) {
         let present = data.fields.iter().any(|fd| fd.field == field);
         if !present {
-            writeln!(
-                err,
-                "warning: --by field `{field}` not present in any matching document"
-            )?;
+            conv.warning(&format!(
+                "--by field `{field}` not present in any matching document"
+            ))?;
         }
     }
     Ok(())
@@ -139,6 +138,7 @@ mod tests {
     use crate::test_support::FailingWriter;
     use norn_wire::{DataSummary, DateBounds, FieldDistribution, SkippedField, ValueCount};
     use serde_json::json;
+    use std::io::Write;
 
     /// Drive `render_describe` through the same resolution `emit` performs —
     /// describe is unstyled, so a no-op palette sink.
@@ -257,7 +257,8 @@ mod tests {
     fn warn_unknown_by_describe_warns_when_the_field_was_dropped() {
         let report = describe_sample(); // data.fields carries only "type"
         let mut err = Vec::new();
-        warn_unknown_by_describe(&report, &["priorty".to_string()], &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_by_describe(&report, &["priorty".to_string()], &mut conv).unwrap();
         assert_eq!(
             String::from_utf8(err).unwrap(),
             "warning: --by field `priorty` not present in any matching document\n"
@@ -268,7 +269,8 @@ mod tests {
     fn warn_unknown_by_describe_silent_when_the_field_is_present() {
         let report = describe_sample();
         let mut err = Vec::new();
-        warn_unknown_by_describe(&report, &["type".to_string()], &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_by_describe(&report, &["type".to_string()], &mut conv).unwrap();
         assert!(err.is_empty());
     }
 
@@ -277,7 +279,8 @@ mod tests {
         let mut report = describe_sample();
         report.data = None;
         let mut err = Vec::new();
-        warn_unknown_by_describe(&report, &["priorty".to_string()], &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_by_describe(&report, &["priorty".to_string()], &mut conv).unwrap();
         assert!(err.is_empty(), "no --data/--by was requested: {err:?}");
     }
 
@@ -286,7 +289,8 @@ mod tests {
         let mut report = describe_sample();
         report.data.as_mut().unwrap().total = 0;
         let mut err = Vec::new();
-        warn_unknown_by_describe(&report, &["priorty".to_string()], &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_by_describe(&report, &["priorty".to_string()], &mut conv).unwrap();
         assert!(
             err.is_empty(),
             "a zero-match result must not warn on every field: {err:?}"
@@ -297,7 +301,8 @@ mod tests {
     fn warn_unknown_by_describe_ignores_whitespace_only_entries() {
         let report = describe_sample();
         let mut err = Vec::new();
-        warn_unknown_by_describe(&report, &[" ".to_string(), "".to_string()], &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_by_describe(&report, &[" ".to_string(), "".to_string()], &mut conv).unwrap();
         assert!(err.is_empty());
     }
 

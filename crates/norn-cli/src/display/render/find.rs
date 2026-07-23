@@ -57,10 +57,10 @@ pub(crate) fn render_find(
         warn_col_ignored(
             &view.cols,
             (format == Format::Paths).then_some("paths"),
-            conv.writer(),
+            conv,
         )?;
-        warn_unknown_cols_find(&view.report, &view.cols, conv.writer())?;
-        warn_unknown_sort_find(&view.report, view.sort_field.as_deref(), conv.writer())?;
+        warn_unknown_cols_find(&view.report, &view.cols, conv)?;
+        warn_unknown_sort_find(&view.report, view.sort_field.as_deref(), conv)?;
         Ok(EXIT_OK)
     })();
 
@@ -134,12 +134,12 @@ fn render_find_records(sink: &mut Sink<'_>, view: &FindView) -> io::Result<()> {
 fn warn_unknown_cols_find(
     report: &FindReport,
     cols: &[String],
-    err: &mut dyn Write,
+    conv: &mut Conversation<'_>,
 ) -> io::Result<()> {
     let (facets, fields) = split_cols(cols);
     for facet in &facets {
         if !KNOWN_FACETS.contains(&facet.as_str()) {
-            writeln!(err, "warning: {}", unknown_facet_message(facet))?;
+            conv.warning(&unknown_facet_message(facet))?;
         }
     }
     for field in &fields {
@@ -150,10 +150,9 @@ fn warn_unknown_cols_find(
                 .is_some_and(|obj| obj.contains_key(field))
         });
         if !present_in_any {
-            writeln!(
-                err,
-                "warning: --col field `{field}` not present in any matching document"
-            )?;
+            conv.warning(&format!(
+                "--col field `{field}` not present in any matching document"
+            ))?;
         }
     }
     Ok(())
@@ -182,7 +181,7 @@ fn warn_unknown_cols_find(
 fn warn_unknown_sort_find(
     report: &FindReport,
     sort_field: Option<&str>,
-    err: &mut dyn Write,
+    conv: &mut Conversation<'_>,
 ) -> io::Result<()> {
     let Some(field) = sort_field else {
         return Ok(());
@@ -197,10 +196,9 @@ fn warn_unknown_sort_find(
             .is_some_and(|obj| obj.contains_key(field))
     });
     if !present_in_any {
-        writeln!(
-            err,
-            "warning: --sort field `{field}` not present in any matching document"
-        )?;
+        conv.warning(&format!(
+            "--sort field `{field}` not present in any matching document"
+        ))?;
     }
     Ok(())
 }
@@ -327,7 +325,8 @@ mod tests {
             truncated: false,
         };
         let mut err = Vec::new();
-        warn_unknown_sort_find(&report, Some("priorty"), &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_sort_find(&report, Some("priorty"), &mut conv).unwrap();
         assert_eq!(
             String::from_utf8(err).unwrap(),
             "warning: --sort field `priorty` not present in any matching document\n"
@@ -344,7 +343,8 @@ mod tests {
             truncated: false,
         };
         let mut err = Vec::new();
-        warn_unknown_sort_find(&report, Some("title"), &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_sort_find(&report, Some("title"), &mut conv).unwrap();
         assert!(err.is_empty(), "known field must not warn: {err:?}");
     }
 
@@ -359,7 +359,8 @@ mod tests {
         };
         for structural in ["path", "stem"] {
             let mut err = Vec::new();
-            warn_unknown_sort_find(&report, Some(structural), &mut err).unwrap();
+            let mut conv = Conversation::new(&mut err);
+            warn_unknown_sort_find(&report, Some(structural), &mut conv).unwrap();
             assert!(
                 err.is_empty(),
                 "{structural} is a virtual sort key, never a frontmatter field: {err:?}"
@@ -377,7 +378,8 @@ mod tests {
             truncated: false,
         };
         let mut err = Vec::new();
-        warn_unknown_sort_find(&report, Some("anything"), &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_sort_find(&report, Some("anything"), &mut conv).unwrap();
         assert!(
             err.is_empty(),
             "a zero-match result must not warn on every field: {err:?}"
@@ -404,7 +406,8 @@ mod tests {
             truncated: true,
         };
         let mut err = Vec::new();
-        warn_unknown_sort_find(&report, Some("priorty"), &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_sort_find(&report, Some("priorty"), &mut conv).unwrap();
         assert!(
             err.is_empty(),
             "a truncated page must not warn on a field absent only from the page: {err:?}"
@@ -424,7 +427,8 @@ mod tests {
             truncated: false,
         };
         let mut err = Vec::new();
-        warn_unknown_sort_find(&report, Some("priorty"), &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_sort_find(&report, Some("priorty"), &mut conv).unwrap();
         assert_eq!(
             String::from_utf8(err).unwrap(),
             "warning: --sort field `priorty` not present in any matching document\n"
@@ -441,7 +445,8 @@ mod tests {
             truncated: false,
         };
         let mut err = Vec::new();
-        warn_unknown_sort_find(&report, None, &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_sort_find(&report, None, &mut conv).unwrap();
         assert!(err.is_empty());
     }
 

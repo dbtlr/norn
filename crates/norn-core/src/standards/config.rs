@@ -135,7 +135,7 @@ impl CacheConfig {
             Some("manual") => false,
             None | Some("lazy") => true,
             Some(other) => {
-                eprintln!("warn: unknown cache.prune value '{other}' (expected lazy|manual); defaulting to lazy");
+                eprintln!("warning: unknown cache.prune value '{other}' (expected lazy|manual); defaulting to lazy");
                 true
             }
         }

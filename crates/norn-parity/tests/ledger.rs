@@ -77,10 +77,16 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // PD-130 (decided-better: the section resolver accepts an ATX-prefixed
     // heading anchor — `## Section One` resolves the `Section One` section where
     // the oracle requires the bare text, one case).
+    // NRN-407 (ADR 0022) added PD-131 (decided-better: get's ambiguity `note:`
+    // and unknown-`--col` `warn:` annotations converge onto the closed `warning:`
+    // prefix, two cases), PD-132 (decided-better: a records not-run label renders
+    // the serde-kebab `[not-run]` instead of the Debug-lowered `[notrun]`, one
+    // case), and PD-133 (decided-better: MCP `vault.get` notes cross as typed
+    // `{severity, code, message}` objects instead of prose strings, one case).
     assert_eq!(
         ledger.entries.len(),
-        30,
-        "expected exactly PD-101..PD-130, found {}",
+        33,
+        "expected exactly PD-101..PD-133, found {}",
         ledger.entries.len()
     );
 

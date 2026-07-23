@@ -14,9 +14,23 @@
 
 use std::io::{self, Write};
 
-use norn_wire::ApplyReport;
+use norn_wire::{ApplyReport, Note, Severity};
 
 use super::PROGRAM;
+
+/// The closed stderr-annotation prefix an annotation renders with. The
+/// conversation channel speaks exactly three prefixes — `note:` (informational,
+/// exit 0), `warning:` (a non-fatal issue, exit 0), and `error:` (a fatal
+/// condition, a non-zero exit) — so a consumer branches on one stable prefix set
+/// (ADR 0021). A report [`Note`] maps its [`Severity`] onto `warning:` / `error:`
+/// here; `note:` is reserved for the CLI's own informational annotations (e.g. a
+/// truncation notice), which carry no severity.
+pub(crate) fn severity_prefix(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Warning => "warning",
+        Severity::Error => "error",
+    }
+}
 
 /// The stderr-only writer a renderer emits report annotations and status lines
 /// through. Borrows the presenter's stderr sink for the duration of one render.
@@ -41,6 +55,37 @@ impl<'a> Conversation<'a> {
     /// `&mut dyn Write` (`projection::warn_col_ignored` and friends).
     pub fn writer(&mut self) -> &mut dyn Write {
         self.err
+    }
+
+    /// One informational `note: <msg>` annotation (exit 0) — the CLI's own
+    /// non-severity heads-up, e.g. a truncation notice.
+    pub fn note(&mut self, msg: &str) -> io::Result<()> {
+        writeln!(self.err, "note: {msg}")
+    }
+
+    /// One `warning: <msg>` annotation — a non-fatal issue that never flips the
+    /// exit.
+    pub fn warning(&mut self, msg: &str) -> io::Result<()> {
+        writeln!(self.err, "warning: {msg}")
+    }
+
+    /// One `error: <msg>` annotation — a fatal condition the verb reports before
+    /// exiting non-zero.
+    pub fn error(&mut self, msg: &str) -> io::Result<()> {
+        writeln!(self.err, "error: {msg}")
+    }
+
+    /// Render one report [`Note`] as a POSIX-shaped stderr line, deriving the
+    /// prefix from the note's typed [`Severity`] (never from its message text).
+    /// A read verb's `error`-severity note is the exit-1 signal; the exit
+    /// decision reads [`Note::is_error`], this call only renders.
+    pub fn report_note(&mut self, note: &Note) -> io::Result<()> {
+        writeln!(
+            self.err,
+            "{}: {}",
+            severity_prefix(note.severity),
+            note.message
+        )
     }
 
     /// One `norn: <msg>` diagnostic headline on stderr — the prefixed form for
