@@ -11,7 +11,7 @@ use crate::display::output::NewMutationView;
 use crate::display::sink::Sink;
 use crate::display::EXIT_OK;
 
-use super::shared::{mutation_exit, value_repr, warning_short};
+use super::shared::{mutation_exit, value_repr, warning_short, write_report_json};
 
 /// A `new`-report key/value line: `{label:<9}  {value}` (value column at 11), an
 /// aligned block. Unstyled (like `count` / `describe`) so the piped bytes are
@@ -39,15 +39,15 @@ pub(crate) fn render_new(
 ) -> i32 {
     let report = &view.report;
 
-    // JSON: pretty-printed with ALPHABETICAL keys (serialized through a
-    // `serde_json::Value`, whose map is a BTreeMap without `preserve_order`).
+    // JSON: the whole-report serialization under the one mutation-report policy
+    // (`write_report_json`: pretty, serde struct-field order, one trailing
+    // newline) — on EVERY outcome path including refusal. This replaces the
+    // former `serde_json::Value` round-trip (which alphabetized keys) and the
+    // missing trailing newline, so `new` now frames identically to `set` /
+    // `edit` and the cascade verbs.
     if format == Format::Json {
         let result: io::Result<i32> = (|| {
-            let value = serde_json::to_value(report)?;
-            // `new --format json` emits NO trailing newline, unlike
-            // `set --format json` (`writeln!`) — a cross-verb JSON framing
-            // inconsistency preserved here (`write!`, not `writeln!`).
-            write!(sink.writer(), "{}", serde_json::to_string_pretty(&value)?)?;
+            write_report_json(sink.writer(), report)?;
             Ok(mutation_exit(report.outcome))
         })();
         return render_outcome(result, conv.writer());
