@@ -307,7 +307,7 @@ fn scalar_round_trips(rendered: &str, expected: &str, context: ScalarContext) ->
 /// points into the same [`escalate_to_round_trip`] ladder, differing only in
 /// context (`Key` vs `Block`/`Flow`) and starting rank (a key always proposes
 /// plain first). A plain identifier key (`status`, `title`) round-trips at
-/// [`RANK_PLAIN`], so it renders byte-identically to the bare name — no
+/// [`RANK_PLAIN`], so it renders identically to the bare name — no
 /// gratuitous quoting.
 ///
 /// Every line-rebuild that emits a key (flow/block collection `set`,
@@ -341,7 +341,7 @@ fn serialize_string_value(s: &str, original_style: ValueStyle, context: ScalarCo
 
 /// The single quoting-escalation loop behind every scalar emission (values via
 /// [`serialize_string_value`], keys via [`render_key`]): emit at `start_rank`,
-/// then climb the ladder until the rendered scalar round-trips byte-identically
+/// then climb the ladder until the rendered scalar round-trips exactly
 /// in `context`. Double-quoted+escape is the terminal that round-trips every
 /// representable string in VALUE position, so for values the trailing fallback
 /// is unreachable. In KEY position one input class defeats every rank — a
@@ -898,7 +898,7 @@ mod tests {
     #[test]
     fn render_key_leaves_plain_identifiers_unquoted() {
         // Minimal churn: an identifier-plain key renders as the bare name (no
-        // gratuitous quoting) — pinned by the render-key parity case.
+        // gratuitous quoting).
         for name in ["status", "title", "kind", "aliases", "a_b", "field123"] {
             assert_eq!(
                 render_key(name),

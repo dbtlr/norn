@@ -1,8 +1,8 @@
 //! Frontmatter block extraction.
 //!
 //! Pulls the leading `---` … `---` YAML block out of a document, parses it
-//! through the `serde_yaml → serde_json` pipeline that is the oracle for every
-//! downstream value comparison, and returns the parsed value, the block's byte
+//! through the `serde_yaml → serde_json` pipeline that is the ground truth for
+//! every downstream value comparison, and returns the parsed value, the block's byte
 //! range, the body, and the body's start offset. Malformed input is forgiving:
 //! it yields no value plus a [`Diagnostic`], never an error return.
 

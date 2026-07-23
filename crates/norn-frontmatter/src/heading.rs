@@ -1,5 +1,4 @@
-//! Markdown heading parsing — the text-layer half of the donor's commonmark
-//! pass.
+//! Markdown heading parsing — the text-layer half of the commonmark pass.
 //!
 //! Headings are extracted with `pulldown-cmark`, so a `#` inside a fenced or
 //! inline code span is never mistaken for a heading. Each heading carries its
@@ -8,12 +7,11 @@
 //!
 //! ## Seam left behind
 //!
-//! The donor's `parse_commonmark` walked the same `pulldown-cmark` event stream
-//! to also collect Markdown `[text](url)` body links into resolvable `Link`
-//! records. That link extraction is part of the link model — it produces
-//! resolution-bearing types and pairs targets to documents — so it ports to
-//! `norn-core` with link resolution, not here. This module keeps only the
-//! heading (and slug) text layer.
+//! Body-link extraction — walking the same `pulldown-cmark` event stream to
+//! collect Markdown `[text](url)` links into resolvable `Link` records — is part
+//! of the link model: it produces resolution-bearing types and pairs targets to
+//! documents, so it lives in `norn-core` with link resolution, not here. This
+//! module keeps only the heading (and slug) text layer.
 
 use crate::span::SourceSpan;
 use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
