@@ -404,14 +404,29 @@ mod tests {
             .unwrap();
 
         // cwd is inside the registered vault, but NORN_ROOT points elsewhere.
+        // A never-created tempdir child stays missing on every host, so the
+        // canonicalize fallback (grounded path, uncanonicalized) is what this
+        // pins; an existing NORN_ROOT canonicalizes like any other root.
+        let missing_root = tmp.path().join("never-created-env-root");
         let input = ResolveInput {
             cwd: vault.clone(),
-            norn_root_env: Some("/env/root".into()),
+            norn_root_env: Some(missing_root.to_str().unwrap().into()),
             ..ResolveInput::new(vault.clone())
         };
         let resolved = reg.resolve(&input).unwrap();
         assert_eq!(resolved.via, ResolvedVia::NornRootEnv);
-        assert_eq!(resolved.root, PathBuf::from("/env/root"));
+        assert_eq!(resolved.root, missing_root);
+
+        let existing_root = tmp.path().join("existing-env-root");
+        fs::create_dir_all(&existing_root).unwrap();
+        let input = ResolveInput {
+            cwd: vault.clone(),
+            norn_root_env: Some(existing_root.to_str().unwrap().into()),
+            ..ResolveInput::new(vault.clone())
+        };
+        let resolved = reg.resolve(&input).unwrap();
+        assert_eq!(resolved.via, ResolvedVia::NornRootEnv);
+        assert_eq!(resolved.root, existing_root.canonicalize().unwrap());
     }
 
     #[test]
