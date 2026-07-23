@@ -1707,6 +1707,154 @@ const MCP_CASES: &[Case] = &[
         normalize: NO_NORM,
         plan: None,
     },
+    Case {
+        // A read `tools/call` of `vault.find` narrowed by an `eq` predicate, with
+        // a stable `sort`/`limit` for a deterministic page. The flat document
+        // projection (`{path, frontmatter}`) is byte-identical to the oracle's.
+        id: "mcp-tools-call-find-type-note-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.find","arguments":{"eq":["type:note"],"sort":"path","limit":3}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // A read `tools/call` of `vault.describe` — the structure view (folders,
+        // rules, inbox, schema). No `data` summary, so the report is a stable
+        // structural projection.
+        id: "mcp-tools-call-describe-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.describe","arguments":{}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // A read `tools/call` of `vault.repair`, narrowed by `code` to a single
+        // finding class (the same finding-order stability discipline the validate
+        // case uses). The plan's `generated_at` timestamp is neutralized by the
+        // MCP comparator's targeted key normalization, so the plan compares on its
+        // deterministic content. DIVERGES under PD-122 (ADR 0022): the plan's
+        // finding-provenance rides the flat closed contract, no leaked internal
+        // model.
+        id: "mcp-tools-call-repair-code-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.repair","arguments":{"code":["link-target-missing"]}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // A mutation `tools/call` FORECAST that trips a warning: `vault.set` on an
+        // UNDECLARED field is a dry-run (confirm absent), so it is write-free and
+        // `isError: false`, but the unknown field pushes a `MutationWarning`. The
+        // rewrite emits the unified `{code, field?, message}` envelope where the
+        // oracle emitted its per-kind object — the MCP extension of PD-111.
+        id: "mcp-tools-call-set-unknown-field-warning-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.set","arguments":{"target":"alpha","field":["bogus_field:x"]}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // A mutation `tools/call` FORECAST for a cascade verb: `vault.move` with
+        // `confirm` absent plans the move + backlink cascade and writes nothing
+        // (`dry_run: true`, `isError: false`). The shared `ApplyReport` projects
+        // byte-identically to the oracle's move MCP report.
+        id: "mcp-tools-call-move-forecast-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.move","arguments":{"from":"alpha","to":"notes/renamed-alpha.md"}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // A cascade-verb FORECAST for `vault.delete`: the plan carries the
+        // owner-stamped required content-hash precondition and the incoming-link
+        // impact; write-free (`dry_run: true`).
+        id: "mcp-tools-call-delete-forecast-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.delete","arguments":{"target":"alpha","allow_broken_links":true}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // A verb-report mutation FORECAST for `vault.new`: create a titled doc at
+        // an explicit path with `confirm` absent — the report carries the planned
+        // frontmatter with `applied: false`, write-free (`isError: false`). A
+        // forecast never runs the post-create validate pass, so it stays clean.
+        id: "mcp-tools-call-new-forecast-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.new","arguments":{"path":"notes/mcp-brand-new.md","title":"Brand New"}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
 ];
 
 /// The mutation-edge fixture (NRN-371): the valid zoo plus the two non-mapping

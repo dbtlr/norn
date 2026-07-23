@@ -247,7 +247,10 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
             Ok(session) => match norn_mcp::serve_stdio(session) {
                 Ok(()) => display::EXIT_OK,
                 Err(err) => {
-                    presenter.diagnostic(&err.to_string());
+                    // `{err:#}` renders the full anyhow context chain (D4) —
+                    // `to_string()` alone drops the causes behind the outermost
+                    // context, hiding the actual serve-loop failure.
+                    presenter.diagnostic(&format!("{err:#}"));
                     display::EXIT_OPERATIONAL
                 }
             },

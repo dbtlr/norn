@@ -377,22 +377,119 @@ fn collect_responses(
     })
 }
 
-/// Recursively normalize a parsed MCP response: every string leaf gets the
-/// same `VaultRoot` substitution `normalize::normalize_text` applies to raw
-/// CLI stdout/stderr (each side stripped by its OWN vault-root spellings, so
-/// a path a tool happens to echo never registers as a divergence), plus one
-/// targeted substitution by exact object-key name (see the module-level doc
-/// for why it is safe to normalize, and why `protocolVersion` deliberately
-/// is NOT): `serverInfo.version`.
+/// The placeholder every `generated_at` timestamp normalizes to. A repair /
+/// apply `MigrationPlan` stamps a wall-clock `generated_at` at plan time, so two
+/// runs of the SAME binary (self-check) — and the oracle vs. the rewrite — differ
+/// on it alone. It is excluded from the plan's content hash (so `plan_hash`
+/// already matches), but the raw plan JSON still embeds it; this substitution
+/// neutralizes it exactly like `serverInfo.version`, by exact object-key name.
+const GENERATED_AT_PLACEHOLDER: &str = "<PLAN_GENERATED_AT>";
+
+/// The placeholder every `plan_hash` normalizes to. A cascade verb's
+/// `ApplyReport.plan_hash` is `MigrationPlan::canonical_hash()`, which depends on
+/// the plan's absolute `vault_root` — so two runs against fixtures materialized
+/// in DIFFERENT temp dirs (both self-check sides, and oracle vs. rewrite) always
+/// differ on it. The CLI forecast cases already normalize it (`PLAN_HASH_NORM`);
+/// this is the MCP-frame equivalent, by exact object-key name.
+const PLAN_HASH_PLACEHOLDER: &str = "<PLAN_HASH>";
+
+/// Where in the JSON-RPC envelope [`normalize_at`] currently sits — the
+/// path-anchor that decides whether a key-name substitution is allowed to
+/// fire (see [`normalize_value`]'s doc for the full anchor list, and
+/// [`normalize_structured_content`] for the two positions inside
+/// `structuredContent`). A position transition happens ONLY on an exact,
+/// specific parent key match; every other key recurses at
+/// [`EnvelopePos::Root`] — plain string-leaf stripping, no key-name
+/// substitution — so a user-data subtree can never be mistaken for a
+/// protocol position just because it happens to reuse a protocol key name
+/// one level down.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EnvelopePos {
+    /// The envelope root, an `error` object, `result.structuredContent`'s own
+    /// non-anchored fields (see [`normalize_structured_content`]), or any
+    /// other position with no special meaning.
+    Root,
+    /// Directly at a JSON-RPC response's `result` object's OWN keys — the
+    /// only position `serverInfo`, a `tools/call` `content` array, and
+    /// `structuredContent` are recognized at.
+    Result,
+}
+
+/// The position a child recurses at, given the parent's position and the key
+/// being descended into. Only one transition exists; every other key stays
+/// at (or falls back to) [`EnvelopePos::Root`].
+fn next_pos(pos: EnvelopePos, key: &str) -> EnvelopePos {
+    match pos {
+        EnvelopePos::Root if key == "result" => EnvelopePos::Result,
+        _ => EnvelopePos::Root,
+    }
+}
+
+/// Recursively normalize a parsed MCP response. Every string leaf, at ANY
+/// position, gets the same `VaultRoot` substitution `normalize::normalize_text`
+/// applies to raw CLI stdout/stderr (each side stripped by its OWN vault-root
+/// spellings, so a path a tool happens to echo never registers as a
+/// divergence) — that one is safe unconditionally, since it only rewrites a
+/// KNOWN absolute root's own spelling, never a key name, so it can never
+/// misfire on unrelated user data.
+///
+/// Three further substitutions are by exact object-key name, and — following
+/// the NRN-399 review round 2 finding that key-matching ANYWHERE in the tree
+/// can rewrite user frontmatter that happens to reuse a protocol key name
+/// (a user field literally called `plan_hash` / `generated_at`, or an
+/// array-valued `content`), masking a genuine divergence — each is
+/// PATH-ANCHORED to the one exact protocol position it is empirically known
+/// to occur at. Anchors confirmed by reading `norn_mcp::tools` (notably
+/// `crates/norn-mcp/src/tools/mod.rs`'s "Flat reads, wrapped mutations" doc)
+/// against `norn_wire`'s report structs (`ApplyReport`, `MigrationPlan`,
+/// `RepairReport`, and every verb report — grepped for `plan_hash` /
+/// `generated_at`, NRN-399 review round 2):
+///
+/// - `result.serverInfo.version` (an `initialize` response only —
+///   `serverInfo.name` is left alone, a stable identity, NRN-187).
+/// - `result.content[].text` — rmcp's human-readable MIRROR of
+///   `structuredContent` (`CallToolResult::structured`/`structured_error`
+///   render it as `structured_content.to_string()`, so the two are always
+///   the exact same value, one JSON, one JSON-as-text). A `tools/call`
+///   `ContentBlock`'s `text` field gets the one structural
+///   JSON-parse-and-renormalize treatment, THROUGH THE SAME
+///   [`normalize_structured_content`] anchors — see
+///   [`normalize_content_array`].
+/// - `result.structuredContent.plan.generated_at` — `MigrationPlan::
+///   generated_at`, reached ONLY via `RepairReport::plan` (`vault.repair`'s
+///   flat read report; no other read report has a `plan` field, and
+///   `ApplyReport` — the cascade mutation report — has no `plan` field at
+///   all, only a flat `plan_hash`).
+/// - `result.structuredContent.report.plan_hash` — `ApplyReport::plan_hash`,
+///   reached ONLY via the `{report: …}` wrapper the four cascade mutation
+///   tools (`move`/`delete`/`rewrite_wikilink`/`apply`) use; `set`/`new`/
+///   `edit`'s reports carry neither field.
+///
+/// See [`normalize_structured_content`] for exactly how those last two are
+/// scoped: every OTHER field of `structuredContent`, at any depth —
+/// including a `vault.get`/`vault.find` record's own `frontmatter` subtree,
+/// which CAN legitimately carry a user field named `plan_hash` /
+/// `generated_at` / `content` — passes through with only the plain string
+/// strip, never a key-name substitution (pinned by
+/// `normalize_structured_content_leaves_user_frontmatter_named_like_protocol_fields_untouched`).
 fn normalize_value(value: &Value, vault_roots: &[&Path]) -> Value {
+    normalize_at(value, vault_roots, EnvelopePos::Root)
+}
+
+fn normalize_at(value: &Value, vault_roots: &[&Path], pos: EnvelopePos) -> Value {
     match value {
         Value::Object(map) => {
             let mut out = serde_json::Map::with_capacity(map.len());
             for (k, v) in map {
-                let normalized = if k == "serverInfo" && v.is_object() {
+                let normalized = if pos == EnvelopePos::Result && k == "serverInfo" && v.is_object()
+                {
                     normalize_server_info(v)
+                } else if pos == EnvelopePos::Result && k == "content" && v.is_array() {
+                    normalize_content_array(v, vault_roots)
+                } else if pos == EnvelopePos::Result && k == "structuredContent" {
+                    normalize_structured_content(v, vault_roots)
                 } else {
-                    normalize_value(v, vault_roots)
+                    normalize_at(v, vault_roots, next_pos(pos, k))
                 };
                 out.insert(k.clone(), normalized);
             }
@@ -401,7 +498,7 @@ fn normalize_value(value: &Value, vault_roots: &[&Path]) -> Value {
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .map(|v| normalize_value(v, vault_roots))
+                .map(|v| normalize_at(v, vault_roots, pos))
                 .collect(),
         ),
         Value::String(s) => Value::String(normalize::normalize_text(
@@ -410,6 +507,120 @@ fn normalize_value(value: &Value, vault_roots: &[&Path]) -> Value {
             normalize::DEFAULT,
         )),
         other => other.clone(),
+    }
+}
+
+/// Normalize `result.structuredContent` (or its `content[].text` mirror —
+/// see [`normalize_content_text`]): the ONE function that applies the
+/// `plan_hash` / `generated_at` substitutions, each at its own single exact
+/// child position — see [`normalize_value`]'s doc for why these are the only
+/// positions those fields occur at in the wire vocabulary. Every other field
+/// recurses at [`EnvelopePos::Root`] (plain string strip only), so a
+/// document record's own frontmatter — which rides `structuredContent` for
+/// every read tool but never under a `plan` or `report` key — is never
+/// mistaken for a wire report field just because it reuses the field name.
+fn normalize_structured_content(v: &Value, vault_roots: &[&Path]) -> Value {
+    let Value::Object(map) = v else {
+        return normalize_at(v, vault_roots, EnvelopePos::Root);
+    };
+    let mut out = serde_json::Map::with_capacity(map.len());
+    for (k, val) in map {
+        let normalized = match k.as_str() {
+            "plan" if val.is_object() => {
+                normalize_exact_child(val, vault_roots, "generated_at", GENERATED_AT_PLACEHOLDER)
+            }
+            "report" if val.is_object() => {
+                normalize_exact_child(val, vault_roots, "plan_hash", PLAN_HASH_PLACEHOLDER)
+            }
+            _ => normalize_at(val, vault_roots, EnvelopePos::Root),
+        };
+        out.insert(k.clone(), normalized);
+    }
+    Value::Object(out)
+}
+
+/// Normalize an object's OWN `target_key` (a string leaf) to `placeholder`;
+/// every other key recurses at [`EnvelopePos::Root`]. Shared by
+/// [`normalize_structured_content`]'s two exact anchors (`plan.generated_at`,
+/// `report.plan_hash`) — each fires only one object-level deep, never
+/// recursively, so a NESTED field of the same name (e.g. an op's own
+/// `fields` map carrying a value literally named `generated_at`) is never
+/// mistaken for the plan's/report's own timestamp or hash.
+fn normalize_exact_child(
+    v: &Value,
+    vault_roots: &[&Path],
+    target_key: &str,
+    placeholder: &str,
+) -> Value {
+    let Value::Object(map) = v else {
+        return normalize_at(v, vault_roots, EnvelopePos::Root);
+    };
+    let mut out = serde_json::Map::with_capacity(map.len());
+    for (k, val) in map {
+        let normalized = if k == target_key && val.is_string() {
+            Value::String(placeholder.to_string())
+        } else {
+            normalize_at(val, vault_roots, EnvelopePos::Root)
+        };
+        out.insert(k.clone(), normalized);
+    }
+    Value::Object(out)
+}
+
+/// Normalize a tool result's `content` array — rmcp's human-readable mirror of
+/// `structuredContent`, `[{"type": "text", "text": <compact-JSON string>}]`.
+/// Only a `content[].text` string gets the STRUCTURAL re-normalization: when it
+/// parses as a JSON object/array, re-run [`normalize_structured_content`] over
+/// the parsed value and re-serialize — `text` IS `structuredContent.
+/// to_string()` byte-for-byte (`CallToolResult::structured`/`structured_error`
+/// build both from the same `Value`), so the same two exact anchors
+/// (`plan.generated_at`, `report.plan_hash`) apply, and nothing more. Every
+/// other string leaf in the response — including every other field of a
+/// `content` item — gets only the plain text/vault-root strip, never a
+/// JSON-parse reinterpretation; scoping the structural rewrite to this one
+/// field position is deliberate, so a frontmatter value or error message that
+/// happens to parse as JSON elsewhere in the tree is never restructured.
+fn normalize_content_array(items: &Value, vault_roots: &[&Path]) -> Value {
+    let Value::Array(items) = items else {
+        return normalize_at(items, vault_roots, EnvelopePos::Root);
+    };
+    Value::Array(
+        items
+            .iter()
+            .map(|item| match item {
+                Value::Object(map) => {
+                    let mut out = serde_json::Map::with_capacity(map.len());
+                    for (k, v) in map {
+                        let normalized = if k == "text" {
+                            normalize_content_text(v, vault_roots)
+                        } else {
+                            normalize_at(v, vault_roots, EnvelopePos::Root)
+                        };
+                        out.insert(k.clone(), normalized);
+                    }
+                    Value::Object(out)
+                }
+                other => normalize_at(other, vault_roots, EnvelopePos::Root),
+            })
+            .collect(),
+    )
+}
+
+/// The one position in an MCP response where a string leaf is deliberately
+/// re-parsed and structurally re-normalized — see [`normalize_content_array`].
+fn normalize_content_text(v: &Value, vault_roots: &[&Path]) -> Value {
+    match v {
+        Value::String(s) => {
+            let stripped = normalize::normalize_text(s, vault_roots, normalize::DEFAULT);
+            match serde_json::from_str::<Value>(&stripped) {
+                Ok(inner @ (Value::Object(_) | Value::Array(_))) => {
+                    let normalized = normalize_structured_content(&inner, vault_roots);
+                    Value::String(serde_json::to_string(&normalized).unwrap_or(stripped))
+                }
+                _ => Value::String(stripped),
+            }
+        }
+        other => normalize_at(other, vault_roots, EnvelopePos::Root),
     }
 }
 
@@ -629,25 +840,96 @@ mod tests {
 
     #[test]
     fn normalize_value_replaces_server_version_but_leaves_protocol_version_untouched() {
+        // `serverInfo` is anchored to `result.serverInfo` (an `initialize`
+        // response) — wrapping in `result` here is load-bearing, not
+        // decoration, under the path-anchored rewrite (NRN-399 review round 2).
         let value: Value = serde_json::from_str(
-            r#"{"protocolVersion":"2024-11-05","serverInfo":{"name":"norn","version":"0.48.1"}}"#,
+            r#"{"result":{"protocolVersion":"2024-11-05","serverInfo":{"name":"norn","version":"0.48.1"}}}"#,
         )
         .unwrap();
         let normalized = normalize_value(&value, &[]);
         assert_eq!(
-            normalized["protocolVersion"],
+            normalized["result"]["protocolVersion"],
             Value::String("2024-11-05".to_string()),
             "protocolVersion is deliberately not normalized (F5) — a real \
              negotiated-revision divergence belongs in the ledger, not erased here"
         );
         assert_eq!(
-            normalized["serverInfo"]["version"],
+            normalized["result"]["serverInfo"]["version"],
             Value::String(SERVER_VERSION_PLACEHOLDER.to_string())
         );
         assert_eq!(
-            normalized["serverInfo"]["name"],
+            normalized["result"]["serverInfo"]["name"],
             Value::String("norn".to_string()),
             "the server name is a stable identity, not normalized away"
+        );
+    }
+
+    #[test]
+    fn normalize_value_replaces_plan_generated_at_timestamp() {
+        // `vault.repair`'s FLAT read report is the one place `generated_at`
+        // occurs: `result.structuredContent.plan.generated_at` — no `report`
+        // wrapper (that shape is mutation-only, and `ApplyReport` has no
+        // `plan` field at all). Anchored one level under `plan`, not
+        // recursively, per NRN-399 review round 2.
+        let value: Value = serde_json::from_str(
+            r#"{"result":{"structuredContent":{"plan":{"generated_at":"2026-07-23T12:00:00Z","operations":[]},"findings_total":0}}}"#,
+        )
+        .unwrap();
+        let normalized = normalize_value(&value, &[]);
+        assert_eq!(
+            normalized["result"]["structuredContent"]["plan"]["generated_at"],
+            Value::String(GENERATED_AT_PLACEHOLDER.to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_value_replaces_root_dependent_plan_hash() {
+        // A cascade report's `plan_hash` folds in the absolute `vault_root`, so
+        // it always differs across fixtures in different temp dirs; anchored to
+        // `result.structuredContent.report.plan_hash` — the `{report: …}`
+        // wrapper every cascade mutation tool uses (NRN-399 review round 2).
+        let value: Value = serde_json::from_str(
+            r#"{"result":{"structuredContent":{"report":{"plan_hash":"abc123","applied":0}}}}"#,
+        )
+        .unwrap();
+        let normalized = normalize_value(&value, &[]);
+        assert_eq!(
+            normalized["result"]["structuredContent"]["report"]["plan_hash"],
+            Value::String(PLAN_HASH_PLACEHOLDER.to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_structured_content_leaves_user_frontmatter_named_like_protocol_fields_untouched() {
+        // The MAJOR review-round-2 finding this test pins: a `vault.get`/
+        // `vault.find` record's own frontmatter rides `structuredContent`
+        // (every read tool's flat projection), but NEVER under a `plan` or
+        // `report` key — so a user field literally named `plan_hash`,
+        // `generated_at`, or an array-valued `content` inside that
+        // frontmatter must survive byte-for-byte, never key-matched just
+        // because it reuses a protocol field name.
+        let value: Value = serde_json::from_str(
+            r#"{"result":{"structuredContent":{"records":[{"path":"notes/alpha.md","frontmatter":{"plan_hash":"user-value","generated_at":"user-timestamp","content":["a","b"]}}]}}}"#,
+        )
+        .unwrap();
+        let normalized = normalize_value(&value, &[]);
+        let fm = &normalized["result"]["structuredContent"]["records"][0]["frontmatter"];
+        assert_eq!(
+            fm["plan_hash"],
+            Value::String("user-value".to_string()),
+            "a frontmatter field literally named plan_hash is user data, not a wire report field"
+        );
+        assert_eq!(
+            fm["generated_at"],
+            Value::String("user-timestamp".to_string()),
+            "a frontmatter field literally named generated_at is user data, not a wire report field"
+        );
+        assert_eq!(
+            fm["content"],
+            serde_json::json!(["a", "b"]),
+            "an array-valued frontmatter field literally named content is user data, not a \
+             tools/call ContentBlock array"
         );
     }
 
@@ -662,6 +944,36 @@ mod tests {
         assert_eq!(
             normalized["result"]["documents"][0]["path"],
             Value::String("<VAULT>/notes/alpha.md".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_value_structurally_renorms_content_text_but_not_other_strings() {
+        // `content[].text` is the ONE position that gets the structural
+        // JSON-parse-and-renormalize treatment (rmcp's second, text-embedded
+        // rendering of `structuredContent` — `text` IS `structuredContent.
+        // to_string()` byte-for-byte). The mirrored value goes through the SAME
+        // path-anchored `report.plan_hash` / `plan.generated_at` positions as
+        // `structuredContent` itself (NRN-399 review round 2), not a blanket
+        // key-name match.
+        let value: Value = serde_json::from_str(
+            r#"{"result":{"content":[{"type":"text","text":"{\"report\":{\"plan_hash\":\"abc123\"},\"plan\":{\"generated_at\":\"2026-07-23T12:00:00Z\"}}"}],"structuredContent":{"note":"{\"plan_hash\":\"abc123\"}"}}}"#,
+        )
+        .unwrap();
+        let normalized = normalize_value(&value, &[]);
+        let text = normalized["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains(PLAN_HASH_PLACEHOLDER) && text.contains(GENERATED_AT_PLACEHOLDER),
+            "content[].text is re-parsed and structurally normalized, got: {text}"
+        );
+        // A string leaf OUTSIDE `content[].text` that happens to parse as JSON
+        // (here, `structuredContent.note`) is left as plain stripped text, never
+        // reinterpreted — the scoping this test pins.
+        assert_eq!(
+            normalized["result"]["structuredContent"]["note"],
+            Value::String(r#"{"plan_hash":"abc123"}"#.to_string()),
+            "a JSON-looking string outside content[].text must not be \
+             structurally re-normalized"
         );
     }
 

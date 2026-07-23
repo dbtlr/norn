@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 /// full find-filter surface plus `by` for grouping. `--format` is omitted (the
 /// MCP tool always returns the structured envelope).
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
 pub struct CountParams {
     /// Frontmatter field(s) to group counts by — comma-separated, exactly the
     /// CLI's `--by` token (e.g. `"project,lifecycle"`). Without `by`, only

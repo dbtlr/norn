@@ -13,6 +13,7 @@ use crate::mutation_result::MutationResult;
 
 /// Parameters for `vault.set`.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SetParams {
     /// Target document (stem or path), as `norn set` accepts.
     pub target: String,

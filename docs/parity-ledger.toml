@@ -210,7 +210,7 @@ decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 [[entry]]
 id = "PD-111"
 surface = "set/new --format json warning object (unified envelope)"
-cases = ["mutate-new-unknown-field-warning-json-zoo"]
+cases = ["mutate-new-unknown-field-warning-json-zoo", "mcp-tools-call-set-unknown-field-warning-zoo", "mcp-tools-call-new-forecast-zoo"]
 old = "the per-kind warning object is inconsistent across verbs/kinds: `new` emits `{ \"field\": \"bogus\", \"kind\": \"unknown-field\" }` (a `kind` discriminator, no message), and other kinds carried different member sets"
 new = "one unified envelope for every warning kind (NRN-388): `{ \"code\": \"unknown-field\", \"field\": \"bogus\", \"message\": \"field 'bogus' not declared in schema\" }` — a stable kebab `code`, the optional scoped `field`, and an operator-facing `message` (see `crates/norn-wire/src/mutate.rs`, `MutationWarning`)"
 reason = "discovered-inconsistency"
@@ -756,3 +756,22 @@ old = "a `set` / `new` / `edit` dry-run forecast reports `outcome: applied` whil
 new = "a forecast reports `outcome: forecast` (present-tense honest, distinct from a confirmed `applied`), on both the CLI `edit --dry-run --format json` (now also pretty per PD-135) and the MCP `vault.set` forecast `structuredContent`; a consumer tells a preview from a real write by `outcome` alone"
 reason = "decided-better"
 decision = "docs/decisions/0016-surface-neutral-command-core.md"
+
+# NRN-399 (ADR 0024, decided-better): the MCP `vault.repair` structuredContent is
+# the rewrite's richer `RepairReport` — the deterministic `plan`, the per-code
+# finding tally (`findings_by_code` / `findings_total`), the run header count
+# (`total_docs`), and, crucially, the rich `skipped_detail` (reason code +
+# candidate paths + operator next-actions the LEAN plan omits, ADR 0024). The MCP
+# repair tool is the first consumer of `skipped_detail`. The oracle emitted only
+# `{plan, has_diagnostic_errors}`, so a client had to re-derive the tally and
+# could not see the skip candidates/next-actions at all. See
+# `crates/norn-wire/src/read.rs` (`RepairReport` / `RepairSkipDetail`) and
+# `crates/norn-mcp/src/tools/repair.rs`.
+[[entry]]
+id = "PD-137"
+surface = "mcp vault.repair (structuredContent — richer RepairReport + rich skip detail)"
+cases = ["mcp-tools-call-repair-code-zoo"]
+old = "`structuredContent` carries only `{plan, has_diagnostic_errors}`; a client re-derives the per-code finding tally itself and cannot see a skipped finding's candidate paths or next actions"
+new = "`structuredContent` carries the deterministic `plan` plus `findings_by_code` / `findings_total` / `total_docs` and the rich `skipped_detail` (reason code, candidate paths, operator next-actions per skipped finding — the ADR 0024 first-consumer surface); the plan's non-deterministic `generated_at` is the only field the harness normalizes"
+reason = "decided-better"
+decision = "docs/decisions/0024-one-applier-repair-as-planner.md"
