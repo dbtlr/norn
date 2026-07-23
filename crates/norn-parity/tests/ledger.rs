@@ -92,11 +92,17 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // full report envelope, pretty in struct order with one trailing newline, on
     // every outcome path, five cases) and PD-136 (decided-better:
     // `MutationOutcome::Forecast` — a `set`/`new`/`edit` dry-run reports
-    // `outcome: forecast`, two cases).
+    // `outcome: forecast`, two cases). NRN-399 (MCP catalog part 2) added PD-137
+    // (decided-better: MCP `vault.repair` structuredContent is the richer
+    // `RepairReport` — the finding tally, run counts, and the ADR 0024 rich
+    // `skipped_detail` — where the oracle emitted only `{plan,
+    // has_diagnostic_errors}`) and extended PD-111's cases to the MCP
+    // set-unknown-field and new-title-ignored warning frames (the unified
+    // warning envelope on the MCP surface).
     assert_eq!(
         ledger.entries.len(),
-        36,
-        "expected exactly PD-101..PD-136, found {}",
+        37,
+        "expected exactly PD-101..PD-137, found {}",
         ledger.entries.len()
     );
 

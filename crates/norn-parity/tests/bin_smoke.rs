@@ -120,8 +120,12 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // `move` refusals + an `edit` refusal) taking the total to 140; self-check
     // runs oracle vs. itself (both emit the oracle's own bare refusal shape), so
     // all 140 Match.
+    // NRN-399 (MCP catalog part 2) adds seven `mcp` tools/call cases (find,
+    // describe, repair, a set-unknown-field warning, move + delete forecasts, and
+    // a new forecast), taking the total to 147; self-check ignores the ledgered
+    // divergences (oracle vs. itself always Matches), so all 147 Match.
     assert!(
-        stdout.contains("140 cases: 140 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("147 cases: 147 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -312,8 +316,14 @@ fn default_mode_gates_help_cases_exit_0() {
     // `mcp-tools-call-set-forecast-zoo`). The gated total grows to 139, the match
     // count settles at 70 and the diverged count at 69 (the three former MATCH
     // cases become diverged, plus the four new refusal-json cases).
+    // NRN-399 (MCP catalog part 2) gates seven more `mcp` tools/call cases atop
+    // the 139 total: four MATCH (find, describe, move forecast, delete forecast)
+    // and three DIVERGE (repair under the new PD-137 richer-RepairReport entry,
+    // and the set-unknown-field + new-title-ignored warnings under PD-111's
+    // unified envelope). The gated total grows to 146, the match count from 70
+    // to 74, and the diverged count from 69 to 72.
     assert!(
-        stdout.contains("139 cases: 70 match, 69 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("146 cases: 74 match, 72 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -359,6 +369,8 @@ fn default_mode_gates_help_cases_exit_0() {
         "mutate-set-push-apply-json-zoo",
         "edit-json-ops-forecast-zoo",
         "mcp-tools-call-set-forecast-zoo",
+        "PD-137",
+        "mcp-tools-call-repair-code-zoo",
         "read-get-ambiguous-json-zoo",
         "read-get-unknown-col-warning-zoo",
         "mcp-tools-call-get-missing-zoo",

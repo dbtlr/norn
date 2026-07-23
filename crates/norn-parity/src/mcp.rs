@@ -377,13 +377,30 @@ fn collect_responses(
     })
 }
 
+/// The placeholder every `generated_at` timestamp normalizes to. A repair /
+/// apply `MigrationPlan` stamps a wall-clock `generated_at` at plan time, so two
+/// runs of the SAME binary (self-check) — and the oracle vs. the rewrite — differ
+/// on it alone. It is excluded from the plan's content hash (so `plan_hash`
+/// already matches), but the raw plan JSON still embeds it; this substitution
+/// neutralizes it exactly like `serverInfo.version`, by exact object-key name.
+const GENERATED_AT_PLACEHOLDER: &str = "<PLAN_GENERATED_AT>";
+
+/// The placeholder every `plan_hash` normalizes to. A cascade verb's
+/// `ApplyReport.plan_hash` is `MigrationPlan::canonical_hash()`, which depends on
+/// the plan's absolute `vault_root` — so two runs against fixtures materialized
+/// in DIFFERENT temp dirs (both self-check sides, and oracle vs. rewrite) always
+/// differ on it. The CLI forecast cases already normalize it (`PLAN_HASH_NORM`);
+/// this is the MCP-frame equivalent, by exact object-key name.
+const PLAN_HASH_PLACEHOLDER: &str = "<PLAN_HASH>";
+
 /// Recursively normalize a parsed MCP response: every string leaf gets the
 /// same `VaultRoot` substitution `normalize::normalize_text` applies to raw
 /// CLI stdout/stderr (each side stripped by its OWN vault-root spellings, so
-/// a path a tool happens to echo never registers as a divergence), plus one
-/// targeted substitution by exact object-key name (see the module-level doc
+/// a path a tool happens to echo never registers as a divergence), plus three
+/// targeted substitutions by exact object-key name (see the module-level doc
 /// for why it is safe to normalize, and why `protocolVersion` deliberately
-/// is NOT): `serverInfo.version`.
+/// is NOT): `serverInfo.version`, a plan's `generated_at` timestamp, and a
+/// cascade report's root-dependent `plan_hash`.
 fn normalize_value(value: &Value, vault_roots: &[&Path]) -> Value {
     match value {
         Value::Object(map) => {
@@ -391,6 +408,10 @@ fn normalize_value(value: &Value, vault_roots: &[&Path]) -> Value {
             for (k, v) in map {
                 let normalized = if k == "serverInfo" && v.is_object() {
                     normalize_server_info(v)
+                } else if k == "generated_at" && v.is_string() {
+                    Value::String(GENERATED_AT_PLACEHOLDER.to_string())
+                } else if k == "plan_hash" && v.is_string() {
+                    Value::String(PLAN_HASH_PLACEHOLDER.to_string())
                 } else {
                     normalize_value(v, vault_roots)
                 };
@@ -404,11 +425,24 @@ fn normalize_value(value: &Value, vault_roots: &[&Path]) -> Value {
                 .map(|v| normalize_value(v, vault_roots))
                 .collect(),
         ),
-        Value::String(s) => Value::String(normalize::normalize_text(
-            s,
-            vault_roots,
-            normalize::DEFAULT,
-        )),
+        Value::String(s) => {
+            let stripped = normalize::normalize_text(s, vault_roots, normalize::DEFAULT);
+            // rmcp renders a structured tool result's `structuredContent` a
+            // SECOND time as a compact-JSON string in `content[0].text`. That
+            // string embeds the same root-dependent keys (`plan_hash`,
+            // `generated_at`) the key-based rules above neutralize — but as text,
+            // out of their reach. When a string leaf is itself a JSON object /
+            // array, re-normalize it STRUCTURALLY so the two renderings stay
+            // consistent (a scalar-looking string is left alone, so a frontmatter
+            // value is never reinterpreted).
+            match serde_json::from_str::<Value>(&stripped) {
+                Ok(inner @ (Value::Object(_) | Value::Array(_))) => {
+                    let normalized = normalize_value(&inner, vault_roots);
+                    Value::String(serde_json::to_string(&normalized).unwrap_or(stripped))
+                }
+                _ => Value::String(stripped),
+            }
+        }
         other => other.clone(),
     }
 }
@@ -648,6 +682,40 @@ mod tests {
             normalized["serverInfo"]["name"],
             Value::String("norn".to_string()),
             "the server name is a stable identity, not normalized away"
+        );
+    }
+
+    #[test]
+    fn normalize_value_replaces_plan_generated_at_timestamp() {
+        // A repair/apply plan's wall-clock `generated_at` differs run-to-run
+        // (self-check) and oracle-vs-rewrite; it is normalized by exact key name
+        // exactly like `serverInfo.version`, so an otherwise byte-equal plan does
+        // not diverge on the timestamp alone.
+        let value: Value = serde_json::from_str(
+            r#"{"result":{"structuredContent":{"report":{"plan":{"generated_at":"2026-07-23T12:00:00Z","operations":[]}}}}}"#,
+        )
+        .unwrap();
+        let normalized = normalize_value(&value, &[]);
+        assert_eq!(
+            normalized["result"]["structuredContent"]["report"]["plan"]["generated_at"],
+            Value::String(GENERATED_AT_PLACEHOLDER.to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_value_replaces_root_dependent_plan_hash() {
+        // A cascade report's `plan_hash` folds in the absolute `vault_root`, so
+        // it always differs across fixtures in different temp dirs; the targeted
+        // key normalization neutralizes it so an otherwise byte-equal apply report
+        // does not diverge on the hash alone.
+        let value: Value = serde_json::from_str(
+            r#"{"result":{"structuredContent":{"report":{"plan_hash":"abc123","applied":0}}}}"#,
+        )
+        .unwrap();
+        let normalized = normalize_value(&value, &[]);
+        assert_eq!(
+            normalized["result"]["structuredContent"]["report"]["plan_hash"],
+            Value::String(PLAN_HASH_PLACEHOLDER.to_string())
         );
     }
 
