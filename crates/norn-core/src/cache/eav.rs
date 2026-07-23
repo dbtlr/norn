@@ -10,7 +10,7 @@
 //! sentinel — every (doc, declared field) pair always has at least one row.
 //! Fields outside the declared index set get no rows at all.
 //!
-//! Re-shred-on-open (donor `reshred_if_needed`) is intentionally absent (ADR
+//! Re-shred-on-open is intentionally absent (ADR
 //! 0017): the db is created fresh at owner summon under a known index set, so
 //! the full build shreds against the correct set from birth. There is no cache
 //! that predates the current config to reconcile.

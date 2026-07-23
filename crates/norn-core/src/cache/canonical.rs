@@ -23,7 +23,7 @@ pub(crate) fn strip_wikilink_brackets(s: &str) -> String {
 /// REAL for floats, TEXT for JSON-encoded objects/arrays, etc). The scan path's
 /// `replace()` bracket-strip runs unconditionally over that text, so the shared
 /// `strip_wikilink_brackets` on both the String and the Object/Array TEXT paths
-/// keeps this byte-identical with the scan side.
+/// keeps this consistent with the scan side.
 pub(crate) fn canonicalize_scalar(v: &serde_json::Value) -> SqlValue {
     match v {
         serde_json::Value::String(s) => SqlValue::Text(strip_wikilink_brackets(s)),

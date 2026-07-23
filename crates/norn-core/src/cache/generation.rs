@@ -13,7 +13,7 @@
 //!
 //! # What the 0017 rewrite removed
 //!
-//! The donor threaded a `(dev, ino)` identity, a held-open sentinel `File`, and
+//! An earlier design threaded a `(dev, ino)` identity, a held-open sentinel `File`, and
 //! an inode-reconciliation guard on every grown connection to defend against an
 //! out-of-band `cache clear` swapping `cache.db` mid-request. The db is now pure
 //! derivation owned by exactly one process for its lifetime (ADR 0017), so there

@@ -66,7 +66,7 @@ pub(crate) struct Composition<P> {
     /// The fully-composed new content to write.
     pub content: String,
     /// Whether the composition actually mutated the file — the write predicate.
-    /// A byte-identical composition writes nothing (and skips the swap guard).
+    /// A no-op composition writes nothing (and skips the swap guard).
     pub changed: bool,
     /// Caller payload carried through unchanged.
     pub payload: P,
@@ -154,7 +154,7 @@ pub(crate) fn run_content_transaction<P>(
         // Shadow + verify: compose the transforms over the in-memory copy.
         let comp = compose(&original)?;
         if !comp.changed {
-            // A byte-identical composition never writes and cannot drift-corrupt.
+            // A no-op composition never writes and cannot drift-corrupt.
             return Ok(Committed {
                 wrote: false,
                 payload: comp.payload,

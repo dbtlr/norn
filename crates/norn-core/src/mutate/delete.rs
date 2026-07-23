@@ -1,8 +1,7 @@
 //! The `delete` execute seam: remove a document and either leave its incoming
 //! links broken (`--allow-broken-links`) or redirect them (`--rewrite-to`).
 //!
-//! Ported from the donor `delete::{preflight_and_plan, route}` (ADR 0018). The
-//! stem-resolving preflight — target resolution, the backlink policy refusal,
+//! The stem-resolving preflight — target resolution, the backlink policy refusal,
 //! and `--rewrite-to` validation — is reproduced here so a clean pre-write
 //! decline returns a coded `outcome = refused` [`ApplyReport`]. The plan is one
 //! `delete_document` op carrying `rewrite_to` (when redirecting); the applier
@@ -37,11 +36,11 @@ pub fn execute(
         Err(refusal) => return Ok(refused(vault_root, dry_run, refusal)),
     };
 
-    // This field set IS the wire contract, pinned by the delete plan parity
-    // case (the `plan_hash` is the plan's `canonical_hash()`): `path` is the
+    // This field set IS the wire contract (the `plan_hash` is the plan's
+    // `canonical_hash()`): `path` is the
     // RESOLVED target, and `rewrite_to` is the RAW argument, always present as a
-    // key (JSON `null` when absent) — NOT the resolved path, and never omitted
-    // (donor `mcp/tools/delete.rs`). The intent expander's `as_str()` reads a
+    // key (JSON `null` when absent) — NOT the resolved path, and never omitted.
+    // The intent expander's `as_str()` reads a
     // `null` as "no redirect", and classify_link_risk rewrites stem backlinks to
     // the new stem identically whether the arg is a stem or a path, so post-state
     // is unaffected; only the hashed field value must match.
@@ -97,9 +96,9 @@ pub fn execute(
 /// JSON `null` when absent, NOT the resolved path), `allow_broken_links` (always
 /// present), and `document_hash` — the REQUIRED plan-time CAS precondition (ADR
 /// 0024 / NRN-151) — added when the target resolves in the index (always, for a
-/// verb delete). This field set feeds `MigrationPlan::canonical_hash()`; the
-/// added `document_hash` shifts that hash from the donor's (a deliberate,
-/// ledgered plan-byte divergence). `rewrite_to` as a stem-or-path does not change
+/// verb delete). This field set feeds `MigrationPlan::canonical_hash()`, so
+/// `document_hash` participates in the plan hash (ADR 0024). `rewrite_to` as a
+/// stem-or-path does not change
 /// the cascade (classify_link_risk rewrites to the new stem either way).
 fn delete_fields(
     doc_rel: &camino::Utf8Path,
@@ -126,13 +125,13 @@ fn delete_fields(
 }
 
 /// A coded delete preflight refusal — the `DeletePreflightError` codes +
-/// Display prose are the wire contract, pinned by the delete plan parity case.
+/// Display prose are the wire contract.
 struct DeleteRefusal {
     code: &'static str,
     message: String,
 }
 
-/// Resolve the target + optional redirect and run the donor's ordered barriers,
+/// Resolve the target + optional redirect and run the ordered barriers,
 /// returning `(target, rewrite_to?)` resolved vault-relative paths or a refusal.
 fn preflight(
     index: &GraphIndex,
@@ -271,7 +270,7 @@ mod tests {
         }
     }
 
-    // Field-set fidelity (donor `mcp/tools/delete.rs`): `path` (resolved),
+    // Field-set contract: `path` (resolved),
     // `rewrite_to` (RAW arg, null when None), `allow_broken_links` (always
     // present), `document_hash` when the target resolves (ADR 0024). Pins the
     // plan_hash contract for `--format json`.

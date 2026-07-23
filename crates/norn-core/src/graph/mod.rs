@@ -9,7 +9,7 @@
 //! # Ported seam (ADR 0018)
 //!
 //! [`IndexOptions`] carries only what the graph build reads: the `ignore` globs
-//! and the optional `alias_field`. The donor also threaded the derived
+//! and the optional `alias_field`. An earlier design also threaded the derived
 //! frontmatter-index field set (`auto`, `resolved_index_set`,
 //! `resolved_index_set_hash`) through this struct, but those are consumed solely
 //! by the cache writer; they belong to the cache-engine port and are deliberately

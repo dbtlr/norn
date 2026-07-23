@@ -35,7 +35,7 @@ pub(crate) struct RewriteWikilinkOp {
 /// Typed pre-flight refusal for `rewrite_wikilink` (NRN-229).
 ///
 /// `Display` preserves the EXACT prose the prior `anyhow!()` call site produced
-/// (byte-identical CLI/stderr output); `.code()` gives an MCP / `--format json`
+/// (identical CLI/stderr output); `.code()` gives an MCP / `--format json`
 /// consumer a stable, machine-branchable kebab code instead of a laundered
 /// `internal-error`. As long as nothing wraps it with `.context(...)`, the
 /// concrete type survives to the top of the `anyhow` chain for `downcast_ref` to
@@ -369,7 +369,7 @@ mod tests {
 
     /// NRN-229: the OLD-unresolvable refusal is a TYPED `RewriteWikilinkError`
     /// (not a bare `anyhow!`), so it carries `target-not-found` (reused from
-    /// `set`) and its `Display` is byte-identical to the prior `anyhow!()` prose.
+    /// `set`) and its `Display` matches the prior `anyhow!()` prose.
     #[test]
     fn rewrite_wikilink_error_code_and_display_are_stable() {
         let err = RewriteWikilinkError::OldUnresolved("no-such".into());

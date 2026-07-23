@@ -20,7 +20,7 @@
 //!   contract and live in norn-wire.
 //! - [`preconditions`] — the ADR 0015 owner-set barrier: evaluate a plan's
 //!   exact-owner-set preconditions against a fresh graph index before any write,
-//!   and build the byte-identical-vault refusal report on a mismatch.
+//!   and build the unchanged-vault refusal report on a mismatch.
 //! - [`fsops`] — the narrow, named filesystem write primitives (atomic
 //!   durable write, move, delete, create-document materialization, and the
 //!   vault-root containment gate). Every disk effect the passes cause lands

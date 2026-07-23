@@ -1,11 +1,10 @@
 //! The `repair` verb's execute seam (the 0016 Params/execute/Report vocabulary).
 //!
-//! Ported from the donor `repair::{filtered_findings, build_plan}` +
-//! `mcp/tools/repair.rs` (ADR 0018). Repair is READ-ONLY: it loads the warm
+//! Repair is READ-ONLY: it loads the warm
 //! graph, runs the standards engine, triage-filters the findings, and turns them
 //! into a deterministic [`MigrationPlan`](norn_wire::MigrationPlan) via
 //! [`plan_from_findings`](crate::planner::findings::plan_from_findings) — it never
-//! writes. Emitting the plan is the whole job; `apply` executes it (the donor's
+//! writes. Emitting the plan is the whole job; `apply` executes it (the
 //! `norn repair --plan | norn apply -` two-step).
 //!
 //! # Error model
@@ -18,8 +17,7 @@
 //!
 //! `has_diagnostic_errors` is computed over the WHOLE index before triage
 //! filtering, so a `--code`/`--severity` narrow never changes the process exit
-//! code — it mirrors the donor's `exit_code_for(&index)` / `has_errors(&index)`,
-//! which reads the unfiltered graph.
+//! code — the signal (`has_errors(&index)`) reads the unfiltered graph.
 
 use std::collections::BTreeMap;
 
@@ -59,7 +57,7 @@ pub fn execute(
     let mut index = cache.load_graph_index()?;
 
     // Non-verbose (the default) strips graph-diagnostic `detail` to the concise
-    // coded form (the donor `trim_diagnostics`). `has_errors` reads severity,
+    // coded form. `has_errors` reads severity,
     // which concise preserves, so the exit signal is unaffected by the trim.
     if !params.verbose {
         for document in &mut index.documents {
@@ -86,7 +84,7 @@ pub fn execute(
     };
 
     // Bare-summary tally: total findings + per-code counts (sorted, a BTreeMap in
-    // code order — the donor `by_code`). Owned keys so `findings` can move into
+    // code order). Owned keys so `findings` can move into
     // the planner below.
     let findings_total = findings.len();
     let mut by_code: BTreeMap<String, usize> = BTreeMap::new();
@@ -98,8 +96,8 @@ pub fn execute(
 
     // Build the plan. Only `--confidence high` reaches the plan generator (it
     // drops Medium closest-match proposals); the triage narrowing already ran on
-    // the findings above (the donor keeps confidence on the plan filters and the
-    // triage on the finding filter).
+    // the findings above (confidence stays on the plan filters and the triage on
+    // the finding filter).
     let filters = RepairPlanFilters {
         confidence: if params.confidence_high {
             Some(ConfidenceFilter::High)
@@ -135,7 +133,7 @@ pub fn execute(
 
     // `--skip-reason` narrows the plan's skipped list only (the planner does not
     // apply it) — the `MigrationPlan::skipped` `reason` carries the kebab-case
-    // reason code (donor `build_plan`).
+    // reason code.
     if !params.skip_reasons.is_empty() {
         plan.skipped
             .retain(|sf| skip_reason_matches(&sf.reason, &params.skip_reasons));
@@ -152,8 +150,7 @@ pub fn execute(
     }))
 }
 
-/// True if `code` matches any of the supplied globs (donor
-/// `repair::skip_reasons::code_matches_any`). A malformed glob falls back to an
+/// True if `code` matches any of the supplied globs. A malformed glob falls back to an
 /// exact-string compare. Empty pattern list is handled by the caller (no filter).
 fn skip_reason_matches(code: &str, patterns: &[String]) -> bool {
     patterns

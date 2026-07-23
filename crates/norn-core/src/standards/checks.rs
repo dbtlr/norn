@@ -1,6 +1,6 @@
 //! Per-check finding producers for the validate engine.
 //!
-//! Ported from the donor `src/standards/checks.rs` (ADR 0018). Each `check_*`
+//! Each `check_*`
 //! turns one document + one rule constraint into zero-or-more [`Finding`]s via
 //! the [`Finding`] constructors; the [`engine`](super::engine) orchestrates the
 //! order they run in. Pure functions of a [`Document`] — no IO.

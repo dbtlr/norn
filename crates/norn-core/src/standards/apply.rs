@@ -21,8 +21,8 @@ pub enum ApplyError {
     UnsupportedSchemaVersion { expected: u32, got: u32 },
 
     // The MIGRATION-plan schema gate (audit-F3), promoted from the `norn-cli`
-    // apply preamble into the shared engine. Message preserved byte-for-byte from
-    // that preamble so the refusal is unchanged; shares the `unsupported-schema-version`
+    // apply preamble into the shared engine. Message identical to that preamble
+    // so the refusal is unchanged; shares the `unsupported-schema-version`
     // code with the repair-plan variant above.
     #[error("unsupported plan schema_version {got}; this norn build supports v{expected}")]
     UnsupportedMigrationPlanSchemaVersion { expected: u32, got: u32 },
@@ -229,8 +229,8 @@ impl ApplyError {
     /// is structurally ambiguous: `stale-document-hash` / `unknown-path` are
     /// raised from BOTH the pre-write Phase-A1 content CAS AND the Phase-B delete
     /// pass (which runs AFTER Phase A2 has already written other ops in a mixed
-    /// plan). Keying the byte-identical-refusal decision off this flag produced
-    /// the NRN-150/183 byte-identity lie (a `refused` report over a mutated
+    /// plan). Keying the clean-refusal decision off this flag produced
+    /// the NRN-150/183 false-refusal lie (a `refused` report over a mutated
     /// vault); the applier now decides on whether a write actually landed, so this
     /// method remains only as a coarse taxonomy hint and no longer gates output.
     pub fn is_precondition(&self) -> bool {
@@ -715,8 +715,8 @@ pub fn apply_file_changes(content: &str, changes: &[&ApplyOp]) -> Result<String,
         });
     };
     // NRN-371: a null-valued frontmatter block is an EMPTY mapping for a field
-    // op, not a refusal — a deliberate divergence from the donor's refusal that
-    // closes the `new` -> `set` roundtrip. But `Value::Null` also covers a
+    // op, not a refusal — this closes the `new` -> `set` roundtrip.
+    // But `Value::Null` also covers a
     // COMMENT-ONLY block (pure YAML comments parse as null), whose comments are
     // real user content the minimal-edit invariant (ADR 0008) must preserve. So
     // ONLY a bare-null SCALAR token (`null` / `~`) is stripped to an empty block
@@ -1384,7 +1384,7 @@ fn split_frontmatter_body(content: &str) -> (&str, &str) {
 /// Mirrors [`apply_replace_body`]'s frontmatter-preserving splice, but computes
 /// the new body via the shared `edit::transform` engine — the same code path
 /// `norn edit` uses — so a plan-applied section edit and `norn edit` produce
-/// byte-identical results. Ops apply sequentially, each against the prior's
+/// identical results. Ops apply sequentially, each against the prior's
 /// output. The caller verifies the document hash before invoking (whole-doc CAS).
 pub fn apply_edit_ops(
     content: &str,
@@ -1468,8 +1468,8 @@ mod tests {
     use serde_json::json;
 
     /// NRN-150: every `ApplyError` variant reports a stable, non-empty KEBAB
-    /// code, and the CAS-drift variants report the exact codes the MMR-202
-    /// acceptance branches on. Asserting kebab-shape (lowercase / digits /
+    /// code, and the CAS-drift variants report the exact codes a retry consumer
+    /// branches on. Asserting kebab-shape (lowercase / digits /
     /// hyphens, no underscores) here pins the canonical-form mandate so a future
     /// snake_case addition fails the build.
     #[test]
@@ -1629,7 +1629,7 @@ mod tests {
             assert!(seen.insert(err.code()), "duplicate code: {}", err.code());
         }
 
-        // CAS-drift (retryable) codes the MMR-202 acceptance keys on.
+        // CAS-drift (retryable) codes a retry consumer keys on.
         assert_eq!(
             ApplyError::StaleDocumentHash {
                 path: p(),
@@ -1651,7 +1651,7 @@ mod tests {
         );
     }
 
-    /// The CAS-drift variants are precondition (byte-identical) refusals; the
+    /// The CAS-drift variants are precondition refusals (nothing written); the
     /// Phase-B lifecycle variants are not.
     #[test]
     fn precondition_classification() {
@@ -2112,8 +2112,8 @@ mod tests {
 
     #[test]
     fn apply_promotes_explicit_null_scalar_block_to_empty_mapping() {
-        // NRN-371 (divergence from the donor's refusal): an explicit `null`
-        // scalar block is a null/empty mapping for a field op. The bare-null
+        // NRN-371: an explicit `null` scalar block is a null/empty mapping for a
+        // field op. The bare-null
         // token is stripped and the field splices into a clean empty block —
         // valid input to valid output, closing the `new` -> `set` roundtrip.
         let content = "---\nnull\n---\nbody\n";
@@ -3059,7 +3059,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("b.md")).unwrap(),
             b_doc,
-            "b.md must be byte-identical"
+            "b.md must be unchanged"
         );
         // The safe body-only rewrite in the same cascade still lands.
         assert_eq!(outcome.rewritten.len(), 1);

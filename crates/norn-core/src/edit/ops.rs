@@ -8,8 +8,8 @@
 //! This is the ENGINE half of `norn edit` — the pure op vocabulary the executor's
 //! compose path decodes and the [`transform`](super::transform) engine applies.
 //! The `edit` VERB surface (route / report / sugar / synth) and its MCP
-//! `structuredContent` schema derive port later with that command; the donor's
-//! `schemars::JsonSchema` derive (MCP tool-input schema generation) is dropped
+//! `structuredContent` schema derive port later with that command; the
+//! `schemars::JsonSchema` derive (MCP tool-input schema generation) is not
 //! here, as the engine never needs it and `schemars` is not a norn-core dep.
 
 use serde::{Deserialize, Serialize};

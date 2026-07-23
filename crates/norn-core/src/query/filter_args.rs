@@ -7,19 +7,19 @@
 //!
 //! # Clock seam (value-in / value-out)
 //!
-//! The donor resolved `--on today` by reading the process clock
-//! (`chrono::Local::now()`) inside the parser. norn-core takes no ambient reads
-//! and must stay deterministic (same input, same output), so the caller injects
+//! Resolving `--on today` needs the current date. norn-core reads no process
+//! clock and takes no ambient reads, and must stay deterministic (same input,
+//! same output), so the caller injects
 //! the current date as `today` (a pre-formatted `%Y-%m-%d` string). The external
 //! contract is unchanged — `on:today` still resolves to the current date — only
 //! the clock source moves out of core to the CLI / verb.
 //!
 //! # Seam left behind
 //!
-//! `--links-to TARGET` resolution (the donor `resolve_links_to`) needs the warm
+//! `--links-to TARGET` resolution needs the warm
 //! cache + target resolution; [`build_document_query`] leaves
-//! [`DocumentQuery::links_to`] empty and passes `unresolved_links` through, as
-//! the donor's pure builder did. Resolution ports with the read verbs.
+//! [`DocumentQuery::links_to`] empty and passes `unresolved_links` through.
+//! Resolution ports with the read verbs.
 
 use std::collections::{BTreeSet, HashMap};
 

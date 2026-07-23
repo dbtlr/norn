@@ -1,8 +1,7 @@
 //! Shared schema-aware coercion for the `set` and `new` mutation seams.
 //!
-//! Ported from the donor `set::validate` + `set::synth` typing helpers: the
-//! declared-type lookup, the raw-string → typed-`Value` coercion, and the
-//! known-field oracle both verbs share. Pure functions over `VaultConfig` +
+//! The declared-type lookup, the raw-string → typed-`Value` coercion, and the
+//! known-field predicate both verbs share. Pure functions over `VaultConfig` +
 //! `Document`; no IO.
 
 use crate::domain::Document;
@@ -214,7 +213,7 @@ pub fn is_required_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool
 
 /// Is `field` declared by any rule in `rules` via `field_types` (typed),
 /// `allowed_values`, `required_frontmatter`, `field_references`, or
-/// `forbidden_frontmatter`? The known-field oracle both verbs share.
+/// `forbidden_frontmatter`? The known-field predicate both verbs share.
 pub fn field_known_in_rules<'a>(
     rules: impl IntoIterator<Item = &'a ValidateRule>,
     field: &str,

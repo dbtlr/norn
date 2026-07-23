@@ -2,7 +2,7 @@
 //! replacement, built as a `MigrationPlan` against the warm cache and applied
 //! through the shared `apply_migration_plan` executor.
 //!
-//! Ported from the donor `set::{synth,validate,report}` (ADR 0018). The synth
+//! The synth
 //! side produces BOTH the wire `FrontmatterChange` report rows AND the typed
 //! frontmatter ops the plan applies; every clean pre-write decline returns a
 //! `Refused` report, never a bare `Err`.
@@ -40,9 +40,8 @@ pub fn execute(
         Ok(p) => p,
         Err(e) => {
             let raw = e.to_string();
-            // Refusal prose is end-user contract, pinned by the mutate refusal
-            // parity cases: `doc not found: <target>` for a miss; the resolver's
-            // candidate list for an ambiguous stem.
+            // Refusal prose is end-user contract: `doc not found: <target>` for
+            // a miss; the resolver's candidate list for an ambiguous stem.
             let (code, msg) = if raw.contains("ambiguous") {
                 ("target-ambiguous", raw)
             } else {
@@ -204,7 +203,7 @@ pub fn execute(
     // The wire contract holds `trace_id` empty on EVERY outcome (forecast,
     // refusal, AND applied) until durable telemetry lands — the owner's discard
     // sink would otherwise mint a placeholder id on apply that contradicts the
-    // documented shape (and would need a parity normalization step). Donor-parity
+    // documented shape (and would need a trace-normalization step). Real
     // trace ids return with the telemetry/audit port.
     let trace_id = String::new();
     Ok(MutationExecution {
@@ -354,9 +353,9 @@ fn synth(
         });
     }
 
-    // --push: aggregate per key, append to the current array. Donor collapse
-    // (F4): the report row is the RESULTING state, not per-element intent — one
-    // `op: "set"` row per key whose `new` is the post-push array.
+    // --push: aggregate per key, append to the current array. The report row is
+    // the RESULTING state, not per-element intent — one `op: "set"` row per key
+    // whose `new` is the post-push array.
     let mut grouped_push: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for (k, v) in &push_typed {
         grouped_push.entry(k.clone()).or_default().push(v.clone());
@@ -391,10 +390,10 @@ fn synth(
         });
     }
 
-    // --pop: drop matching elements. Donor collapse (F4): report the RESULTING
-    // state as one `op: "set"` row per key — and ONLY when the array actually
-    // changed. A no-op pop (missing key, scalar value, or nothing matched) emits
-    // NO row at all (the oracle's `frontmatter_changes` is empty).
+    // --pop: drop matching elements. Report the RESULTING state as one
+    // `op: "set"` row per key — and ONLY when the array actually changed. A
+    // no-op pop (missing key, scalar value, or nothing matched) emits NO row at
+    // all (the `frontmatter_changes` list is empty).
     let mut grouped_pop: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for (k, v) in &pop_typed {
         grouped_pop.entry(k.clone()).or_default().push(v.clone());
@@ -577,9 +576,8 @@ fn detect_cross_class_conflicts(params: &SetParams) -> Result<(), SetError> {
     if conflicts.is_empty() {
         return Ok(());
     }
-    // Refusal prose is end-user contract, pinned by the mutate refusal parity
-    // cases: a header, one indented `'key': --a + --b` line per conflict, then
-    // the trailing explainer.
+    // Refusal prose is end-user contract: a header, one indented
+    // `'key': --a + --b` line per conflict, then the trailing explainer.
     let mut msg = String::from("cross-class conflict on the same key:\n");
     for (k, classes) in &conflicts {
         msg.push_str(&format!("  '{k}': {}\n", classes.join(" + ")));
@@ -1024,7 +1022,7 @@ mod tests {
     // ── Review fixes F2/F4/F5 ────────────────────────────────────────────────
 
     #[test]
-    fn f2_field_conflict_message_keeps_donor_body_and_explainer() {
+    fn f2_field_conflict_message_keeps_body_and_explainer() {
         let (_t, root) = synth_vault(None, &[("a.md", "---\ntags: []\n---\n")]);
         let cache = built(&root);
         let params = SetParams {
@@ -1102,7 +1100,7 @@ mod tests {
         let exec = execute(&cache, None, &params, TODAY, &mut sink()).unwrap();
         assert!(
             exec.report.frontmatter_changes.is_empty(),
-            "a no-op pop reports no change row (donor: empty frontmatter_changes)"
+            "a no-op pop reports no change row (empty frontmatter_changes)"
         );
     }
 

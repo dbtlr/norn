@@ -40,7 +40,7 @@ pub(crate) fn render_key(value: &Value) -> String {
 
 /// The four deep-connection facets of a document, each pre-serialized to a JSON
 /// value so the wire carries — and the CLI re-emits under `--format json` —
-/// bytes byte-identical to the cache's own `Heading` / `Link` / `IncomingLink`
+/// bytes identical to the cache's own `Heading` / `Link` / `IncomingLink`
 /// serialization. Shared by the `find` (opt-in via `--col`/`--all-cols`) and
 /// `get` (always) read verbs so their deep-facet shapes cannot drift.
 pub(crate) struct ConnectionValues {

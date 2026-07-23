@@ -1,7 +1,7 @@
 //! Detect changes between the cached state and the live filesystem.
 //!
 //! The change-detection interface is file-kind-agnostic by design; the phase-2
-//! implementation walks `.md` files only (donor semantics). A future watcher
+//! implementation walks `.md` files only. A future watcher
 //! authority slots in behind the same shape.
 
 use camino::{Utf8Path, Utf8PathBuf};

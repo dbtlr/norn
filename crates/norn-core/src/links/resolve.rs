@@ -4,7 +4,7 @@
 //! This is the semantic half of the link model (the lexical half — token and
 //! anchor syntax — is `norn_frontmatter`). Resolution is external contract: which
 //! path a target resolves to, when it is ambiguous, and which anchors/blocks
-//! validate are observable behavior held to donor parity. Known contract-shaped
+//! validate are observable behavior. Known contract-shaped
 //! quirks tracked on the correctness slate — block-ids inside code spans
 //! (NRN-350), alias / ambiguity edges (NRN-122 / NRN-124) — are preserved here
 //! deliberately, not silently changed.
@@ -505,8 +505,8 @@ mod tests {
     fn markdown_link_block_ref_validates_against_target_block_ids() {
         // NRN-356: a Markdown `[x](b.md#^blk1)` now carries a block_ref (not an
         // anchor), so resolution validates it against the target's block-ids and
-        // resolves when the id exists — where the donor slugified `^blk1` as a
-        // heading anchor and reported anchor-missing.
+        // resolves when the id exists (rather than slugifying `^blk1` as a
+        // heading anchor and reporting anchor-missing).
         let files = vec![make_file("a.md"), make_file("b.md")];
         let mut documents = vec![make_document("a.md"), make_document("b.md")];
         documents[1].block_ids.push("blk1".to_string());

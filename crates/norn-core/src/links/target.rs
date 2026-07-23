@@ -1,5 +1,5 @@
 //! Link-target classification, splitting, and decoding — the Markdown-link half
-//! of the donor's `anchor` helpers that stayed with the link model.
+//! of the `anchor` helpers that stay with the link model.
 //!
 //! A Markdown `[text](dest)` destination is a URL reference, so this module
 //! models it by URL-parser rules (RFC 3986 / WHATWG) rather than ad-hoc string
@@ -37,9 +37,8 @@ use norn_frontmatter::wikilink::split_anchor_or_block_ref;
 
 /// Decode `%XX` percent escapes in a single Markdown link component (a path or a
 /// fragment). Invalid or truncated escapes are left intact and the decoded bytes
-/// are interpreted as UTF-8 lossily — the `percent-encoding` crate's
-/// `decode_utf8_lossy`, which matches the donor's hand-rolled decoder byte for
-/// byte on these edges. Decoding is a single pass: `%2523` decodes once to
+/// are interpreted as UTF-8 lossily via the `percent-encoding` crate's
+/// `decode_utf8_lossy`. Decoding is a single pass: `%2523` decodes once to
 /// `%23`, never recursively to `#`.
 pub(crate) fn decode_percent_escapes(value: &str) -> String {
     percent_encoding::percent_decode_str(value)
@@ -233,7 +232,7 @@ mod tests {
     #[test]
     fn empty_fragment_is_an_empty_anchor() {
         // A trailing `#` with nothing after it is a present-but-empty fragment,
-        // preserved as `Some("")` (matching the donor's split), not `None`.
+        // preserved as `Some("")`, not `None`.
         let (target, anchor, block_ref) = split_and_decode_destination("note.md#");
         assert_eq!(target, "note.md");
         assert_eq!(anchor.as_deref(), Some(""));
@@ -244,7 +243,7 @@ mod tests {
     fn encoded_slash_in_path_decodes_to_a_literal_slash() {
         // `%2F` decodes to `/`. Strict WHATWG keeps it encoded (a literal slash
         // inside one segment), but the vault has no filenames-containing-slashes
-        // use case, the decode matches the donor, and the resolver's
+        // use case, and the resolver's
         // `normalize_relative` neutralizes any resulting traversal (absolute
         // roots and `..` cannot escape the vault root). Documented, deliberate.
         let (target, _, _) = split_and_decode_destination("a%2Fb.md");

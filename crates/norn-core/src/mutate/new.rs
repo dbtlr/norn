@@ -2,7 +2,6 @@
 //! rule / inbox), schema-default resolution, and a single `create_document`
 //! `MigrationPlan` applied through the shared executor.
 //!
-//! Ported from the donor `new::{mod,synth,generate,validate,report}` (ADR 0018).
 //! Every clean pre-write decline — a resolve/preflight/synth refusal — returns a
 //! `Refused` report carrying a coded error, never a bare `Err`.
 
@@ -114,8 +113,7 @@ pub fn execute(
                 code: "title-ignored".into(),
                 field: None,
                 // The `title-ignored:` records prefix is added by the display layer
-                // per-code (like the donor `warning_label`); the message is the
-                // bare detail.
+                // per-code; the message is the bare detail.
                 message: format!("--title '{title}' has no effect with an explicit path"),
             });
         }
@@ -214,11 +212,9 @@ pub fn execute(
     // mint a placeholder id on apply.
     let trace_id = String::new();
 
-    // NRN-390: post-create validate pass, donor-equivalent to
-    // `retired/src/new/mod.rs::post_create_validate`. Only meaningful once the
-    // file is actually on disk (a forecast writes nothing for the pass to see),
-    // so it runs only on a confirmed apply — matching the donor, which invokes
-    // it solely from `apply_and_render`, never from the dry-run preview path.
+    // Post-create validate pass. Only meaningful once the file is actually on
+    // disk (a forecast writes nothing for the pass to see), so it runs only on a
+    // confirmed apply, never on the dry-run preview path.
     let mut warnings = built.warnings;
     if applied {
         if let Some(created_path) = path.as_deref() {
@@ -255,19 +251,18 @@ pub fn execute(
 ///
 /// A plain filesystem walk (not the SQL cache) is the only way to see the new
 /// file at this point: the write already landed under `apply_migration_plan`,
-/// but the owner's cache increment for `touched_paths` commits later — mirrors
-/// the donor's `post_create_validate`, which forces a rebuild for the same
-/// reason (retired/src/new/mod.rs). Alias checks are skipped (`alias_field:
-/// None`) — the same choice the donor made for this one-shot pass.
+/// but the owner's cache increment for `touched_paths` commits later, so a
+/// filesystem walk is forced for this one-shot pass. Alias checks are skipped
+/// (`alias_field: None`) for this pass.
 ///
 /// Dedup: a `RequiredFrontmatterMissing` finding whose field is already covered
 /// by a synth-phase `missing-required-field` warning is dropped and every other
 /// finding surfaces once, recoded onto the `missing-required-field` family when
-/// it IS a required-field miss the synth phase didn't already catch (donor
-/// parity — `already_warned`). Every other finding kind reuses the engine's own
-/// `code`/`message` verbatim, plus the finding's own field when its body
-/// carries one (the unified `{code, field?, message}` envelope, PD-111, is
-/// richer than the donor's flat `ValidationFinding{code,message}`).
+/// it IS a required-field miss the synth phase didn't already catch. Every other
+/// finding kind reuses the engine's own `code`/`message` verbatim, plus the
+/// finding's own field when its body carries one (the unified
+/// `{code, field?, message}` envelope is richer than a flat
+/// `ValidationFinding{code,message}`).
 fn post_create_validate(
     cfg: &VaultConfig,
     compiled: &CompiledConfig,
@@ -657,8 +652,8 @@ fn build_create(
     let path_only_rules = applicable_rules(cfg, compiled, doc_path.as_str(), None);
     let mut operator_overrides: BTreeMap<String, Value> = BTreeMap::new();
     // Track WHICH operator flag supplied each override so the report can credit
-    // the donor's three-way source vocabulary (operator-flag / operator-flag-json
-    // / schema-default) rather than a flattened two-way label (F1).
+    // the three-way source vocabulary (operator-flag / operator-flag-json
+    // / schema-default) rather than a flattened two-way label.
     let mut override_src: BTreeMap<String, OverrideSrc> = BTreeMap::new();
     for (key, value, src) in raw {
         override_src.insert(key.clone(), src);
@@ -712,9 +707,9 @@ fn build_create(
     let mut created: Vec<FrontmatterCreated> = Vec::new();
     for (field, value) in &resolved_fm {
         if operator_overrides.contains_key(field) {
-            // Donor source vocabulary (retired/src/new/report.rs): a `--field`
-            // override is `operator-flag`, a `--field-json` override is
-            // `operator-flag-json` — the distinction the flattened label lost.
+            // Source vocabulary: a `--field` override is `operator-flag`, a
+            // `--field-json` override is `operator-flag-json` — the distinction
+            // the flattened label lost.
             let source = match override_src.get(field) {
                 Some(OverrideSrc::FieldJson) => "operator-flag-json",
                 _ => "operator-flag",
@@ -1042,7 +1037,7 @@ validate:
 
     #[test]
     fn f1_field_json_override_credits_operator_flag_json() {
-        // The donor's three-way source vocabulary: a --field-json override is
+        // The three-way source vocabulary: a --field-json override is
         // `operator-flag-json`, distinct from --field's `operator-flag`.
         let (_t, root) = synth_vault(None, &[]);
         let cache = built(&root);
@@ -1272,7 +1267,7 @@ validate:
         // `build_create` already emits `missing-required-field` for a rule's own
         // `required_frontmatter` gap; the post-create validate pass's
         // `RequiredFrontmatterMissing` finding for the SAME field must be
-        // deduplicated against it (donor `already_warned` parity), not doubled.
+        // deduplicated against it, not doubled.
         let cfg = r#"
 validate:
   rules:

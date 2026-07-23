@@ -1,6 +1,6 @@
 //! The `get` verb's execute seam (the 0016 Params/execute/Report vocabulary).
 //!
-//! Ported from the donor `src/get/`: resolve each target (path / stem /
+//! Resolve each target (path / stem /
 //! wikilink-shaped / alias), load its full connection set, resolve any
 //! `--section` spans, then apply in-memory sort/paging over the resolved
 //! records. Every resolved document carries its whole facet set (frontmatter,
@@ -122,7 +122,7 @@ pub fn execute(
     }))
 }
 
-// ── Target resolution (donor `get/target.rs`) ────────────────────────────────
+// ── Target resolution ─────────────────────────────────────────────────────────
 
 /// Normalize a user-supplied target string. Accepts a path, a stem, or a
 /// wikilink-shaped string (`[[foo]]`, `[[foo#anchor]]`, `[[foo^block]]`,
@@ -191,7 +191,7 @@ fn resolve_target(cache: &Cache, raw: &str) -> Result<Vec<Utf8PathBuf>> {
     Ok(Vec::new())
 }
 
-// ── `--section` resolution (donor `get/mod.rs`) ──────────────────────────────
+// ── `--section` resolution ────────────────────────────────────────────────────
 
 /// Resolve every requested `--section` heading against one document's body,
 /// reusing the shared `resolve_section` primitive so a section READ mirrors a
@@ -244,7 +244,7 @@ fn dedup_preserve_order(items: &[String]) -> Vec<String> {
         .collect()
 }
 
-// ── In-memory sort / paging (donor `get/mod.rs`) ─────────────────────────────
+// ── In-memory sort / paging ───────────────────────────────────────────────────
 
 /// Stably sort by `field` (a frontmatter key, or the identity `path` / `stem`).
 /// Records missing the field sort last in both directions; `desc` reverses only
@@ -281,8 +281,8 @@ fn apply_sort(records: &mut [GetRecord], field: Option<&str>, desc: bool) {
     });
 }
 
-/// Render a frontmatter value to the string the sort compares on (donor
-/// `json_value_inline`): scalars verbatim, arrays comma-joined.
+/// Render a frontmatter value to the string the sort compares on: scalars
+/// verbatim, arrays comma-joined.
 fn sort_key_string(v: &serde_json::Value) -> String {
     use serde_json::Value;
     match v {

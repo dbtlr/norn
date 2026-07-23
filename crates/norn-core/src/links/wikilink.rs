@@ -3,10 +3,10 @@
 //!
 //! The lexical layer (recognizing `[[…]]`, splitting target/anchor/block-ref,
 //! excluding code spans) is `norn_frontmatter::wikilink`. This module is the link
-//! *model* half the donor entangled with it: it maps each token to a
+//! *model* half: it maps each token to a
 //! [`LinkKind::Wikilink`] / [`LinkKind::Embed`] [`Link`], records the vault
 //! [`LinkSourceArea`] the token came from, and re-bases the token's
-//! text-relative span to a content-absolute [`SourceSpan`] matching the donor.
+//! text-relative span to a content-absolute [`SourceSpan`].
 
 use crate::domain::{Link, LinkKind, LinkSourceArea, LinkSourceContext, LinkStatus, SourceSpan};
 use camino::Utf8Path;
@@ -17,7 +17,7 @@ use serde_json::Value;
 /// Parse `[[…]]` links in a document body (skipping code spans) into [`Link`]s.
 ///
 /// `content` is the whole document and `body_start` the byte offset of `body`
-/// within it, so recorded spans are content-absolute (matching the donor).
+/// within it, so recorded spans are content-absolute.
 pub fn parse_wikilinks(
     source_path: &Utf8Path,
     content: &str,

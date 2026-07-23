@@ -17,7 +17,7 @@
 //! on the same already-failed path) record `not_run`, and every INDEPENDENT op
 //! still runs. A plan-level barrier (schema, vault-root, vacate, duplicate-field,
 //! containment) still refuses the whole plan before the first write — that alone
-//! is the byte-identical `refused` class, surfaced as an `Err` from this fn.
+//! is the clean `refused` class (nothing written), surfaced as an `Err` from this fn.
 
 use std::fs;
 use std::time::Duration;
@@ -689,7 +689,7 @@ fn gate_blocked(env: &PassEnv, outcomes: &mut ApplyOutcomes, change: &ApplyOp) -
 /// op's outcome into the returned [`ApplyOutcomes`]'s tracker.
 ///
 /// Returns `Err` ONLY for a plan-level barrier (schema, vault-root, vacate,
-/// duplicate-field, containment) — the byte-identical whole-plan refusal, raised
+/// duplicate-field, containment) — the clean whole-plan refusal (nothing written), raised
 /// before the first write. Per-op failures are recorded in the tracker; the
 /// return is `Ok` even when some ops failed (partial apply is the semantics).
 #[allow(clippy::too_many_arguments)]
@@ -703,7 +703,7 @@ pub(crate) fn run_apply_passes(
     spans: &HashMap<String, String>,
     deps: &DependencyMap,
 ) -> Result<ApplyOutcomes> {
-    // ── Plan-level barriers (byte-identical whole-plan refusal, pre-write) ──────
+    // ── Plan-level barriers (clean whole-plan refusal, pre-write) ───────────────
     validate_plan_for_apply(cwd, plan)?;
     reject_content_op_after_vacate(plan)?;
     changes_by_path(plan)?;
@@ -911,7 +911,7 @@ fn content_pass(
         }
         // Per-op status: a change whose unit changed AND the file wrote is
         // `applied` (its action event fires); any other content op is `skipped`
-        // (byte-identical no-op, or a dry-run preview the executor renders as
+        // (a no-op, or a dry-run preview the executor renders as
         // not_run).
         for unit in &file.units {
             for change in unit.changes.iter().copied() {
@@ -1749,7 +1749,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("doc.md")).unwrap(),
             doc,
-            "file must be byte-identical after the refusal"
+            "file must be unchanged after the refusal"
         );
     }
 
@@ -1828,7 +1828,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("doc.md")).unwrap(),
             doc,
-            "file must be byte-identical after the refusal"
+            "file must be unchanged after the refusal"
         );
     }
 
@@ -2717,7 +2717,7 @@ mod tests {
     #[test]
     fn compose_content_ops_detects_noop() {
         let original = "---\nstatus: done\n---\nbody\n";
-        // set status to the value it already holds → byte-identical.
+        // set status to the value it already holds → no change.
         let fm = set_frontmatter_change(
             "note.md",
             "h",
@@ -2771,7 +2771,7 @@ mod tests {
     /// End-to-end per-document atomicity (the NRN-139 headline): a plan with a
     /// frontmatter `set` AND a section edit on ONE doc. When the section edit's
     /// anchor is missing, the WHOLE content phase aborts before any write — the
-    /// frontmatter change is NOT flushed, so the file is byte-identical to the
+    /// frontmatter change is NOT flushed, so the file is unchanged from the
     /// original (no half-mutation across the two classes on one file).
     #[test]
     fn content_phase_is_atomic_on_edit_failure_for_one_doc() {
@@ -2807,7 +2807,7 @@ mod tests {
         let on_disk = std::fs::read_to_string(root.join("note.md")).unwrap();
         assert_eq!(
             on_disk, initial,
-            "content phase aborted before writing; file must be byte-identical"
+            "content phase aborted before writing; file must be unchanged"
         );
     }
 

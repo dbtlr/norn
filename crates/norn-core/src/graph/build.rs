@@ -209,10 +209,10 @@ fn parse_document(
     };
 
     let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-    // NRN-385: flag a leading UTF-8 BOM as a graph diagnostic — a rewrite-only
-    // check the donor never had (the oracle silently reads a BOM'd doc as
-    // frontmatter-less; NRN-349 only recognizes the block past it, it never
-    // reports the byte itself). Detected on the RAW content before
+    // NRN-385: flag a leading UTF-8 BOM as a graph diagnostic. Without it a
+    // BOM'd doc reads as frontmatter-less (the frontmatter block is only
+    // recognized past the BOM), and the byte itself goes unreported. Detected on
+    // the RAW content before
     // `extract_frontmatter` steps past the BOM for recognition, so this fires
     // whether or not the document's frontmatter is recognized — the two are
     // orthogonal facts (a BOM'd doc with no frontmatter never reaches this
@@ -229,7 +229,7 @@ fn parse_document(
         extract_frontmatter(&content, &mut diagnostics);
     let body_text = body.to_string();
     // `parse_headings` reports spans relative to `body`; re-base them to
-    // content-absolute (as the donor's single-pass `commonmark` did) so a
+    // content-absolute so a
     // document's heading spans stay consistent with its link spans and with the
     // pre-rewrite output contract.
     let headings = parse_headings(body)
@@ -487,8 +487,7 @@ mod tests {
     #[test]
     fn heading_span_is_content_absolute_past_frontmatter() {
         // A document with frontmatter: the heading's recorded byte_offset must be
-        // absolute in the file (past the frontmatter block), matching the donor's
-        // single-pass span, not body-relative.
+        // absolute in the file (past the frontmatter block), not body-relative.
         let (_tmp, root) = vault();
         let content = "---\ntitle: A\n---\n# Heading\n";
         write(&root, "a.md", content);

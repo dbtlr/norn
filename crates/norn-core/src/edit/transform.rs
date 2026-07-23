@@ -281,8 +281,8 @@ fn resolve_section(
 /// EOF with no trailing newline (`## A`), where `body_start == end == len`.
 /// Without it the inserted content would weld onto the heading marker
 /// (`## Ax`), demoting the heading (NRN-437). A normal newline-terminated
-/// heading needs no separator (empty string), preserving byte-for-byte behavior
-/// on every ordinary shape.
+/// heading needs no separator (empty string), leaving every ordinary shape
+/// unchanged.
 fn body_separator(body: &str, span: &SectionSpan) -> &'static str {
     if body[span.heading_start..span.body_start].ends_with('\n') {
         ""

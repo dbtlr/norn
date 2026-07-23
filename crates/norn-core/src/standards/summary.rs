@@ -1,6 +1,6 @@
 //! Grouped-count summary over a validated finding set (`validate --summary`).
 //!
-//! Ported from the donor `src/standards/summary.rs` (ADR 0018). [`summarize`]
+//! [`summarize`]
 //! folds a `&[Finding]` into deterministic `BTreeMap` tallies — by code,
 //! severity, rule, field, and path prefix, plus per-field disallowed-value and
 //! invalid-type breakdowns. Serialized directly for `--format json --summary`.

@@ -151,8 +151,8 @@ pub struct RepairPlanResult {
     pub summary: RepairPlanSummary,
 }
 
-/// Build a wire op's `fields` object from an interior `ApplyOp`, natively —
-/// the byte-for-byte successor to the former `serde_json::to_value(&change)` round
+/// Build a wire op's `fields` object from an interior `ApplyOp`, natively,
+/// replacing a former `serde_json::to_value(&change)` round
 /// trip (which serialized the whole struct, dropped `operation`, and remapped
 /// `path`/`destination`→`src`/`dst` for moves). `serde_json`'s `Map` is a
 /// `BTreeMap`, so the emitted key ORDER is the sorted set regardless of insertion
@@ -173,7 +173,7 @@ fn op_fields_from_change(change: &ApplyOp) -> Value {
     // Linkage is `Option<String>` on the interior op; the repair planner always
     // populates `finding_code` / `repair_rule` (a finding's code and its rule
     // name), so the conditional insert fires for every repair-emitted op — the
-    // emitted key set is byte-identical to the former unconditional insert.
+    // emitted key set matches the former unconditional insert.
     if let Some(finding_code) = &change.finding_code {
         fields.insert("finding_code".into(), Value::String(finding_code.clone()));
     }
@@ -194,7 +194,7 @@ fn op_fields_from_change(change: &ApplyOp) -> Value {
     }
     if let Some(destination) = &change.destination {
         // The `dst` remap belongs to move ops alone; a non-move op carrying a
-        // destination (none exists today) must keep the retired serde path's
+        // destination (none exists today) must keep the former serde path's
         // literal `destination` key rather than silently borrowing the move
         // vocabulary.
         let key = if is_move { "dst" } else { "destination" };
@@ -282,13 +282,10 @@ fn derive_change_id(
     expected_old_value: Option<&Value>,
     occurrence_index: u32,
 ) -> String {
-    // Ported seam (NRN-386): the donor derived this id with SHA-256, taking
-    // the first 8 digest BYTES (16 hex chars). `sha2` is not a norn-core
-    // dependency; `blake3` is, so we hash the identical input byte sequence
-    // with BLAKE3 and take the first 16 hex chars of its hex digest — same
-    // width as the donor's `8 bytes -> 2 hex chars each`. change_ids are
+    // The id is derived by hashing the input with BLAKE3 and taking the first
+    // 16 hex chars of its hex digest (a 64-bit-equivalent width). change_ids are
     // internal identifiers, not a wire contract, so only the determinism and
-    // width need to match, not the algorithm.
+    // width need to be stable, not the algorithm.
     let mut hasher = blake3::Hasher::new();
     hasher.update(path.as_str().as_bytes());
     hasher.update(b"\0");
@@ -582,7 +579,7 @@ pub fn plan_repairs(
 
     // Emit wire ops natively (ADR 0024). Each interior `ApplyOp` becomes a
     // `MigrationOp`: `operation` → `kind`, the remaining fields → the `fields`
-    // object (byte-identical to the former serde round trip), and the 1:1
+    // object (matching the former serde round trip), and the 1:1
     // closest-match footnote — keyed by `change_id`, the only footnote family — is
     // resolved to its string and attached to the op.
     let footnote_by_change_id: std::collections::HashMap<&str, &PlanFootnote> = footnotes

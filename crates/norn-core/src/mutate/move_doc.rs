@@ -1,8 +1,7 @@
 //! The `move` execute seam: relocate a document (or, with `recursive`, a folder)
 //! and cascade-rewrite the backlinks that point at it.
 //!
-//! Ported from the donor `move::{preflight_and_plan, route}` (ADR 0018). The
-//! stem-resolving preflight (source resolution, same-path, parent, destination)
+//! The stem-resolving preflight (source resolution, same-path, parent, destination)
 //! is reproduced here so a clean pre-write decline returns a coded
 //! `outcome = refused` [`ApplyReport`] — never a bare `Err`. A resolved single
 //! move builds a one-op `move_document` `MigrationPlan`; a folder move builds a
@@ -31,7 +30,7 @@ pub fn execute(
     let dry_run = !params.confirm;
 
     // Folder move: the `--recursive` flag, or a source that names a directory on
-    // disk (the donor plans a `move_folder` op the planner expands). Otherwise a
+    // disk (this plans a `move_folder` op the planner expands). Otherwise a
     // single-document move with the stem-resolving preflight.
     let src_abs = vault_root.join(&params.from);
     let is_folder = params.recursive || src_abs.as_std_path().is_dir();
@@ -50,7 +49,7 @@ pub fn execute(
         };
         one_op_plan(vault_root.to_string(), op)
     } else {
-        // ── Single-file preflight (donor move::preflight_and_plan) ────────────
+        // ── Single-file preflight ─────────────────────────────────────────────
         let resolved_src = match preflight_single(&index, &vault_root, params) {
             Ok(src) => src,
             Err(refusal) => {
@@ -98,12 +97,11 @@ pub fn execute(
 }
 
 /// Build the `move_document` op fields. `src` (resolved) / `dst` / `parents` are
-/// ALWAYS present; `force` and `no_link_rewrite` are added ONLY when set (donor
-/// `mcp/tools/move_doc.rs`). `document_hash` — the plan-time CAS precondition
-/// (ADR 0024) — is added when the source resolves in the index (always, for a
-/// verb move). This field set feeds `MigrationPlan::canonical_hash()`; the
-/// added `document_hash` shifts that hash from the donor's (a deliberate,
-/// ledgered plan-byte divergence).
+/// ALWAYS present; `force` and `no_link_rewrite` are added ONLY when set.
+/// `document_hash` — the plan-time CAS precondition (ADR 0024) — is added when
+/// the source resolves in the index (always, for a verb move). This field set
+/// feeds `MigrationPlan::canonical_hash()`, so `document_hash` participates in
+/// the plan hash (ADR 0024).
 fn single_move_fields(
     resolved_src: &camino::Utf8Path,
     params: &norn_wire::MoveParams,
@@ -126,14 +124,14 @@ fn single_move_fields(
 }
 
 /// A coded single-file move preflight refusal — the `MovePreflightError`
-/// codes + Display prose are the wire contract, pinned by the move plan parity case.
+/// codes + Display prose are the wire contract.
 struct MoveRefusal {
     code: &'static str,
     message: String,
     path: Option<String>,
 }
 
-/// Resolve the source and run the donor's ordered preflight barriers, returning
+/// Resolve the source and run the ordered preflight barriers, returning
 /// the resolved vault-relative source path (planned, never the raw token) or a
 /// coded refusal.
 fn preflight_single(
@@ -197,7 +195,7 @@ fn preflight_single(
 }
 
 /// Resolve a source specifier to a vault-relative path: exact path first, then a
-/// case-insensitive stem match. Donor `move::resolve_src` semantics + messages.
+/// case-insensitive stem match.
 fn resolve_src(index: &GraphIndex, src: &str) -> Result<Utf8PathBuf, MoveRefusal> {
     if let Some(doc) = index.documents.iter().find(|d| d.path == src) {
         return Ok(doc.path.clone());
@@ -306,11 +304,10 @@ mod tests {
         }
     }
 
-    // Field-set fidelity (donor `mcp/tools/move_doc.rs`, mirroring the donor's
-    // `route.rs:165-168` omit-when-false assertions): `src`/`dst`/`parents` always
-    // present; `force`/`no_link_rewrite` present only when set; `document_hash`
-    // present when the source resolves in the index (ADR 0024). Pins the plan_hash
-    // contract for `--format json` independent of the parity harness.
+    // Field-set contract: `src`/`dst`/`parents` always present;
+    // `force`/`no_link_rewrite` present only when set; `document_hash` present
+    // when the source resolves in the index (ADR 0024). Pins the plan_hash
+    // contract for `--format json`.
     #[test]
     fn move_fields_omit_false_force_and_no_link_rewrite() {
         let p = norn_wire::MoveParams {
