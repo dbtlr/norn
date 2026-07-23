@@ -3,10 +3,11 @@
 //! The param struct mirrors `norn get`'s daily surface; the handler routes to the
 //! owner and projects each wire [`GetRecord`] into the same full-facet JSON the
 //! CLI's `--format json` emits, wrapped in the typed [`GetOutput`] envelope. A
-//! requested target that did not resolve (an `error:`-prefixed note) maps to
-//! `isError: true` while still returning every good target's records.
+//! requested target that did not resolve (an `error`-severity [`Note`]) maps to
+//! `isError: true` while still returning every good target's records — the bit is
+//! read from the note's typed severity, never from its message text.
 
-use norn_wire::{GetParams as WireGetParams, GetRecord, GetReport, SortPaginateParams};
+use norn_wire::{GetParams as WireGetParams, GetRecord, GetReport, Note, SortPaginateParams};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -96,10 +97,11 @@ pub struct GetOutput {
     /// Targets whose `--section` request resolved no headings. Empty when no
     /// `--section` was requested.
     pub section_failures: Vec<SectionFailure>,
-    /// Non-fatal diagnostics: ambiguous-stem warnings and `error:`-prefixed
-    /// missing-target messages — the CLI's stderr notes. An `error:` note is the
-    /// exit-1 signal this tool maps to `isError: true`.
-    pub notes: Vec<String>,
+    /// Non-fatal diagnostics as typed `{severity, code, message}` notes:
+    /// ambiguous-stem warnings and missing-target errors. An `error`-severity
+    /// note is the signal this tool maps to `isError: true`; a consumer branches
+    /// on `severity` / `code`, never on the message text.
+    pub notes: Vec<Note>,
     /// Exact source representation, present only for `format: "markdown"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub markdown: Option<MarkdownOutput>,
@@ -200,7 +202,7 @@ pub(crate) fn envelope(p: &GetParams, report: GetReport) -> MutationResult<GetOu
     } else {
         None
     };
-    let is_error = report.notes.iter().any(|n| n.starts_with("error:"));
+    let is_error = report.notes.iter().any(Note::is_error);
     let output = GetOutput {
         records,
         // The wire GetReport does not carry section failures; a default get (no
