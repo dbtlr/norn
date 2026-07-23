@@ -96,14 +96,32 @@ fn held_session_resummons_after_idle_reap() {
     let config = base_config(vault_root, runtime_dir.clone(), Duration::from_secs(1));
 
     let mut session = open(&config).expect("summon");
-    session.wait_until_ready(Duration::from_secs(20)).unwrap();
+    // Capture the owner's pid so the reap is detected by its ACTUAL process exit
+    // (see the wait below), not just the socket/db proxy.
+    let owner_pid = session
+        .wait_until_ready(Duration::from_secs(20))
+        .unwrap()
+        .pid;
     assert_eq!(session.probe().expect("first probe serves"), 3);
     let socket = session.socket().to_path_buf();
 
     // Hold the session but stay idle: the owner idle-reaps, unbinding the socket
     // and deleting its db — the session's connection is now dead.
+    //
+    // Wait on the owner's REAL terminal condition, not just the socket/db proxy
+    // (NRN-444). The owner unbinds its socket and drops its db dir a few
+    // statements BEFORE its tokio runtime is dropped and the process exits, so
+    // `!socket.exists() && owner_db_dirs == 0` can latch while the owner's worker
+    // threads are STILL serving the held connection — the next probe would then
+    // succeed, not fail (the flake). Also requiring `!owner_still_running` waits
+    // until the process has actually terminated (its runtime gone, the connection
+    // closed), so the "held connection is dead" assertion below is deterministic.
+    // Strictly stronger than the old proxy: it still requires the socket and db
+    // to be gone, and additionally the process to have stopped running.
     let reaped = common::wait_until(Duration::from_secs(15), || {
-        !socket.exists() && common::owner_db_dirs(&runtime_dir) == 0
+        !socket.exists()
+            && common::owner_db_dirs(&runtime_dir) == 0
+            && !common::owner_still_running(owner_pid)
     });
     assert!(
         reaped,

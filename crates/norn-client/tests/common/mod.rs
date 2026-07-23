@@ -73,6 +73,35 @@ pub fn wait_until(budget: std::time::Duration, mut cond: impl FnMut() -> bool) -
     cond()
 }
 
+/// Whether owner process `pid` is still RUNNING — present and not a zombie.
+/// Lets a reap assertion wait on the owner's real terminal condition rather than
+/// a socket/db proxy: the owner unbinds its socket and drops its db dir a few
+/// statements BEFORE its tokio runtime is dropped and the process exits, so
+/// "socket + db gone" can latch while the owner's worker threads are still
+/// serving the held connection (NRN-444).
+///
+/// `kill -0` (pid existence) is NOT enough here: the owner is spawned detached
+/// and its `Child` handle is dropped un-waited, so after it exits it lingers as a
+/// ZOMBIE (an unreaped child of the test process) — `kill -0` keeps reporting the
+/// pid. `ps -o state=` distinguishes: a zombie is state `Z`, and an absent pid
+/// prints nothing. Both mean the runtime is gone and the connection is closed, so
+/// "no longer running" is the true terminal condition. Portable across macOS and
+/// Linux, no libc dependency in the test crate.
+pub fn owner_still_running(pid: u32) -> bool {
+    match std::process::Command::new("ps")
+        .args(["-o", "state=", "-p", &pid.to_string()])
+        .output()
+    {
+        Ok(out) => {
+            let state = String::from_utf8_lossy(&out.stdout);
+            let state = state.trim();
+            // Present (non-empty) and not a zombie (`Z`/`Z+`) => still running.
+            !state.is_empty() && !state.starts_with('Z')
+        }
+        Err(_) => false,
+    }
+}
+
 /// Count `norn-owner-db-*` dirs directly under `runtime_dir` (the owner's
 /// born-with-owner db lives in one; zero means the db was reaped).
 pub fn owner_db_dirs(runtime_dir: &std::path::Path) -> usize {
