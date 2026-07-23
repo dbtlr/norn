@@ -38,8 +38,9 @@ use crate::MigrationPlan;
 /// `Forecast` exists so a consumer keying on `outcome` alone tells a preview
 /// from a real write: these reports have no separate `dry_run` field, so a
 /// forecast that reported `outcome: applied` (with `applied: false`)
-/// contradicted itself. The redundant `applied` bool is retained for
-/// backward-compatible field presence but `outcome` is now the authority.
+/// contradicted itself. `outcome` is the authority; each report's `applied`
+/// bool stays alongside it as a direct convenience a consumer can read without
+/// matching the enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MutationOutcome {

@@ -132,10 +132,13 @@ pub(super) fn write_report_json<T: serde::Serialize>(
 
 /// Write an `ApplyReport`'s pretty JSON serialization to the `--out` file path —
 /// the write shared by the cascade verbs that accept `--out` (`apply`,
-/// `rewrite-wikilink`); the caller silences stdout on this path.
+/// `rewrite-wikilink`); the caller silences stdout on this path. Routes through
+/// `write_report_json` so the file projection and the stdout projection are the
+/// same one-policy serialization, never two independent implementations.
 pub(super) fn write_report_to_out_file(path: &str, report: &ApplyReport) -> io::Result<()> {
-    let json = serde_json::to_string_pretty(report)?;
-    std::fs::write(path, format!("{json}\n"))
+    let mut buf: Vec<u8> = Vec::new();
+    write_report_json(&mut buf, report)?;
+    std::fs::write(path, buf)
 }
 
 /// The status-label vocabulary an `ApplyReport`'s outcome maps to in a TTY
