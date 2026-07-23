@@ -94,6 +94,11 @@ pub fn execute(
 
     let result = cache.find_documents(&query)?;
 
+    // Whole-vault error-diagnostic signal (a cheap `EXISTS` scan, NOT an index
+    // load) — the find envelope carries it so an off-filesystem MCP consumer can
+    // reproduce the direct path's diagnostic-error signal.
+    let has_diagnostic_errors = cache.has_diagnostic_errors()?;
+
     let documents = result
         .matches
         .into_iter()
@@ -109,6 +114,7 @@ pub fn execute(
         // 1-based, so a default (offset 0) query reports position 1.
         starts_at: offset.saturating_add(1),
         truncated: result.truncated,
+        has_diagnostic_errors,
     }))
 }
 

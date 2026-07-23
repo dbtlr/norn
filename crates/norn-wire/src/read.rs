@@ -75,6 +75,14 @@ pub struct FindReport {
     pub returned: usize,
     pub starts_at: usize,
     pub truncated: bool,
+    /// Whether the vault carries any error-severity diagnostic (e.g. an
+    /// unreadable document) — scoped to the WHOLE vault, not this query's
+    /// matches. An off-filesystem consumer (the MCP find tool) reads it to
+    /// reproduce the direct path's diagnostic-error signal; the CLI's own exit
+    /// derivation is a separate concern. Additive and omitted-when-false, so a
+    /// clean vault's report is byte-unchanged from before the field existed.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_diagnostic_errors: bool,
 }
 
 /// One matched document. Frontmatter and body are carried as-parsed so the CLI
@@ -678,9 +686,39 @@ mod tests {
             returned: 1,
             starts_at: 1,
             truncated: false,
+            has_diagnostic_errors: false,
         };
         let v = serde_json::to_value(&r).unwrap();
         let back: FindReport = serde_json::from_value(v).unwrap();
         assert_eq!(back, r);
+    }
+
+    #[test]
+    fn find_report_omits_diagnostic_errors_when_clean_carries_when_set() {
+        // Additive contract: a clean vault's report omits the key entirely (a
+        // pre-field report JSON still deserializes), while a vault with an
+        // error-severity diagnostic carries `has_diagnostic_errors: true`.
+        let clean = FindReport {
+            documents: vec![],
+            total: 0,
+            returned: 0,
+            starts_at: 1,
+            truncated: false,
+            has_diagnostic_errors: false,
+        };
+        let v = serde_json::to_value(&clean).unwrap();
+        assert!(
+            v.get("has_diagnostic_errors").is_none(),
+            "clean report must omit the key, got {v}"
+        );
+        let back: FindReport = serde_json::from_value(v).unwrap();
+        assert_eq!(back, clean);
+
+        let dirty = FindReport {
+            has_diagnostic_errors: true,
+            ..clean
+        };
+        let v = serde_json::to_value(&dirty).unwrap();
+        assert_eq!(v["has_diagnostic_errors"], serde_json::json!(true));
     }
 }
