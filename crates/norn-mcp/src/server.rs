@@ -293,7 +293,7 @@ impl McpServer {
     /// `vault.set` — update one document's frontmatter (and optionally its body).
     #[tool(
         name = "vault.set",
-        description = "Update one document's frontmatter (and optionally replace its body), schema-aware. DRY-RUN by default — returns the planned change without writing. Pass confirm:true to apply.",
+        description = "Update one document's frontmatter (and optionally replace its body), schema-aware. DRY-RUN by default (confirm:false): reports outcome:\"forecast\" and writes nothing. Pass confirm:true to apply and get outcome:\"applied\"/\"refused\".",
         output_schema = output_schema_for::<crate::tools::set::SetOutput>()
     )]
     async fn set(
@@ -312,7 +312,7 @@ impl McpServer {
     /// `vault.new` — create a document (explicit path, by rule, or inbox).
     #[tool(
         name = "vault.new",
-        description = "Create a document — explicit path, by named rule, or inbox — with schema defaults and {{seq}} allocation. DRY-RUN by default; pass confirm:true to write.",
+        description = "Create a document — explicit path, by named rule, or inbox — with schema defaults and {{seq}} allocation. DRY-RUN by default (confirm:false): reports outcome:\"forecast\" and writes nothing. Pass confirm:true to apply and get outcome:\"applied\"/\"refused\".",
         output_schema = output_schema_for::<crate::tools::new::NewOutput>()
     )]
     async fn new_document(
@@ -331,7 +331,7 @@ impl McpServer {
     /// `vault.edit` — apply section/text edit ops to one document's body.
     #[tool(
         name = "vault.edit",
-        description = "Apply structured section/text edit ops to one document's body, with an optional expected_hash compare-and-swap. DRY-RUN by default; pass confirm:true to write.",
+        description = "Apply structured section/text edit ops to one document's body, with an optional expected_hash compare-and-swap. DRY-RUN by default (confirm:false): reports outcome:\"forecast\" and writes nothing. Pass confirm:true to apply and get outcome:\"applied\"/\"refused\".",
         output_schema = output_schema_for::<crate::tools::edit::EditOutput>()
     )]
     async fn edit(
@@ -350,7 +350,7 @@ impl McpServer {
     /// `vault.move` — relocate a document/folder and cascade-rewrite backlinks.
     #[tool(
         name = "vault.move",
-        description = "Relocate a document (or folder, recursive:true) and cascade-rewrite its backlinks. DRY-RUN by default; pass confirm:true to write.",
+        description = "Relocate a document (or folder, recursive:true) and cascade-rewrite its backlinks. DRY-RUN by default (confirm:false): reports dry_run:true (with outcome:\"applied\" pending NRN-161) and writes nothing. Pass confirm:true to apply.",
         output_schema = output_schema_for::<crate::tools::move_doc::MoveOutput>()
     )]
     async fn move_document(
@@ -368,7 +368,7 @@ impl McpServer {
     /// `vault.delete` — remove a document, leaving or redirecting its backlinks.
     #[tool(
         name = "vault.delete",
-        description = "Delete a document, either leaving its incoming links broken (allow_broken_links:true) or redirecting them (rewrite_to). The document hash from a read stamps a required delete precondition. DRY-RUN by default; pass confirm:true to write.",
+        description = "Delete a document, either leaving its incoming links broken (allow_broken_links:true) or redirecting them (rewrite_to). The owner stamps the target's current content hash as a required plan-time precondition (protects against owner-index-vs-disk skew); a client-chosen CAS instead goes through vault.apply with a plan-carried document_hash. DRY-RUN by default (confirm:false): reports dry_run:true (with outcome:\"applied\" pending NRN-161) and writes nothing. Pass confirm:true to apply.",
         output_schema = output_schema_for::<crate::tools::delete::DeleteOutput>()
     )]
     async fn delete(
@@ -386,7 +386,7 @@ impl McpServer {
     /// `vault.rewrite_wikilink` — rewrite every `[[old]]` reference to `[[new]]`.
     #[tool(
         name = "vault.rewrite_wikilink",
-        description = "Rewrite every [[old]] wikilink reference (body + frontmatter) to [[new]] across the vault. DRY-RUN by default; pass confirm:true to write.",
+        description = "Rewrite every [[old]] wikilink reference (body + frontmatter) to [[new]] across the vault. DRY-RUN by default (confirm:false): reports dry_run:true (with outcome:\"applied\" pending NRN-161) and writes nothing. Pass confirm:true to apply.",
         output_schema = output_schema_for::<crate::tools::rewrite_wikilink::RewriteWikilinkOutput>()
     )]
     async fn rewrite_wikilink(
@@ -404,7 +404,7 @@ impl McpServer {
     /// `vault.apply` — execute an already-reviewed MigrationPlan.
     #[tool(
         name = "vault.apply",
-        description = "Execute an already-reviewed MigrationPlan (e.g. one returned by vault.repair). DRY-RUN by default; pass confirm:true to write.",
+        description = "Execute an already-reviewed MigrationPlan (e.g. one returned by vault.repair). DRY-RUN by default (confirm:false): reports dry_run:true (with outcome:\"applied\" pending NRN-161) and writes nothing. Pass confirm:true to apply.",
         output_schema = output_schema_for::<crate::tools::apply::ApplyOutput>()
     )]
     async fn apply(

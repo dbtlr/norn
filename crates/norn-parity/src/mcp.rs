@@ -400,7 +400,9 @@ const PLAN_HASH_PLACEHOLDER: &str = "<PLAN_HASH>";
 /// targeted substitutions by exact object-key name (see the module-level doc
 /// for why it is safe to normalize, and why `protocolVersion` deliberately
 /// is NOT): `serverInfo.version`, a plan's `generated_at` timestamp, and a
-/// cascade report's root-dependent `plan_hash`.
+/// cascade report's root-dependent `plan_hash`. A `content` array's `text`
+/// fields get one further, POSITION-SCOPED treatment — see
+/// [`normalize_content_array`].
 fn normalize_value(value: &Value, vault_roots: &[&Path]) -> Value {
     match value {
         Value::Object(map) => {
@@ -412,6 +414,8 @@ fn normalize_value(value: &Value, vault_roots: &[&Path]) -> Value {
                     Value::String(GENERATED_AT_PLACEHOLDER.to_string())
                 } else if k == "plan_hash" && v.is_string() {
                     Value::String(PLAN_HASH_PLACEHOLDER.to_string())
+                } else if k == "content" && v.is_array() {
+                    normalize_content_array(v, vault_roots)
                 } else {
                     normalize_value(v, vault_roots)
                 };
@@ -425,16 +429,59 @@ fn normalize_value(value: &Value, vault_roots: &[&Path]) -> Value {
                 .map(|v| normalize_value(v, vault_roots))
                 .collect(),
         ),
+        Value::String(s) => Value::String(normalize::normalize_text(
+            s,
+            vault_roots,
+            normalize::DEFAULT,
+        )),
+        other => other.clone(),
+    }
+}
+
+/// Normalize a tool result's `content` array — rmcp's human-readable mirror of
+/// `structuredContent`, `[{"type": "text", "text": <compact-JSON string>}]`.
+/// Only a `content[].text` string gets the STRUCTURAL re-normalization: when it
+/// parses as a JSON object/array, re-run [`normalize_value`] over the parsed
+/// value and re-serialize, so the two renderings of the same root-dependent
+/// keys (`plan_hash`, `generated_at` — embedded here as text, out of the
+/// key-based rules' reach in `normalize_value`) end up consistent. Every other
+/// string leaf in the response — including every other field of a `content`
+/// item — gets only the plain text/vault-root strip, never a JSON-parse
+/// reinterpretation; scoping the structural rewrite to this one field position
+/// is deliberate, so a frontmatter value or error message that happens to
+/// parse as JSON elsewhere in the tree is never restructured.
+fn normalize_content_array(items: &Value, vault_roots: &[&Path]) -> Value {
+    let Value::Array(items) = items else {
+        return normalize_value(items, vault_roots);
+    };
+    Value::Array(
+        items
+            .iter()
+            .map(|item| match item {
+                Value::Object(map) => {
+                    let mut out = serde_json::Map::with_capacity(map.len());
+                    for (k, v) in map {
+                        let normalized = if k == "text" {
+                            normalize_content_text(v, vault_roots)
+                        } else {
+                            normalize_value(v, vault_roots)
+                        };
+                        out.insert(k.clone(), normalized);
+                    }
+                    Value::Object(out)
+                }
+                other => normalize_value(other, vault_roots),
+            })
+            .collect(),
+    )
+}
+
+/// The one position in an MCP response where a string leaf is deliberately
+/// re-parsed and structurally re-normalized — see [`normalize_content_array`].
+fn normalize_content_text(v: &Value, vault_roots: &[&Path]) -> Value {
+    match v {
         Value::String(s) => {
             let stripped = normalize::normalize_text(s, vault_roots, normalize::DEFAULT);
-            // rmcp renders a structured tool result's `structuredContent` a
-            // SECOND time as a compact-JSON string in `content[0].text`. That
-            // string embeds the same root-dependent keys (`plan_hash`,
-            // `generated_at`) the key-based rules above neutralize — but as text,
-            // out of their reach. When a string leaf is itself a JSON object /
-            // array, re-normalize it STRUCTURALLY so the two renderings stay
-            // consistent (a scalar-looking string is left alone, so a frontmatter
-            // value is never reinterpreted).
             match serde_json::from_str::<Value>(&stripped) {
                 Ok(inner @ (Value::Object(_) | Value::Array(_))) => {
                     let normalized = normalize_value(&inner, vault_roots);
@@ -443,7 +490,7 @@ fn normalize_value(value: &Value, vault_roots: &[&Path]) -> Value {
                 _ => Value::String(stripped),
             }
         }
-        other => other.clone(),
+        other => normalize_value(other, vault_roots),
     }
 }
 
@@ -730,6 +777,33 @@ mod tests {
         assert_eq!(
             normalized["result"]["documents"][0]["path"],
             Value::String("<VAULT>/notes/alpha.md".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_value_structurally_renorms_content_text_but_not_other_strings() {
+        // `content[].text` is the ONE position that gets the structural
+        // JSON-parse-and-renormalize treatment (rmcp's second, text-embedded
+        // rendering of `structuredContent`) — a `generated_at`/`plan_hash` inside
+        // it neutralizes exactly like the key-based rules above.
+        let value: Value = serde_json::from_str(
+            r#"{"result":{"content":[{"type":"text","text":"{\"plan_hash\":\"abc123\",\"generated_at\":\"2026-07-23T12:00:00Z\"}"}],"structuredContent":{"note":"{\"plan_hash\":\"abc123\"}"}}}"#,
+        )
+        .unwrap();
+        let normalized = normalize_value(&value, &[]);
+        let text = normalized["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains(PLAN_HASH_PLACEHOLDER) && text.contains(GENERATED_AT_PLACEHOLDER),
+            "content[].text is re-parsed and structurally normalized, got: {text}"
+        );
+        // A string leaf OUTSIDE `content[].text` that happens to parse as JSON
+        // (here, `structuredContent.note`) is left as plain stripped text, never
+        // reinterpreted — the scoping this test pins.
+        assert_eq!(
+            normalized["result"]["structuredContent"]["note"],
+            Value::String(r#"{"plan_hash":"abc123"}"#.to_string()),
+            "a JSON-looking string outside content[].text must not be \
+             structurally re-normalized"
         );
     }
 
