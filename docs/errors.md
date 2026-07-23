@@ -137,7 +137,8 @@ CHANGELOG breaking change.
 
 | Code | Cause |
 |---|---|
-| `cannot-minimal-edit` | frontmatter could not be minimally edited |
+| `cannot-minimal-edit` | a frontmatter/body content transform could not be applied byte-minimally (this is a CONTENT-transform fault only — a filesystem I/O failure while relocating or removing a whole document is `filesystem-op-failed`, not this) |
+| `filesystem-op-failed` | a filesystem operation while relocating or removing a whole document failed at runtime (rename/copy/remove/mkdir under the move/delete apply pass) — the OS error text rides in the message; surfaces as a `failed` outcome, not a clean pre-write refusal |
 | `frontmatter-parse-failed` | the document's frontmatter did not parse |
 | `post-image-verification-failed` | the post-edit frontmatter failed its read-back verification gate |
 | `edit-failed` | a body/section edit op could not be applied |
