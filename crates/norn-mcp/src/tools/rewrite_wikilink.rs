@@ -71,6 +71,7 @@ mod tests {
         let report = ApplyReport {
             schema_version: norn_wire::APPLY_REPORT_SCHEMA_VERSION,
             trace_id: String::new(),
+            telemetry_degraded: false,
             plan_hash: "h".into(),
             vault_root: "/v".into(),
             dry_run: false,

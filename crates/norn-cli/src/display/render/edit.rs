@@ -72,12 +72,14 @@ pub(crate) fn render_edit(
         }
         // The applied path prints a `trace:` footer after the records block
         // (records only; JSON carries `trace_id` as a field). A forecast prints
-        // the blank line + `Apply with --yes` hint instead.
-        // `edit`'s verb path doesn't route through `EventSink` yet, so `trace_id` is
-        // `String::new()` here — an empty-until-real placeholder line until telemetry
-        // wires through (NRN-400).
+        // the blank line + `Apply with --yes` hint instead. A confirmed `edit`
+        // routes through the shared `apply_migration_plan` executor (NRN-400),
+        // which mints a real `EventSink`-derived trace id.
         if report.applied {
             sink.trace_footer(&report.trace_id)?;
+            if report.telemetry_degraded {
+                conv.telemetry_degraded_warning()?;
+            }
         } else {
             writeln!(sink.writer())?;
             writeln!(sink.writer(), "Apply with --yes")?;

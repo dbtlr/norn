@@ -125,6 +125,11 @@ struct OwnerState {
     /// vault. A confirmed mutation appends to a daily JSONL file here; `audit`
     /// reads it back. `None` → in-memory telemetry, `audit` yields empty.
     events_dir: Option<Utf8PathBuf>,
+    /// The `YYYY-MM-DD` day the retention sweep (`prune_events` +
+    /// `enforce_size_cap`) last ran for, `None` before the first confirmed
+    /// mutation. Amortizes the sweep to once per new day rather than once per
+    /// mutation — see [`mark_swept_if_new_day`](Self::mark_swept_if_new_day).
+    swept_day: Mutex<Option<String>>,
 }
 
 impl OwnerState {
@@ -142,12 +147,29 @@ impl OwnerState {
             wake: tokio::sync::Notify::new(),
             mutation_lock: tokio::sync::Mutex::new(()),
             events_dir,
+            swept_day: Mutex::new(None),
         }
     }
 
     /// The durable telemetry events dir, `Some` only for a registered vault.
     fn events_dir(&self) -> Option<Utf8PathBuf> {
         self.events_dir.clone()
+    }
+
+    /// Whether the retention sweep should run for `today` (a `YYYY-MM-DD`
+    /// string): `true` (and caches `today`) the first time this is called for
+    /// a given day, `false` on every later call for the same day. Confirmed
+    /// mutations are already serialized through `mutation_lock`, so this needs
+    /// no synchronization beyond the plain `Mutex` — there is never a race
+    /// between two callers deciding the same day is new.
+    fn mark_swept_if_new_day(&self, today: &str) -> bool {
+        let mut swept = self.swept_day.lock().unwrap_or_else(|p| p.into_inner());
+        if swept.as_deref() == Some(today) {
+            false
+        } else {
+            *swept = Some(today.to_string());
+            true
+        }
     }
 
     fn is_shutdown(&self) -> bool {
@@ -810,7 +832,8 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
             // owner-held (registration-gated); the cache is not consulted, so
             // the `dispatch_read` closure ignores it — but the readiness gate +
             // fault classification are still shared. A bad `--since`/`--until`
-            // is a clean rejection (exit 2), never a cache fault.
+            // is a clean rejection (exit 1, the read-verb convention), never a
+            // cache fault.
             let events_dir = state.events_dir();
             dispatch_read(
                 state,
@@ -1040,6 +1063,7 @@ async fn dispatch_mutation<R: Send + 'static>(
         slot: &Arc<VaultCacheSlot>,
         confirm: bool,
         events_dir: Option<&Utf8Path>,
+        mark_swept_if_new_day: impl FnOnce(&str) -> bool,
         execute: impl FnOnce(&Cache, &mut EventSink) -> anyhow::Result<MutationExecution<R>>,
     ) -> anyhow::Result<R> {
         // Durable telemetry (NRN-400) is registration-gated AND confirmed-only:
@@ -1051,17 +1075,22 @@ async fn dispatch_mutation<R: Send + 'static>(
         let mut sink = match (confirm, events_dir) {
             (true, Some(dir)) => {
                 let start_ts = Clock::System.now_rfc3339();
-                // Best-effort retention sweep before opening today's file.
-                norn_core::telemetry::store::prune_events(
-                    dir,
-                    norn_core::telemetry::store::DEFAULT_RETENTION,
-                    &start_ts[..10],
-                );
-                norn_core::telemetry::store::enforce_size_cap(
-                    dir,
-                    norn_core::telemetry::store::EVENTS_SIZE_CAP_BYTES,
-                    &start_ts[..10],
-                );
+                // Best-effort retention sweep, amortized to once per new day (not
+                // once per mutation, NRN-400 review): the sweep only visits the
+                // events dir the first time a confirmed mutation lands on a day
+                // the owner has not yet swept.
+                if mark_swept_if_new_day(&start_ts[..10]) {
+                    norn_core::telemetry::store::prune_events(
+                        dir,
+                        norn_core::telemetry::store::DEFAULT_RETENTION,
+                        &start_ts[..10],
+                    );
+                    norn_core::telemetry::store::enforce_size_cap(
+                        dir,
+                        norn_core::telemetry::store::EVENTS_SIZE_CAP_BYTES,
+                        &start_ts[..10],
+                    );
+                }
                 EventSink::open(dir, start_ts, IdGen::new(), Clock::System)
                     .unwrap_or_else(|_| EventSink::discard(IdGen::new(), Clock::System))
             }
@@ -1092,8 +1121,15 @@ async fn dispatch_mutation<R: Send + 'static>(
     // this shared seam rather than per-arm so it can never be omitted.
     let _writer = state.mutation_lock.lock().await;
     let events_dir = state.events_dir();
+    let sweep_state = Arc::clone(state);
     let result = tokio::task::spawn_blocking(move || {
-        run_mutation(&slot, confirm, events_dir.as_deref(), execute)
+        run_mutation(
+            &slot,
+            confirm,
+            events_dir.as_deref(),
+            move |today| sweep_state.mark_swept_if_new_day(today),
+            execute,
+        )
     })
     .await;
     classify_mutation(state, result, to_frame, verb)
@@ -1341,6 +1377,37 @@ mod tests {
         assert!(
             !state.is_shutdown(),
             "recording a config error must not itself latch shutdown"
+        );
+    }
+
+    /// NRN-400 (review): the retention sweep (`prune_events` +
+    /// `enforce_size_cap`) is amortized to once per new day, not once per
+    /// confirmed mutation. `mark_swept_if_new_day` is the gate `run_mutation`
+    /// consults — this pins its own trigger logic directly, independent of the
+    /// filesystem-touching sweep functions themselves.
+    #[test]
+    fn mark_swept_if_new_day_fires_once_per_day() {
+        let state = OwnerState::new(None, None);
+
+        assert!(
+            state.mark_swept_if_new_day("2026-07-23"),
+            "the first call for a day must trigger the sweep"
+        );
+        assert!(
+            !state.mark_swept_if_new_day("2026-07-23"),
+            "a second call for the SAME day must not re-trigger the sweep"
+        );
+        assert!(
+            !state.mark_swept_if_new_day("2026-07-23"),
+            "repeated calls for the same day stay suppressed"
+        );
+        assert!(
+            state.mark_swept_if_new_day("2026-07-24"),
+            "a new day must trigger the sweep again"
+        );
+        assert!(
+            !state.mark_swept_if_new_day("2026-07-24"),
+            "the new day is cached in turn"
         );
     }
 }

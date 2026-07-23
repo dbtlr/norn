@@ -214,6 +214,7 @@ pub fn execute(
             // the executor mints it from the EventSink on a write (see
             // `mutate::set::execute`).
             trace_id: apply_report.trace_id.clone(),
+            telemetry_degraded: apply_report.telemetry_degraded,
             operation: "edit".into(),
             target: target_str,
             edits,
@@ -256,6 +257,7 @@ fn refused_report(target: String, error: CodedError) -> EditReport {
     EditReport {
         schema_version: EDIT_REPORT_SCHEMA_VERSION,
         trace_id: String::new(),
+        telemetry_degraded: false,
         operation: "edit".into(),
         target,
         edits: Vec::new(),

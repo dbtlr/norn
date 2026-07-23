@@ -100,6 +100,7 @@ mod tests {
         NewReport {
             schema_version: 2,
             trace_id: String::new(),
+            telemetry_degraded: false,
             operation: "new".into(),
             path: Some("notes/a.md".into()),
             applied,

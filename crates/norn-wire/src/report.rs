@@ -14,11 +14,24 @@ use serde::{Deserialize, Serialize};
 
 pub const APPLY_REPORT_SCHEMA_VERSION: u32 = 3;
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApplyReport {
     pub schema_version: u32,
     /// Trace ID shared by every telemetry event emitted for this invocation.
     pub trace_id: String,
+    /// Set on a CONFIRMED apply whose durable telemetry sink degraded (the
+    /// registered vault's events dir/file could not be opened, or a mid-stream
+    /// write failed) — never for a dry-run, a refusal, or an unregistered
+    /// vault's by-design in-memory sink. Additive (default `false`, omitted
+    /// when `false`): when set, `trace_id` above is still non-empty but
+    /// correlates to no durable audit line, so a consumer should not treat it
+    /// as retrievable via `norn audit` / `vault.audit`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub telemetry_degraded: bool,
     pub plan_hash: String,
     pub vault_root: String,
     pub dry_run: bool,
@@ -109,6 +122,7 @@ impl ApplyReport {
         Self {
             schema_version: APPLY_REPORT_SCHEMA_VERSION,
             trace_id: String::new(),
+            telemetry_degraded: false,
             plan_hash: String::new(),
             vault_root,
             dry_run,
@@ -364,6 +378,7 @@ mod tests {
         let report = ApplyReport {
             schema_version: APPLY_REPORT_SCHEMA_VERSION,
             trace_id: "".into(),
+            telemetry_degraded: false,
             plan_hash: "abc123".into(),
             vault_root: "/abs/vault".into(),
             dry_run: false,

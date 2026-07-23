@@ -375,6 +375,8 @@ pub fn build_owner_precondition_refusal_report(
     ApplyReport {
         schema_version: APPLY_REPORT_SCHEMA_VERSION,
         trace_id: String::new(),
+        // A precondition refusal writes nothing and never consults the sink.
+        telemetry_degraded: false,
         plan_hash: plan.canonical_hash(),
         vault_root: plan.vault_root.clone(),
         dry_run,

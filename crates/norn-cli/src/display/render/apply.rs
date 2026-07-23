@@ -90,6 +90,9 @@ pub(crate) fn render_apply(
         // it when the id is empty, matching the empty-until-real trace_id posture.
         if !report.dry_run && !report.trace_id.is_empty() {
             sink.trace_footer(&report.trace_id)?;
+            if report.telemetry_degraded {
+                conv.telemetry_degraded_warning()?;
+            }
         }
         Ok(exit)
     })();
@@ -135,6 +138,7 @@ mod tests {
         ApplyReport {
             schema_version: 3,
             trace_id: String::new(),
+            telemetry_degraded: false,
             plan_hash: String::new(),
             vault_root: "/vault".into(),
             dry_run: false,
@@ -253,6 +257,46 @@ mod tests {
         assert!(
             !stdout.contains(trace_marker),
             "an empty trace_id must not print a trace footer line, got:\n{stdout}"
+        );
+    }
+
+    #[test]
+    fn a_degraded_telemetry_sink_prints_the_operator_advisory_on_stderr() {
+        let mut report = base_report();
+        report.outcome = ApplyOutcome::Applied;
+        report.applied = 1;
+        report.failed = 0;
+        report.operations = Vec::new();
+        report.trace_id = "abc123".into();
+        report.telemetry_degraded = true;
+        let view = ApplyMutationView {
+            report,
+            format: FormatChoice {
+                explicit: Some(Format::Records),
+                spec: FormatSpec {
+                    tty: Format::Records,
+                    piped: Format::Records,
+                },
+            },
+            out: None,
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            drive(view, &mut presenter);
+        }
+        // Build the marker via `concat!` so this file carries no quoted
+        // trace-footer literal — the render-stream guard
+        // (tests/render_stream_guard.rs) forbids that spelling in a renderer.
+        let trace_marker = concat!("trace", ": abc123");
+        assert!(
+            String::from_utf8(out).unwrap().contains(trace_marker),
+            "the real trace id must still print"
+        );
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "warning: audit trail not persisted for this apply (durable write failed)\n"
         );
     }
 }

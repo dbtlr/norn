@@ -235,6 +235,7 @@ pub fn execute(
         report: NewReport {
             schema_version: 2,
             trace_id,
+            telemetry_degraded: apply_report.telemetry_degraded,
             operation: "new".into(),
             path,
             applied,
@@ -859,6 +860,7 @@ fn refused_new(r: Refusal) -> MutationExecution<NewReport> {
         report: NewReport {
             schema_version: 2,
             trace_id: String::new(),
+            telemetry_degraded: false,
             operation: "new".into(),
             path: r.path.clone(),
             applied: false,

@@ -254,6 +254,10 @@ mod tests {
             "best-effort: open never returns Err for an IO problem"
         );
         let mut s = sink.unwrap();
+        assert!(
+            s.degraded(),
+            "a fallback from a failed open must flag the sink degraded"
+        );
         // Degraded sink writes nothing to disk but still records in memory.
         s.lifecycle(
             crate::telemetry::event::EVENT_INVOCATION_STARTED,
@@ -262,5 +266,49 @@ mod tests {
             vec![],
         );
         assert_eq!(s.events().len(), 1);
+    }
+
+    #[test]
+    fn discard_is_never_degraded() {
+        // A by-design in-memory sink (forecast, or an unregistered vault) never
+        // attempted a durable write, so it is never "degraded" — there was
+        // nothing to have degraded FROM.
+        let sink = EventSink::discard(
+            IdGen::with_seed(1),
+            Clock::fixed("2026-05-29T10:00:00.000Z"),
+        );
+        assert!(!sink.degraded());
+    }
+
+    #[test]
+    fn a_mid_stream_write_failure_flags_the_sink_degraded() {
+        // A writer that errors on every write (simulating e.g. a full disk or a
+        // revoked permission mid-invocation) must flag `degraded()`, not merely
+        // fall silently back to discarding further writes.
+        struct FailingWriter;
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("simulated write failure"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut sink = EventSink::with_writer(
+            IdGen::with_seed(1),
+            Clock::fixed("2026-05-29T10:00:00.000Z"),
+            Some(Box::new(FailingWriter)),
+        );
+        assert!(!sink.degraded(), "not degraded before any write attempt");
+        sink.lifecycle(
+            crate::telemetry::event::EVENT_INVOCATION_STARTED,
+            Severity::Info,
+            "x",
+            vec![],
+        );
+        assert!(
+            sink.degraded(),
+            "a mid-stream write failure must flag the sink degraded"
+        );
     }
 }

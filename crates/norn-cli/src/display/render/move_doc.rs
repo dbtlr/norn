@@ -81,6 +81,9 @@ pub(crate) fn render_move(
         // apply carries a real telemetry trace id.
         if !dry_run && !report.trace_id.is_empty() {
             sink.trace_footer(&report.trace_id)?;
+            if report.telemetry_degraded {
+                conv.telemetry_degraded_warning()?;
+            }
         }
         Ok(exit)
     })();
@@ -160,6 +163,7 @@ mod tests {
         ApplyReport {
             schema_version: 3,
             trace_id: String::new(),
+            telemetry_degraded: false,
             plan_hash: String::new(),
             vault_root: "/vault".into(),
             dry_run: false,

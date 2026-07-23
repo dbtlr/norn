@@ -326,6 +326,7 @@ mod tests {
         SetReport {
             schema_version: 2,
             trace_id: String::new(),
+            telemetry_degraded: false,
             operation: "set".into(),
             target: "a.md".into(),
             frontmatter_changes: vec![],

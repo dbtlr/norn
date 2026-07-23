@@ -36,7 +36,9 @@ pub struct AuditParams {
     pub target: Option<String>,
 
     /// Lower time bound. `YYYY-MM-DD` (UTC day start) or full RFC-3339. An
-    /// unparseable value is a structured rejection.
+    /// unparseable value is a structured rejection (`isError: true`) — the
+    /// same read-verb rejection convention every other read tool shares
+    /// (the CLI's mirror of it is exit 1, never exit 2).
     #[serde(default)]
     pub since: Option<String>,
 

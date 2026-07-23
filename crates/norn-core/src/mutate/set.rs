@@ -178,6 +178,7 @@ pub fn execute(
             report: SetReport {
                 schema_version: 2,
                 trace_id: String::new(),
+                telemetry_degraded: false,
                 operation: "set".into(),
                 target: target_str,
                 frontmatter_changes: Vec::new(),
@@ -209,6 +210,7 @@ pub fn execute(
         report: SetReport {
             schema_version: 2,
             trace_id,
+            telemetry_degraded: apply_report.telemetry_degraded,
             operation: "set".into(),
             target: target_str,
             frontmatter_changes: synthed.report_changes,
@@ -617,6 +619,7 @@ fn refused(
         report: SetReport {
             schema_version: 2,
             trace_id: String::new(),
+            telemetry_degraded: false,
             operation: "set".into(),
             target: target.into(),
             frontmatter_changes: Vec::new(),

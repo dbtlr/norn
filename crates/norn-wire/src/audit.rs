@@ -14,10 +14,11 @@ use serde_json::{Map, Value};
 /// An `audit` request: the AND-combined filter over the event stream plus the
 /// newest-first `limit`. `since`/`until` travel as raw strings (`YYYY-MM-DD`
 /// or RFC-3339); the owner parses them, and an unparseable bound is a clean
-/// rejection (exit 2 — bad filter argument), never a crash. `trace` is a
-/// prefix match (one invocation per trace). `raw` selects the passthrough
-/// projection client-side; the report always carries both the flat fields and
-/// the untouched OTEL object, so it rides here only to document the request.
+/// rejection (exit 1 — the same read-verb rejection convention every other
+/// read surface shares), never a crash. `trace` is a prefix match (one
+/// invocation per trace). `raw` selects the passthrough projection
+/// client-side; the report always carries both the flat fields and the
+/// untouched OTEL object, so it rides here only to document the request.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuditParams {

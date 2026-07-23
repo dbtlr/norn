@@ -118,14 +118,30 @@ pub struct SetParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetReport {
     pub schema_version: u32,
-    /// The telemetry trace id correlating this mutation to its durable event
-    /// stream (NRN-400). Non-empty on a CONFIRMED apply — the executor mints it
-    /// from the shared `EventSink` and it matches the `trace` on every line the
-    /// apply wrote to the audit store — and empty on a forecast or a pre-write
-    /// refusal (neither writes, so no trace correlates). Serialized right after
-    /// `schema_version` so it holds a stable position in the struct-order JSON.
+    /// The telemetry trace id, non-empty on a CONFIRMED apply and empty on a
+    /// forecast or a pre-write refusal (neither writes, so no trace
+    /// correlates). The executor always mints the id from the shared
+    /// `EventSink` on a confirmed apply, but it correlates to a DURABLE audit
+    /// line only on a registered vault: there, `EventSink::open` attaches the
+    /// daily JSONL writer and the id matches the `trace` on every line the
+    /// apply wrote (readable back via `norn audit` / `vault.audit`). On the
+    /// ephemeral (unregistered) tier — and on the rare durable-sink open/write
+    /// failure — the executor falls back to an in-memory `EventSink::discard`,
+    /// which still mints and returns this same non-empty id, but nothing
+    /// durable is ever written for it: it correlates to no audit line on
+    /// either tier. Serialized right after `schema_version` so it holds a
+    /// stable position in the struct-order JSON.
     #[serde(default)]
     pub trace_id: String,
+    /// Set when `trace_id` above was minted by a degraded sink (a registered
+    /// vault whose durable events dir/file could not be opened, or a
+    /// mid-stream write failure) — never for a forecast, a refusal, or an
+    /// unregistered vault's by-design in-memory sink. Additive (default
+    /// `false`, omitted when `false`): a client should treat a `true` value as
+    /// "this trace id will never resolve via `norn audit` / `vault.audit`",
+    /// not as an application error.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub telemetry_degraded: bool,
     pub operation: String,
     pub target: String,
     /// Always serialized — a no-op (e.g. a pop that matched nothing) emits
@@ -204,6 +220,9 @@ pub struct NewReport {
     /// [`SetReport::trace_id`]).
     #[serde(default)]
     pub trace_id: String,
+    /// See [`SetReport::telemetry_degraded`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub telemetry_degraded: bool,
     pub operation: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -266,6 +285,9 @@ pub struct EditReport {
     /// [`SetReport::trace_id`]).
     #[serde(default)]
     pub trace_id: String,
+    /// See [`SetReport::telemetry_degraded`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub telemetry_degraded: bool,
     pub operation: String,
     pub target: String,
     pub edits: Vec<EditChange>,
@@ -435,6 +457,7 @@ mod tests {
         let r = SetReport {
             schema_version: 2,
             trace_id: String::new(),
+            telemetry_degraded: false,
             operation: "set".into(),
             target: "a.md".into(),
             frontmatter_changes: vec![FrontmatterChange {
@@ -483,6 +506,7 @@ mod tests {
         let r = NewReport {
             schema_version: 2,
             trace_id: String::new(),
+            telemetry_degraded: false,
             operation: "new".into(),
             path: Some("notes/a.md".into()),
             applied: false,

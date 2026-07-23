@@ -44,8 +44,7 @@ pub use config::{
     compile_config, parse_config, parse_config_compiled, CacheConfig, CompiledConfig, CompiledRule,
     ConfigError, FieldReferenceConstraint, FieldTypeDecl, FieldTypeSpec, RepairAction,
     RepairConfig, RepairRule, ValidateConfig, ValidateRule, VaultConfig, CURRENT_SCHEMA_VERSION,
-    DEFAULT_CACHE_RETENTION, DEFAULT_RETENTION, DEFAULT_STRING_MAX_LENGTH,
-    STRING_MAX_LENGTH_CEILING,
+    DEFAULT_CACHE_RETENTION, DEFAULT_STRING_MAX_LENGTH, STRING_MAX_LENGTH_CEILING,
 };
 pub use defaults::{
     applicable_rules, merge_defaults, path_variables, resolve_to_fixpoint, ResolveError,

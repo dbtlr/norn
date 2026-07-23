@@ -82,11 +82,15 @@ pub(crate) fn render_set(
             let shorts: Vec<String> = report.warnings.iter().map(warning_short).collect();
             sink.mutation_warnings_block(&shorts)?;
         }
-        // `set`'s verb path doesn't route through `EventSink` yet, so `trace_id` is
-        // `String::new()` here — an empty-until-real placeholder line until telemetry
-        // wires through (NRN-400).
+        // A confirmed `set` routes through the shared `apply_migration_plan`
+        // executor (NRN-400), which mints a real `EventSink`-derived trace id —
+        // never the empty placeholder a pre-NRN-400 forecast-only wiring would
+        // have left here.
         if report.applied {
             sink.trace_footer(&report.trace_id)?;
+            if report.telemetry_degraded {
+                conv.telemetry_degraded_warning()?;
+            }
         } else {
             writeln!(sink.writer())?;
             writeln!(sink.writer(), "Apply with --yes")?;
@@ -157,6 +161,7 @@ mod tests {
         SetReport {
             schema_version: 2,
             trace_id: "abc123".into(),
+            telemetry_degraded: false,
             operation: "set".into(),
             target: "note.md".into(),
             frontmatter_changes: Vec::new(),
@@ -281,6 +286,45 @@ mod tests {
         assert_eq!(
             String::from_utf8(err).unwrap(),
             "error: target not found: missing.md\n"
+        );
+    }
+
+    #[test]
+    fn a_degraded_telemetry_sink_prints_the_operator_advisory_on_stderr() {
+        let mut report = base_report(true);
+        report.telemetry_degraded = true;
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            drive(view(report), &mut presenter);
+        }
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "set note.md\ntrace: abc123\n"
+        );
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "warning: audit trail not persisted for this apply (durable write failed)\n"
+        );
+    }
+
+    #[test]
+    fn a_healthy_telemetry_sink_prints_no_advisory() {
+        let report = base_report(true);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            drive(view(report), &mut presenter);
+        }
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "set note.md\ntrace: abc123\n"
+        );
+        assert!(
+            String::from_utf8(err).unwrap().is_empty(),
+            "no advisory when telemetry_degraded is false"
         );
     }
 }
