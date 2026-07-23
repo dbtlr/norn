@@ -124,8 +124,11 @@ fn self_check_end_to_end_is_all_match_exit_0() {
     // describe, repair, a set-unknown-field warning, move + delete forecasts, and
     // a new forecast), taking the total to 147; self-check ignores the ledgered
     // divergences (oracle vs. itself always Matches), so all 147 Match.
+    // NRN-414 adds one `errors` case (a missing `-C` vault root) taking the total
+    // to 148; self-check runs oracle vs. itself (both emit the canonicalization
+    // error), so it Matches.
     assert!(
-        stdout.contains("147 cases: 147 match, 0 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("148 cases: 148 match, 0 diverged, 0 drift, 0 stale entries"),
         "expected the exact all-match summary, got:\n{stdout}"
     );
     assert!(
@@ -322,8 +325,13 @@ fn default_mode_gates_help_cases_exit_0() {
     // and the set-unknown-field + new-title-ignored warnings under PD-111's
     // unified envelope). The gated total grows to 146, the match count from 70
     // to 74, and the diverged count from 69 to 72.
+    // NRN-414 adds one ported `errors` case (a missing `-C` vault root), DIVERGING
+    // under one ledger entry (PD-138): the oracle fails at the low-level
+    // canonicalize call, the rewrite's client-side precheck refuses instantly
+    // naming the path + via. The gated total grows to 147 and the diverged count
+    // from 72 to 73; the match count stays 74.
     assert!(
-        stdout.contains("146 cases: 74 match, 72 diverged, 0 drift, 0 stale entries"),
+        stdout.contains("147 cases: 74 match, 73 diverged, 0 drift, 0 stale entries"),
         "expected the exact gated summary, got:\n{stdout}"
     );
     for needle in [
@@ -358,6 +366,7 @@ fn default_mode_gates_help_cases_exit_0() {
         "PD-132",
         "PD-133",
         "PD-134",
+        "PD-135",
         "err-service-status-local-vault-flag-deleted-zoo",
         "err-service-vault-global-flag-before-subcommand-zoo",
         "PD-135",
@@ -371,6 +380,8 @@ fn default_mode_gates_help_cases_exit_0() {
         "mcp-tools-call-set-forecast-zoo",
         "PD-137",
         "mcp-tools-call-repair-code-zoo",
+        "PD-138",
+        "err-missing-vault-root-zoo",
         "read-get-ambiguous-json-zoo",
         "read-get-unknown-col-warning-zoo",
         "mcp-tools-call-get-missing-zoo",

@@ -775,3 +775,21 @@ old = "`structuredContent` carries only `{plan, has_diagnostic_errors}`; a clien
 new = "`structuredContent` carries the deterministic `plan` plus `findings_by_code` / `findings_total` / `total_docs` and the rich `skipped_detail` (reason code, candidate paths, operator next-actions per skipped finding — the ADR 0024 first-consumer surface); the plan's non-deterministic `generated_at` is the only field the harness normalizes"
 reason = "decided-better"
 decision = "docs/decisions/0024-one-applier-repair-as-planner.md"
+
+# NRN-414 (decided-better): a missing `-C`/NORN_ROOT vault root is classified as
+# a USER error surfaced instantly, not a low-level canonicalization failure and
+# not the summon-budget timeout the routed architecture would otherwise incur.
+# The direct-path resolution vias (`-C`, NORN_ROOT) never pass through the
+# registry's live-directory gate, so a client-side precheck refuses before any
+# owner is summoned — naming the actual path and how it was supplied. Both sides
+# still fail fast at exit 1 with empty stdout; only the stderr text diverges. See
+# `crates/norn-cli/src/routed.rs` (`vault_root_precheck`) and the owner-side
+# fail-safe in `crates/norn-owner/src/runtime.rs` (warm-up user-error path).
+[[entry]]
+id = "PD-138"
+surface = "read verbs with a missing -C vault root (client-side precheck, instant refusal)"
+cases = ["err-missing-vault-root-zoo"]
+old = "the oracle grounds the `-C` path and fails at the low-level canonicalize call: `vault root could not be canonicalized: <path>: No such file or directory (os error 2)` on stderr, exit 1"
+new = "the rewrite's client-side precheck refuses instantly before summoning any owner: `norn: vault root does not exist: <path> (from -C)` on stderr — naming the actual path and the via — exit 1, no owner spawned and no socket dialed"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

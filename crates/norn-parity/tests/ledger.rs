@@ -98,11 +98,15 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // `skipped_detail` — where the oracle emitted only `{plan,
     // has_diagnostic_errors}`) and extended PD-111's cases to the MCP
     // set-unknown-field and new-title-ignored warning frames (the unified
-    // warning envelope on the MCP surface).
+    // warning envelope on the MCP surface). NRN-414 added PD-138 (decided-better:
+    // a missing `-C`/NORN_ROOT vault root is refused instantly by a client-side
+    // precheck naming the path + via, instead of the oracle's low-level
+    // canonicalization error — both fail fast at exit 1, only stderr diverges,
+    // one case).
     assert_eq!(
         ledger.entries.len(),
-        37,
-        "expected exactly PD-101..PD-137, found {}",
+        38,
+        "expected exactly PD-101..PD-138, found {}",
         ledger.entries.len()
     );
 
@@ -409,6 +413,13 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         .expect("mcp-tools-call-repair-code-zoo must resolve to an entry");
     assert_eq!(pd137.id, "PD-137");
     assert_eq!(pd137.reason, norn_parity::ledger::Reason::DecidedBetter);
+
+    // NRN-414 instant missing-vault-root refusal (PD-138), decided-better.
+    let pd138 = ledger
+        .entry_for_case("err-missing-vault-root-zoo")
+        .expect("the missing-vault-root case must resolve to an entry");
+    assert_eq!(pd138.id, "PD-138");
+    assert_eq!(pd138.reason, norn_parity::ledger::Reason::DecidedBetter);
 }
 
 #[test]

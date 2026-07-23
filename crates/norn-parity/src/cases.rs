@@ -1508,6 +1508,36 @@ const ERROR_CASES: &[Case] = &[
         normalize: NO_NORM,
         plan: None,
     },
+    Case {
+        // NRN-414: a `-C` vault root that does not exist. Both sides fail fast
+        // (exit 1, empty stdout) — the rewrite never burns the summon budget —
+        // but the stderr text diverges. The oracle emits a low-level
+        // `vault root could not be canonicalized: <path>: No such file or
+        // directory (os error 2)`; the rewrite's client-side precheck refuses
+        // instantly with `norn: vault root does not exist: <path> (from -C)`,
+        // naming the actual path and how it was supplied — no owner summon, no
+        // socket blame. Pinned by PD-138. The relative `-C` grounds under the
+        // fixture-vault cwd, so the absolute missing path folds under the default
+        // `VaultRoot` normalization on both sides.
+        id: "err-missing-vault-root-zoo",
+        argv: &[
+            "find",
+            "-C",
+            "no-such-vault-root-nrn414",
+            "--all",
+            "--format",
+            "json",
+        ],
+        fixture: ERR_ZOO,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 1,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
 ];
 
 /// A dedicated zoo fixture for the MCP suite (seed 4 — the next free seed
