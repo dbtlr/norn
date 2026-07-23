@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::error::ConfigError;
-use crate::registry::{RegisteredVault, Registry};
+use crate::registry::{canonicalize_best_effort, RegisteredVault, Registry};
 
 /// Environment variable naming a vault root directly (a root path;
 /// empty/whitespace ignored). Consulted after the repo binding.
@@ -152,10 +152,7 @@ impl Registry {
 
         // 6. Unregistered cwd — the ephemeral outcome, not an error.
         Ok(Resolved {
-            root: input
-                .cwd
-                .canonicalize()
-                .unwrap_or_else(|_| input.cwd.clone()),
+            root: canonicalize_best_effort(&input.cwd),
             name: None,
             via: ResolvedVia::UnregisteredCwd,
         })
@@ -199,7 +196,7 @@ fn ground(cwd: &Path, path: &Path) -> PathBuf {
     } else {
         cwd.join(path)
     };
-    grounded.canonicalize().unwrap_or(grounded)
+    canonicalize_best_effort(&grounded)
 }
 
 /// The subset of a repo binding this crate models. Unknown keys are tolerated.
@@ -499,5 +496,50 @@ mod tests {
             reg.resolve(&ResolveInput::new(cwd)).unwrap_err(),
             ConfigError::StaleEntry { .. }
         ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ground_resolves_through_a_constructed_symlink() {
+        // A symlink built deliberately for this test, not the incidental
+        // macOS `/tmp` -> `/private/tmp` symlink the other tests ride on
+        // (NRN-415 fix round) — pins `ground`'s canonicalization itself
+        // rather than a platform accident.
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let target = tmp.path().join("real-target");
+        fs::create_dir_all(&target).unwrap();
+        let link = tmp.path().join("via-symlink");
+        symlink(&target, &link).unwrap();
+
+        let input = ResolveInput {
+            explicit_path: Some(link),
+            ..ResolveInput::new(tmp.path())
+        };
+        let resolved = reg.resolve(&input).unwrap();
+        assert_eq!(resolved.via, ResolvedVia::ExplicitPath);
+        assert_eq!(resolved.root, target.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn ground_normalizes_dot_component() {
+        // `/path/./sub` must normalize to the same canonical form as
+        // `/path/sub` — pins normalization on every platform, independent of
+        // any incidental symlink in the tempdir's own path.
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        let dotted = tmp.path().join(".").join("sub");
+
+        let input = ResolveInput {
+            explicit_path: Some(dotted),
+            ..ResolveInput::new(tmp.path())
+        };
+        let resolved = reg.resolve(&input).unwrap();
+        assert_eq!(resolved.via, ResolvedVia::ExplicitPath);
+        assert_eq!(resolved.root, sub.canonicalize().unwrap());
     }
 }

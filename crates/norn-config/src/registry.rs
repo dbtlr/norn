@@ -365,7 +365,17 @@ impl Registry {
 /// Canonicalize when possible, otherwise fall back to the path as given. Stored
 /// roots are canonical at register time, so the fallback only matters for a
 /// stale (removed) root, where the stored form is the best available.
-fn canonicalize_best_effort(path: &Path) -> PathBuf {
+///
+/// The single shared canonicalize-or-fallback helper for this crate (NRN-415
+/// fix round): every consumer that may see a root before it necessarily exists
+/// — resolution's `ground`, this registry's reverse lookup and
+/// duplicate-root checks — calls this, not its own `.canonicalize().unwrap_or(..)`.
+/// System invariant this pins: a missing root falls back to the grounded (not
+/// canonicalized) path on EVERY consumer, so a canonical value from one
+/// consumer and a fallback value from another must never be strict-compared
+/// against each other — a new consumer needing this behavior must call this
+/// helper too, not re-derive it.
+pub(crate) fn canonicalize_best_effort(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
