@@ -77,7 +77,9 @@ pub(crate) fn render_move(
                 ascii,
             )?;
         }
-        if !dry_run {
+        // Skip an empty `trace:` line (empty-until-real posture); a confirmed
+        // apply carries a real telemetry trace id.
+        if !dry_run && !report.trace_id.is_empty() {
             sink.trace_footer(&report.trace_id)?;
         }
         Ok(exit)

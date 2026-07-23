@@ -59,7 +59,9 @@ pub(crate) fn render_rewrite_wikilink(
 
     let result: io::Result<i32> = (|| {
         render_rewrite_records(sink.writer(), report, &view.old, &view.new)?;
-        if !report.dry_run {
+        // Skip an empty `trace:` line (empty-until-real posture); a confirmed
+        // apply carries a real telemetry trace id.
+        if !report.dry_run && !report.trace_id.is_empty() {
             sink.trace_footer(&report.trace_id)?;
         }
         Ok(exit)

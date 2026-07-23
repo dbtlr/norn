@@ -49,7 +49,10 @@ pub(crate) fn render_delete(
     let dry_run = report.dry_run;
     let result: io::Result<i32> = (|| {
         render_delete_records(sink.writer(), report, &view.doc, dry_run, exit, ascii)?;
-        if !dry_run {
+        // Skip an empty `trace:` line: a confirmed apply carries a real telemetry
+        // trace id, but the empty-until-real posture (and any pathless report)
+        // leaves it blank — a bare `trace:` serves no one.
+        if !dry_run && !report.trace_id.is_empty() {
             sink.trace_footer(&report.trace_id)?;
         }
         Ok(exit)
