@@ -59,6 +59,8 @@ const SNIFF_NEEDLES: &[&str] = &[
     "starts_with(\"note:",
     "contains(\"error:\")",
     "contains(\"warning:\")",
+    "contains(\"warn:\")",
+    "contains(\"note:\")",
 ];
 
 fn workspace_root() -> PathBuf {
