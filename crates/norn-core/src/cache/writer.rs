@@ -354,8 +354,8 @@ enum IncrementPhase {
 }
 
 /// Driver state for a chunked increment commit. Built once at op start by
-/// [`Cache::begin_increment_commit`] (which parses the whole vault WITHOUT a
-/// lock), then advanced one chunk at a time by
+/// [`Cache::begin_increment_commit`] (which parses only the changed paths WITHOUT
+/// a lock), then advanced one chunk at a time by
 /// [`Cache::commit_increment_chunk`].
 pub(crate) struct IncrementCommit {
     job_id: i64,
@@ -428,10 +428,11 @@ impl crate::cache::Cache {
     }
 
     /// Begin a chunked increment commit for an explicit set of changed
-    /// vault-relative paths, without a detect scan. Parses the whole vault in
-    /// memory (the same "aggressive invalidation" authority the refresh uses),
-    /// overlays the affected paths onto `baseline`, resolves links, and captures
-    /// the metadata staging needs. No rows are written here.
+    /// vault-relative paths, without a detect scan. Re-reads ONLY the changed
+    /// paths from disk, overlays them onto `baseline`, re-resolves links across
+    /// the composite graph, and captures the metadata staging needs. No rows are
+    /// written here. The disk work scales with the changed set, not the vault —
+    /// a mutation that knows its touched paths never re-walks the whole tree.
     ///
     /// An associated function (no `&self`): the parse is read-only over the
     /// filesystem, so the owner can build the commit on the REQUEST thread (off
@@ -449,36 +450,17 @@ impl crate::cache::Cache {
             ignore: files_ignore.to_vec(),
             alias_field: alias_field.map(str::to_string),
         };
-        let disk_index = crate::graph::build_index_with_options(vault_root, &options)?;
 
         let mut pending: Vec<Utf8PathBuf> = changed_paths.to_vec();
         pending.sort();
         pending.dedup();
         let affected_paths: std::collections::BTreeSet<_> = pending.iter().cloned().collect();
 
-        baseline
-            .documents
-            .retain(|doc| !affected_paths.contains(&doc.path));
-        baseline
-            .files
-            .retain(|file| !affected_paths.contains(&file.path));
-        baseline.documents.extend(
-            disk_index
-                .documents
-                .iter()
-                .filter(|doc| affected_paths.contains(&doc.path))
-                .cloned(),
-        );
-        baseline.files.extend(
-            disk_index
-                .files
-                .iter()
-                .filter(|file| affected_paths.contains(&file.path))
-                .cloned(),
-        );
-        baseline.documents.sort_by(|a, b| a.path.cmp(&b.path));
-        baseline.files.sort_by(|a, b| a.path.cmp(&b.path));
-        crate::links::resolve_links(&baseline.files, &mut baseline.documents);
+        // Targeted refresh: re-read only the changed paths from disk and overlay
+        // them onto the warm baseline, re-resolving links across the composite.
+        // The disk work is O(changed-files); a mutation that knows its touched set
+        // never re-walks the vault to update the cache.
+        crate::graph::overlay_changed_paths(&mut baseline, vault_root, &pending, &options);
         let fresh_index = baseline;
         let publication_fingerprint = graph_fingerprint(&fresh_index);
         let fresh_docs: HashMap<Utf8PathBuf, usize> = fresh_index

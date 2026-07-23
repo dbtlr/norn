@@ -26,4 +26,5 @@ thiserror = "2.0"
 walkdir = "2.5"
 
 [dev-dependencies]
+norn-fixtures = { path = "../norn-fixtures" }
 tempfile = "3"
