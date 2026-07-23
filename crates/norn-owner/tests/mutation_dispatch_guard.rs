@@ -44,14 +44,7 @@ const MUTATION_VARIANTS: &[&str] = &[
 /// serves from the warm cache without acquiring `mutation_lock`. The complement
 /// of `MUTATION_VARIANTS` over the live enum.
 const READ_VARIANTS: &[&str] = &[
-    "Ping",
-    "Probe",
-    "Find",
-    "Count",
-    "Get",
-    "Describe",
-    "Validate",
-    "Repair",
+    "Ping", "Probe", "Find", "Count", "Get", "Describe", "Validate", "Repair",
 ];
 
 /// The `norn-wire/src/control.rs` source that owns the `ClientFrame` enum — the
