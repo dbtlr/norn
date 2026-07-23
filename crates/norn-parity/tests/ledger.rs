@@ -399,6 +399,16 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         norn_parity::ledger::Reason::DecidedBetter,
         "PD-136 is decided-better"
     );
+
+    // NRN-399 (MCP catalog part 2): `vault.repair`'s richer structuredContent
+    // (PD-137), decided-better. A count-only check on `ledger.entries.len()`
+    // cannot catch a miswired case→entry mapping, so pin the resolution
+    // explicitly.
+    let pd137 = ledger
+        .entry_for_case("mcp-tools-call-repair-code-zoo")
+        .expect("mcp-tools-call-repair-code-zoo must resolve to an entry");
+    assert_eq!(pd137.id, "PD-137");
+    assert_eq!(pd137.reason, norn_parity::ledger::Reason::DecidedBetter);
 }
 
 #[test]
