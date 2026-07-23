@@ -13,8 +13,8 @@
 //! ## Scope of this port
 //!
 //! The barrier's create-path RESOLUTION half — turning `{{seq}}` create ops into
-//! concrete stems so `stem_from_operation` selectors can name them (the donor's
-//! `resolve_create_paths`) — is fused with the typed-op → change expansion that
+//! concrete stems so `stem_from_operation` selectors can name them — is fused
+//! with the typed-op → change expansion that
 //! lands with the mutation verbs, so it ports with the executor. This module
 //! ports the EVALUATION core: given already-resolved operation stems, it selects
 //! the current owners and compares. Both consumers of that resolution
@@ -337,15 +337,14 @@ fn numbers_match(actual: &serde_json::Number, expected: &serde_json::Number) -> 
     }
 }
 
-/// Build the byte-identical-vault refusal report for a plan whose owner-set
+/// Build the unchanged-vault refusal report for a plan whose owner-set
 /// barrier failed: every operation is `not_run`, the failed preconditions carry
 /// their coded errors, and `outcome = refused` (exit 2). No operation ran, so no
 /// path was touched.
 ///
 /// This is the single canonical constructor for the owner-precondition refusal —
-/// the donor open-coded the same not-run-ops + refused-outcome shape at the
-/// applier's precondition-refusal site; here it is one function the applier
-/// calls, so the shape cannot drift.
+/// one function the applier calls, so the not-run-ops + refused-outcome shape
+/// cannot drift.
 pub fn build_owner_precondition_refusal_report(
     plan: &MigrationPlan,
     dry_run: bool,

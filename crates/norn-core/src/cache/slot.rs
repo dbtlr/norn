@@ -262,8 +262,8 @@ impl VaultCacheSlot {
     /// wrong: a concurrent reopen can advance the slot's current generation
     /// between the two points, and evicting the pre-captured (older) number would
     /// leave the generation the increment actually corrupted in place — the
-    /// NRN-253 lag-hole the donor closed by binding the eviction key at the commit
-    /// site (donor `env/refresh.rs`).
+    /// NRN-253 lag-hole, closed by binding the eviction key at the commit
+    /// site.
     fn commit_apply_increments_tracked(
         &self,
         touched_paths: &[Utf8PathBuf],
@@ -379,17 +379,13 @@ impl VaultCacheSlot {
     /// commit ran — closing the concurrency window where a reopen advances the
     /// slot between capture and bind and eviction would miss the corrupt generation.
     ///
-    /// DELIBERATE DIVERGENCE from the donor (`env/refresh.rs`): the donor evicts
-    /// ONLY on the corruption class (a failed chunk commit) and KEEPS the
-    /// generation on a stale-baseline / reservation failure (it just notes the
-    /// degrade). This evicts on ANY increment failure. Rationale: it is
-    /// trust-conservative (files are the source of truth, so a re-derive is always
-    /// safe) and strictly closes the corrupt-generation-keeps-serving hole
-    /// (NRN-253) rather than reasoning per-error about which failures can leave a
-    /// generation serving stale rows; the cost is a spurious full re-derive on the
-    /// benign baseline-drift path (rare — an increment failure at all is rare).
-    /// Not ledgerable yet: `docs/parity-ledger.toml` is strictly case-keyed and no
-    /// apply-verb parity cases exist; anchor this to a case when they do.
+    /// This evicts on ANY increment failure (not only the corruption class of a
+    /// failed chunk commit). Rationale: it is trust-conservative (files are the
+    /// source of truth, so a re-derive is always safe) and strictly closes the
+    /// corrupt-generation-keeps-serving hole (NRN-253) rather than reasoning
+    /// per-error about which failures can leave a generation serving stale rows;
+    /// the cost is a spurious full re-derive on the benign baseline-drift path
+    /// (rare — an increment failure at all is rare).
     pub fn commit_apply_increments_fire_and_degrade(
         &self,
         touched_paths: &[Utf8PathBuf],
@@ -799,7 +795,7 @@ mod tests {
     }
 
     // --- Deterministic concurrency properties over the writer-queue pipeline ---
-    // (ADR 0013, re-derived from the donor's concurrency suite). These use the
+    // (ADR 0013). These use the
     // writer-queue blocker pattern (a liveness op that parks the single writer
     // thread on a channel) plus per-slot observability counters — no
     // sleeps-as-synchronization; every wait is bounded on a condition.
@@ -909,7 +905,7 @@ mod tests {
 
     /// Single-flight generation binding: N concurrent `ensure_current` calls all
     /// resolve to the SAME generation `Arc` — the slot never hands out two live
-    /// generations for one config (the donor's single-flight-open property, as
+    /// generations for one config (the single-flight-open property, as
     /// it manifests in the pre-seeded phase-2 slot; the index-change reopen path
     /// is banked/dormant per the module docs).
     #[test]

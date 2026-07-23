@@ -8,10 +8,10 @@
 /// counter, so IDs are distinct within a run and reproducible across runs given
 /// the same seed.
 ///
-/// The IDs are opaque correlation tokens (never a wire contract): the port hashes
-/// `seed || counter` with BLAKE3 (already a crate dependency) rather than the
-/// donor's SHA-256, so no new dependency is pulled in. The only observable
-/// contract is length (32/16 lowercase-hex chars) and per-seed determinism.
+/// The IDs are opaque correlation tokens (never a wire contract): hashing
+/// `seed || counter` with BLAKE3 (already a crate dependency) pulls in no new
+/// dependency. The only observable contract is length (32/16 lowercase-hex
+/// chars) and per-seed determinism.
 pub struct IdGen {
     seed: u64,
     counter: u64,

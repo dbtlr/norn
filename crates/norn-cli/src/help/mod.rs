@@ -1,21 +1,15 @@
-//! Custom help renderer per the CLI Help Output v2 spec. Ported from the donor
-//! `src/help/` (retired tree).
+//! Custom help renderer per the CLI Help Output v2 spec.
 //!
 //! This module owns rendering for both `-h` and `--help`. clap is the argument
 //! parser and the source of arg metadata; it does not emit help text (the root
 //! and every subcommand set `disable_help_flag` + `disable_help_subcommand`,
 //! and the `-h` / `--help` globals are plain bool flags this interceptor reads).
 //!
-//! Simplifications versus the donor, all invisible under the parity harness
-//! (which drives `--help` with stdout piped, i.e. non-TTY):
-//! - No pager: the buffer is written straight to stdout. The donor paged only
-//!   when stdout was a TTY; a piped run never paged either.
-//! - No live-examples materialization: the phase-1 rewrite has no query core,
-//!   and the donor's own `--help` opens an empty cache and emits none anyway
-//!   (see `model.rs`).
-//! - `self-update` is always listed: the parity oracle is installed via the
-//!   official script (its self-update receipt exists), so it always shows the
-//!   command; the rewrite matches unconditionally.
+//! Deliberate simplifications:
+//! - No pager: the buffer is written straight to stdout.
+//! - No live-examples materialization: there is no query core yet, and `--help`
+//!   opens an empty cache and would emit none anyway (see `model.rs`).
+//! - `self-update` is always listed, unconditionally.
 
 pub mod bin_name;
 pub mod examples;
@@ -37,9 +31,8 @@ use crate::display::Presenter;
 use crate::output::palette;
 
 /// Fixed wrap width. Wrapping affects only the short-form description line and
-/// never the flag lines or any compared help output; the donor read the real
-/// terminal width, but a piped (non-TTY) run has no width, so a stable 80 keeps
-/// output deterministic.
+/// never the flag lines or any compared help output; a piped (non-TTY) run has
+/// no terminal width, so a stable 80 keeps output deterministic.
 const TERM_WIDTH: usize = 80;
 
 /// Scan `std::env::args()` for `-h` / `--help`, resolve the subcommand path
@@ -54,8 +47,8 @@ pub fn intercept_from_args() -> Option<i32> {
 }
 
 /// Render a subcommand's long-form help into a byte buffer — used by the read
-/// verbs' no-argument help gate (bare `norn find` prints its help and exits 2,
-/// like the oracle). Unknown command names fall back to the root help.
+/// verbs' no-argument help gate (bare `norn find` prints its help and exits
+/// 2). Unknown command names fall back to the root help.
 pub fn render_command_long(command_name: &str, color: crate::cli::ColorWhen) -> Vec<u8> {
     let root = Cli::command();
     let subcmd = root
@@ -104,7 +97,8 @@ fn render_help_for_args(args: &[String]) -> Option<i32> {
         // Route the failure through the single stderr diagnostic path (the
         // `norn:` headline convention), rather than a raw stderr write — the
         // pre-parse help interceptor runs before dispatch, so it builds its own
-        // stdio presenter. Byte-identical to the prior `{BIN_NAME}: …` line.
+        // stdio presenter. Emits the same `{BIN_NAME}: …` line the standard
+        // diagnostic path produces.
         Presenter::stdio().diagnostic(&format!("help render failed: {err}"));
         return Some(1);
     }

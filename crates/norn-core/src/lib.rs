@@ -3,7 +3,7 @@
 //!
 //! May never: Touch sockets, clap, rmcp, the central config, process spawning, or ambient env/XDG/CWD resolution — all roots and paths arrive as values.
 //!
-//! # Surface (ported from the pre-rewrite tree, ADR 0018)
+//! # Surface (ADR 0018)
 //!
 //! - [`domain`] — the serializable graph vocabulary: [`domain::Document`],
 //!   [`domain::GraphIndex`], the [`domain::Link`] model, and the diagnostic /
@@ -69,7 +69,7 @@
 //! - [`seq_alloc`] — apply-time `{{seq}}` id allocation (filesystem max+1),
 //!   coupled to the writer boundary the owner holds.
 //!
-//! Deliberately NOT here yet (later port phases, per `retired/CLAUDE.md`): the
+//! Deliberately NOT here yet (later port phases): the
 //! durable daily-file JSONL telemetry store and the `norn audit` read verb over
 //! it (only the in-memory event stream is ported); the `init` / `init_scan`
 //! vault-scaffolding and staging surface; on-disk config *resolution* (the

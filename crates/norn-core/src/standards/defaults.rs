@@ -10,7 +10,7 @@
 //! [`crate::standards::substitution`]. This module is the one match-and-merge
 //! entry point over those two — it does not re-implement either.
 //!
-//! **Value-in clock (ADR 0018 new-world):** [`resolve_to_fixpoint`] takes the
+//! **Value-in clock (ADR 0018):** [`resolve_to_fixpoint`] takes the
 //! current instant as a parameter rather than reading `Local::now()`. No
 //! ambient reads — the caller injects the clock, consistent with the grammar
 //! `today` injection (NRN-342). `{{seq}}` placeholders are likewise an

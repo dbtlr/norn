@@ -1,6 +1,6 @@
 //! Template-reference scanning for config-load validation.
 //!
-//! Carved from the donor `standards/defaults.rs`: the `frontmatter_defaults`
+//! The `frontmatter_defaults`
 //! config checks need to see which `{{path.X}}` variables and which `{{… | t}}`
 //! transforms a template references, without rendering it. The rendering engine
 //! itself (`substitution.rs`) and the match-to-defaults resolver

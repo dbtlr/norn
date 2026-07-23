@@ -8,9 +8,9 @@
 //! ## Why this shape (decided, NRN-345)
 //!
 //! - **Fixed-width names in a short base dir structurally eliminate the
-//!   `sockaddr_un` `SUN_LEN` overflow class.** A `sun_path` is ~104 bytes; the
-//!   donor derived sockets under long per-vault cache paths and papered over the
-//!   overflow with a silent fallback (a real bug). Hashing the root to 16 hex
+//!   `sockaddr_un` `SUN_LEN` overflow class.** A `sun_path` is ~104 bytes;
+//!   deriving sockets under long per-vault cache paths risks overflow, which a
+//!   silent fallback would mask (a real bug). Hashing the root to 16 hex
 //!   chars gives a bounded name regardless of how long or unicode-heavy the real
 //!   root path is; a short runtime base keeps the whole path well under the cap.
 //! - **The fingerprint isolates builds.** It keys the socket by ADR 0012 build
@@ -23,8 +23,8 @@
 //! ## Fingerprint definition (stand-in, flagged)
 //!
 //! ADR 0012 defines the fingerprint as a blake3 over the sorted `src/` tree +
-//! `Cargo.lock`, emitted by a build script. The rewrite tree has no such build
-//! script yet, so this uses a **runtime executable-identity** fingerprint —
+//! `Cargo.lock`, emitted by a build script. No such build script exists yet,
+//! so this uses a **runtime executable-identity** fingerprint —
 //! blake3 over `current_exe()`'s path + size + mtime — which satisfies the
 //! load-bearing property (different builds → different fingerprints; the client
 //! and the owner it spawns hash the same file → the same fingerprint) at O(1)

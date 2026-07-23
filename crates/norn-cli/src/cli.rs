@@ -3,10 +3,10 @@
 //!
 //! Declarations only — no command logic. `crate::dispatch` matches on the
 //! `Command` this produces and hands each variant to its command module (or the
-//! uniform not-yet-ported stub). The full v0.48 grammar is ported here (NRN-329)
-//! so the interface contract is frozen against the parity oracle: names, shorts,
-//! aliases, value names, help headings, arg groups, conflicts, and defaults are
-//! donor-exact. Help is NOT emitted by clap — the root and every subcommand set
+//! uniform not-yet-ported stub). The full command grammar is declared here so
+//! the interface contract is stable and reviewable: names, shorts, aliases,
+//! value names, help headings, arg groups, conflicts, and defaults are all
+//! declared, not incidental. Help is NOT emitted by clap — the root and every subcommand set
 //! `disable_help_flag` + `disable_help_subcommand`, and `crate::help` renders the
 //! custom help by walking this derive tree.
 
@@ -47,21 +47,19 @@ pub struct Cli {
 //
 // A plain comment, NOT a doc comment: clap adopts a flattened struct's doc
 // comment as the parent command's `long_about`, which would leak into the
-// top-level `--help` and diverge from the oracle (whose root has none).
+// top-level `--help`, where the root deliberately has none.
 //
 // Order is load-bearing: the custom help renderer lists globals in declaration
 // order, so `cwd, verbose, no-cache-refresh, color, vault` reproduces this
 // build's GLOBAL OPTIONS block. The two help bools are excluded from that block
 // by the extractor.
 //
-// Divergence from the pinned oracle (0.48), decision-gated in the parity ledger
-// (NRN-345): the global `--config` is DELETED — under the registered-vault model
-// (ADR 0017) the per-vault config is resolver-derived
+// Under the registered-vault model (ADR 0017): the global `--config` is DELETED
+// — the per-vault config is resolver-derived
 // (`[vaults.<name>].config -> <root>/.norn/config.yaml`), not a free-floating
-// global path — and the new-world `--vault NAME` global is UNHIDDEN, since
-// name-addressed routing (`norn-client`) now consumes it. Both changes reshape
-// every command's GLOBAL OPTIONS block, covered by ledger entries PD-101 /
-// PD-102.
+// global path — and the `--vault NAME` global is UNHIDDEN, since name-addressed
+// routing (`norn-client`) now consumes it. Both changes reshape every command's
+// GLOBAL OPTIONS block.
 #[derive(Debug, Args)]
 pub struct GlobalArgs {
     // NRN-335: the concise `help` fits the ≤70-char GLOBAL OPTIONS column shown
@@ -104,10 +102,9 @@ pub struct GlobalArgs {
     )]
     pub color: ColorWhen,
 
-    /// Target the registered vault with this name (ADR 0017). Now exposed —
+    /// Target the registered vault with this name (ADR 0017). Exposed because
     /// the summoner (`norn-client`) resolves it through the registry to pick the
-    /// vault an invocation routes to. A decided-better divergence from the pinned
-    /// oracle, ledger entries PD-101 / PD-102.
+    /// vault an invocation routes to.
     #[arg(
         long,
         global = true,
@@ -268,11 +265,8 @@ pub enum Command {
         about = "Read the vault mutation audit trail (the append-only event stream): recent mutations with status / target / trace, filterable"
     )]
     Audit(AuditArgs),
-    /// The intentionally-new registered-vault namespace (ADR 0017). No oracle
-    /// counterpart — the pinned oracle (0.48) predates it — so it is the
-    /// canonical decided-better divergence in the top-level help (PD-101):
-    /// it appears in the COMMANDS list the oracle lacks. Placed after every
-    /// ported oracle command so it is the sole extra row.
+    /// The registered-vault namespace (ADR 0017). Placed after every other
+    /// command so it is the last row in the top-level COMMANDS list.
     #[command(
         subcommand,
         disable_help_flag = true,

@@ -3,8 +3,7 @@
 //! The command module owns its clap `Args`, the `to_params` mapping into the
 //! wire vocabulary, and `run`: help-gate → summon → `FindParams` → return the
 //! `FindReport` as an [`Output`] for the display layer to render (NRN-370).
-//! Grammar + help text are donor-exact (NRN-329); the rendering (paths / records
-//! / json / jsonl) lives once in `display::emit`, byte-faithful to the donor.
+//! The rendering (paths / records / json / jsonl) lives once in `display::emit`.
 //!
 //! Deep facets (`.headings`, `.outgoing_links`, `.unresolved_links`,
 //! `.incoming_links`) and `--all-cols` load the matches' full connection sets
@@ -119,7 +118,7 @@ impl FindArgs {
 
     /// Whether any filter predicate is present (an empty `--text` is not one).
     /// Compared against the empty default so a new predicate flag can never be
-    /// silently missed (donor `has_predicate`).
+    /// silently missed.
     fn has_predicate(&self) -> bool {
         let mut probe = self.filter.clone();
         if probe.text.as_deref() == Some("") {
@@ -134,7 +133,7 @@ impl FindArgs {
 pub fn run(args: &FindArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
     // Help gate: bare `find` (no predicate, no --all) returns its help page for
     // the layer to write on stderr with exit 2 — a full-vault dump is almost
-    // always a mistake (donor parity).
+    // always a mistake.
     if !args.all && !args.has_predicate() {
         return Ok(Output::Usage(crate::help::render_command_long(
             NAME,
@@ -196,7 +195,7 @@ mod tests {
     #[test]
     fn repeated_format_is_last_wins_grammar_wide() {
         // NRN-365: `--format` has no per-arg self-override; the root's
-        // `args_override_self` makes the repeat last-wins (the oracle errors).
+        // `args_override_self` makes the repeat last-wins.
         let args = find_args(&[
             "norn", "find", "--all", "--format", "json", "--format", "paths",
         ]);

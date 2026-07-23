@@ -1,7 +1,7 @@
 //! `norn vault` — the registry verb surface: `register` / `unregister` /
 //! `list` / `set`.
 //!
-//! This is an intentionally-new CLI surface (no oracle, no parity constraint):
+//! This is a new CLI surface:
 //! the sanctioned way to manage norn's central config — the machine-local
 //! authoritative source of vault identity that gates every durable artifact
 //! (persistent cache, event stream, logs) per ADR 0017. Registration is the
@@ -266,9 +266,8 @@ fn confirm(verb: &str, vault: &RegisteredVault) -> String {
 
 /// Fold a [`norn_config::ConfigError`] into the SAME routed diagnostic
 /// constructor the read verbs use, so the hinted variants (`UnknownName`,
-/// `StaleEntry`, …) carry their recovery hint here too (NRN-370). This replaces
-/// the donor's headline-only `presenter.diagnostic(&err.to_string())` — the one
-/// deliberate behavior delta in the presentation refactor.
+/// `StaleEntry`, …) carry their recovery hint here too (NRN-370), rather than a
+/// headline-only `presenter.diagnostic(&err.to_string())`.
 fn fail(err: ConfigError) -> Diagnostic {
     crate::routed::config_error_diagnostic(&err)
 }

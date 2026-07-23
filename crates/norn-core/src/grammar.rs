@@ -51,9 +51,9 @@
 //!
 //! # clap-derivation seam (ADR 0018)
 //!
-//! norn-core never links clap. The donor derived its known-flag sets from clap's
+//! norn-core never links clap. Deriving the known-flag sets from clap's
 //! own `Command` (the NRN-178 anti-drift lesson: a flag added to the CLI cannot
-//! silently degrade into a dynamic predicate). That derivation is a CLI concern
+//! silently degrade into a dynamic predicate) is a CLI concern
 //! and stays in `norn-cli`; the pure normalization algorithm here consumes the
 //! derived sets as an injected [`KnownFlags`] value. The CLI builds a `KnownFlags`
 //! once per process from `Cli::command()` (globals + `find`/`count`/`describe`
@@ -146,8 +146,8 @@ pub struct KnownFlags {
 /// different surface from `Cli::command()`, the drift guard fails — forcing a
 /// conscious decision about a newly-added query/mutate flag (NRN-178).
 ///
-/// `--vault` is the new-world registered-vault global (exposed as of NRN-345)
-/// and consumes a value; the global `--config` was deleted (ADR 0017
+/// `--vault` is the registered-vault global (exposed as of NRN-345) and
+/// consumes a value; the global `--config` was deleted (ADR 0017
 /// resolver-derived config).
 pub fn frozen_known_flags() -> KnownFlags {
     /// The value-taking globals (`global = true`): present on every subcommand.
@@ -558,7 +558,7 @@ fn normalize_query(
 
     // Emit desugared predicates after the reserved tokens. Order among the query
     // flags is irrelevant (they accumulate into the same Vec), so appending
-    // keeps canonical-only invocations byte-identical.
+    // keeps canonical-only invocations unchanged.
     let mut dynamic_keys: Vec<String> = Vec::new();
     for key in dyn_order {
         let values = &dyn_values[&key];
@@ -954,9 +954,9 @@ mod tests {
     }
 
     // ── `-C` after the subcommand: same is_value_token discipline as the ────
-    // reserved branch (deliberate correction over the donor, whose
-    // normalize_query -C branch lacked the guard its own find_subcommand_index
-    // applies; degenerate-input class).
+    // reserved branch (a correction for a degenerate-input class: this
+    // `-C`-after-subcommand branch applies the same guard `find_subcommand_index`
+    // uses).
     #[test]
     fn dash_c_does_not_swallow_following_flag() {
         // `find -C --type note`: `-C` is value-less (its value is flag-shaped),

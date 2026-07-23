@@ -76,7 +76,7 @@ impl<O: Write, E: Write> Presenter<O, E> {
 
     /// The uniform not-yet-ported outcome: one stderr line naming the command,
     /// and the operational exit code. One helper, so every unported command
-    /// emits a byte-identical line.
+    /// emits an identical line.
     pub fn not_yet_ported(&mut self, command: &str) -> i32 {
         self.diagnostic(&format!(
             "`{command}` is not yet ported in this build (rewrite in progress; see ADR 0018)"

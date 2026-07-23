@@ -1,8 +1,7 @@
 //! `apply` (NRN-409).
 //!
-//! Renders the `apply` verb's report (donor `apply::render_report` +
-//! `render_records`). Unlike the sibling cascade verbs, `apply` executes an
-//! arbitrary multi-op plan, so its records summary is the donor's GENERIC
+//! Renders the `apply` verb's report. Unlike the sibling cascade verbs, `apply`
+//! executes an arbitrary multi-op plan, so its records summary is the GENERIC
 //! apply-report block (`apply <status>` + counts + preconditions + per-op +
 //! warnings), not a verb-specific line. Shares the json path, `--out` write, the
 //! refusal envelope, and the cascade-failure warnings with the other cascade
@@ -35,12 +34,11 @@ pub(crate) fn render_apply(
     if report.outcome == ApplyOutcome::Refused {
         // Envelope-only refusal (schema mismatch, expansion, a bad create path):
         // the coded `{code,message,path?}` envelope (json) or `error: <msg>`
-        // (records), exit 2 — donor `emit_refusal`. An owner-SET precondition
+        // (records), exit 2. An owner-SET precondition
         // mismatch instead carries a populated `preconditions[]` with an error;
         // that falls through to the FULL report render below (records: the
-        // `apply refused` block WITH the preconditions block; honoring `--out`),
-        // exactly as the donor's routed `emit` does — `emit_refusal` would drop
-        // the preconditions.
+        // `apply refused` block WITH the preconditions block; honoring `--out`) —
+        // the envelope-only path would drop the preconditions.
         if !report.preconditions.iter().any(|p| p.error.is_some()) {
             return render_apply_refusal(report, format, sink.writer(), conv);
         }
@@ -69,9 +67,9 @@ pub(crate) fn render_apply(
     let result: io::Result<i32> = (|| {
         render_apply_records(sink.writer(), report)?;
         // TTY `trace:` footer on any CONFIRMED (non-dry-run) apply call — records
-        // only; json carries it as a field regardless. Empirically confirmed
-        // against the pinned oracle: unlike the envelope-only refusal above (which
-        // never prints a trace line at all), the FULL report render — reached here
+        // only; json carries it as a field regardless. Unlike the envelope-only
+        // refusal above (which never prints a trace line at all), the FULL report
+        // render — reached here
         // for Applied/Failed/Rebased AND for a precondition-populated Refused
         // (`--yes` against a plan an owner-set precondition rejects) — carries the
         // footer on every one of those outcomes, including Refused; only an actual
@@ -84,7 +82,7 @@ pub(crate) fn render_apply(
     render_outcome(result, conv.writer())
 }
 
-/// The generic apply-report records block (donor `apply::render_records`).
+/// The generic apply-report records block.
 fn render_apply_records(out: &mut dyn Write, report: &ApplyReport) -> io::Result<()> {
     writeln!(out, "apply {}", apply_status_label(report))?;
     render_apply_report_body(out, report)

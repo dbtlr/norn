@@ -377,13 +377,12 @@ fn vault_relative_config_dir_fails_loud() {
     );
 }
 
-/// NRN-360: a present-but-invalid `.norn/config.yaml` surfaces the oracle's
-/// config-error on the user-error path — exit 1 and a `norn: invalid config
-/// <path>: …` diagnostic. The `norn:` prefix is the rewrite's display-layer
-/// convention (NRN-361 owns the prefix question); the message body and exit
-/// code match the oracle byte-for-byte. This is the only `cli` test that drives
-/// the real bin end-to-end through a summon, so it pins the whole CLI surface
-/// the owner/client suites can each only pin in part.
+/// NRN-360: a present-but-invalid `.norn/config.yaml` surfaces a config error
+/// on the user-error path — exit 1 and a `norn: invalid config <path>: …`
+/// diagnostic. The `norn:` prefix is the display layer's convention (NRN-361
+/// owns the prefix question). This is the only `cli` test that drives the
+/// real bin end-to-end through a summon, so it pins the whole CLI surface the
+/// owner/client suites can each only pin in part.
 #[cfg(unix)]
 #[test]
 fn invalid_config_exits_one_with_the_config_diagnostic() {
@@ -426,9 +425,9 @@ fn invalid_config_exits_one_with_the_config_diagnostic() {
         Some(1),
         "a bad config must exit 1; stderr was: {stderr:?}"
     );
-    // The oracle-shaped message body under the rewrite's `norn:` diagnostic
-    // prefix. Path-tail + serde detail are asserted (not the canonicalized
-    // absolute prefix, which varies with the temp dir's symlink spelling).
+    // The config-error message body under the `norn:` diagnostic prefix.
+    // Path-tail + serde detail are asserted (not the canonicalized absolute
+    // prefix, which varies with the temp dir's symlink spelling).
     assert!(
         stderr.contains("norn: invalid config "),
         "expected the `norn: invalid config …` diagnostic, got: {stderr:?}"

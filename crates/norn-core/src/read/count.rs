@@ -1,6 +1,6 @@
 //! The `count` verb's execute seam (the 0016 Params/execute/Report vocabulary).
 //!
-//! Ported from the donor `src/count/`: build the predicate query, resolve
+//! Build the predicate query, resolve
 //! `--links-to`, scan the full match set with
 //! [`Cache::documents_matching`](crate::cache::Cache::documents_matching) (no
 //! sort/limit/paging — count never pages), then reduce to a total, a
@@ -21,7 +21,7 @@ use crate::query::filter_args::{build_document_query, PredicateFieldTypes};
 use crate::read::{render_key, MISSING};
 use crate::standards::VaultConfig;
 
-/// The most `--by` fields a single count may nest (donor parity).
+/// The most `--by` fields a single count may nest.
 const MAX_BY_FIELDS: usize = 16;
 
 /// Run a `count` request against the warm cache. `config` carries the vault

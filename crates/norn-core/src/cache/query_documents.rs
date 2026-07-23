@@ -1,6 +1,6 @@
 //! SQL-direct document query — `Cache::documents_matching` and
-//! `Cache::document_by_path`, plus the predicate SQL emission ported from the
-//! donor query layer (ADR 0004 EAV routing).
+//! `Cache::document_by_path`, plus the predicate SQL emission (ADR 0004 EAV
+//! routing).
 //!
 //! `build_documents_matching_sql_parts` is the query router: it decides, per
 //! query, whether every predicate can be answered from the derived
@@ -1064,7 +1064,7 @@ mod tests {
         paths(&cache.documents_matching(query).unwrap())
     }
 
-    // ── A realistic multi-shape fixture (ported from the donor mimir vault) ──
+    // ── A realistic multi-shape fixture ──────────────────────────────────────
     fn mimir_vault() -> (TempDir, Utf8PathBuf) {
         let tmp = TempDir::new().unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf())

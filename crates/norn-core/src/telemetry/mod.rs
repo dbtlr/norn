@@ -11,7 +11,7 @@
 //! per-op statuses. That in-memory stream ports here whole. The DURABLE side —
 //! the daily-file JSONL store (`store::daily_file_name`) and the `norn audit`
 //! READ verb over it (`telemetry::read`) — is audit-command surface that ports
-//! with the telemetry + CLI layer (see `retired/CLAUDE.md`). It is not dropped:
+//! with the telemetry + CLI layer. It is not dropped:
 //! the sink keeps a value-in `writer` seam so the owner can attach a durable
 //! `Write` sink later ([`EventSink::with_writer`]), and every event is always
 //! retained in [`EventSink::events`] regardless of the writer state.

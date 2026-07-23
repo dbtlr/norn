@@ -3,11 +3,10 @@
 //! cache/SQL here — the owner's config-load path calls this to derive the field
 //! set the cache writer indexes, threading it into `CacheOpenConfig`.
 //!
-//! Ported from the donor `src/standards/index_policy.rs`. The one deliberate
-//! divergence: the stable set-hash is computed with `blake3` (already a
-//! workspace dependency) rather than the donor's `sha2`, since the hash is a
-//! purely internal generation-identity token — never observable in any output —
-//! so its algorithm is not part of any external contract. It remains a stable,
+//! The stable set-hash is computed with `blake3` (already a workspace
+//! dependency); the hash is a purely internal generation-identity token — never
+//! observable in any output — so its algorithm is not part of any external
+//! contract. It remains a stable,
 //! order-independent, lowercase-hex digest of the sorted field set.
 
 use std::collections::{BTreeSet, HashMap};

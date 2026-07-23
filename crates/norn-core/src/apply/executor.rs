@@ -46,7 +46,7 @@ pub struct ApplyContext {
     pub parents: bool,
     /// When true, per-op cascade summaries include the full rewrite/skip lists.
     pub verbose: bool,
-    /// When true (NRN-150/MMR-202), a byte-identical CLEAN REFUSAL (a failure
+    /// When true, a no-op CLEAN REFUSAL (a failure
     /// raised before ANY filesystem write — the runtime write-state fact is still
     /// false) is returned as an `ApplyReport` — the offending op `failed` with a
     /// structured `error.code`, the untouched ops `not_run`, `outcome = refused` —
@@ -58,7 +58,7 @@ pub struct ApplyContext {
     /// A PARTIAL apply (a write already landed, then an op failed) is NOT gated by
     /// this flag: it is always returned as `Ok(report)` with `outcome = failed`
     /// (exit 1) on BOTH surfaces — so the truthful partial state is never hidden
-    /// behind a bare `Err` (CLI) or lost as a byte-identical `refused` (MCP). The
+    /// behind a bare `Err` (CLI) or lost as a no-op `refused` (MCP). The
     /// refused-vs-failed decision is the runtime write-state, never the
     /// per-variant `ApplyError::is_precondition()` flag.
     pub refuse_as_report: bool,
@@ -182,7 +182,7 @@ pub fn apply_migration_plan(
             Ok(expanded) => expanded,
             Err(e) => {
                 // Expansion is pure (index-only, no filesystem write), so ANY
-                // failure here is provably PRE-WRITE — the vault is byte-identical
+                // failure here is provably PRE-WRITE — the vault is unchanged
                 // (NRN-231 review F1). Under `refuse_as_report` (the daemon/MCP
                 // surface, ADR 0011) cross it as a coded, report-shaped refusal so
                 // a routed apply reconstructs the exact exit-2 refusal the direct
@@ -211,7 +211,7 @@ pub fn apply_migration_plan(
     // under the mutation lock and cannot drift between checking and writing.
     // Create-path resolution (`{{seq}}` allocation, vault-root containment,
     // duplicate op ids, missing stems) is pure and pre-write, so any failure is
-    // provably byte-identical — cross it as a coded refusal on the routed/MCP
+    // provably unchanged — cross it as a coded refusal on the routed/MCP
     // surface, exactly like the expand() barrier above.
     let resolved_creates = match resolve_create_paths(
         plan,
@@ -332,7 +332,7 @@ pub fn apply_migration_plan(
 
     // Run the one applier. Per-op failures are recorded in `outcomes.tracker`;
     // an `Err` here is a plan-level barrier (schema, vault-root, vacate,
-    // duplicate-field, containment) — a byte-identical whole-plan refusal, raised
+    // duplicate-field, containment) — a no-op whole-plan refusal, raised
     // before the first write.
     let mut outcomes = match run_apply_passes(
         &vault_root,
@@ -347,7 +347,7 @@ pub fn apply_migration_plan(
         Ok(o) => o,
         Err(e) => {
             // A barrier refusal is pre-write: nothing landed, the vault is
-            // byte-identical. Return-report-on-refusal (NRN-150/MMR-202) when the
+            // unchanged. Return-report-on-refusal when the
             // caller opted in; otherwise (CLI) propagate the `Err`.
             if ctx.refuse_as_report {
                 let rich = e.downcast_ref::<crate::standards::apply::ApplyError>();
@@ -373,10 +373,10 @@ pub fn apply_migration_plan(
     // Refused-vs-partial (ADR 0024): the runtime write-state, tracked truly.
     // ------------------------------------------------------------------
     // A per-op failure with NO write landed is a CLEAN REFUSAL (a single-op
-    // precondition, a stale-hash delete, a create guard): byte-identical to the
-    // old wrote-nothing abort. Once any write has landed, a failure is a truthful
+    // precondition, a stale-hash delete, a create guard): the vault is
+    // unchanged. Once any write has landed, a failure is a truthful
     // PARTIAL FAILURE assembled below (`outcome = failed`, exit 1), never a
-    // byte-identical `refused`.
+    // clean `refused`.
     if outcomes.tracker.failed_count() > 0 && !outcomes.tracker.wrote_any() {
         let representative = outcomes
             .tracker
@@ -399,7 +399,7 @@ pub fn apply_migration_plan(
             ));
         }
         // CLI: re-raise the representative rich error so the arm renders its own
-        // structured envelope and exits 2 — byte-identical to the pre-fold path.
+        // structured envelope and exits 2 — identical to the pre-fold path.
         return Err(outcomes
             .tracker
             .take_first_failure()
@@ -617,8 +617,8 @@ fn resolve_create_paths(
     })
 }
 
-/// Build a return-report-on-refusal (NRN-150/MMR-202) from a PRE-WRITE refusal
-/// (`wrote_any == false` proves the vault is byte-identical). Every expanded
+/// Build a return-report-on-refusal from a PRE-WRITE refusal
+/// (`wrote_any == false` proves the vault is unchanged). Every expanded
 /// change becomes a `not_run` op EXCEPT the first whose path matches
 /// `error_path`, which becomes `failed` carrying the structured `error`
 /// envelope. `outcome = refused`. When the error carries no path (a plan-level
@@ -630,7 +630,7 @@ fn resolve_create_paths(
 /// review F1 — create_document validation, op expansion, etc.) falls back to
 /// `internal-error` + the `{e:#}` message (`ApplyError::from_anyhow`), exactly
 /// what the CLI's `render_json_error_envelope` / `eprintln!("error: {e:#}")`
-/// renders on the `Err` path — so a routed refusal stays byte-identical to
+/// renders on the `Err` path — so a routed refusal renders identically to
 /// Direct's exit-2 refusal.
 fn build_refusal_report(
     plan: &MigrationPlan,
@@ -676,7 +676,7 @@ fn build_refusal_report(
                 error,
                 footnote: parent_op.footnote.clone(),
                 cascade: None,
-                // A byte-identical refusal writes nothing and renders no records
+                // A clean refusal writes nothing and renders no records
                 // link-impact line — the coded error is the whole output.
                 link_impact: None,
                 // Finding linkage echoes on the ACTIONED report (build_report_ops);
@@ -703,7 +703,7 @@ fn build_refusal_report(
 
 /// Build a pre-write refusal report for an EXPANSION-PHASE failure (NRN-231
 /// review F1), before any `ApplyOp` exists. Expansion is pure (index-only,
-/// no filesystem write), so this is byte-identical: every plan operation becomes
+/// no filesystem write), so this is a pure no-op: every plan operation becomes
 /// a `not_run` op EXCEPT `failed_op_idx`, which is `failed` carrying the
 /// structured `error` envelope. `outcome = refused` (exit 2). Mirrors
 /// [`build_refusal_report`] but keys off `plan.operations` rather than expanded
@@ -1117,7 +1117,7 @@ fn build_cascade_summary(rec: Option<&CascadeRecord>, verbose: bool) -> CascadeS
 ///   arm used).
 /// - `redirect_to`: the raw `rewrite_to` field resolved against the index the
 ///   same way the CLI preflight resolves it — so a stem argument renders as its
-///   resolved `.md` path, byte-identical to the direct arm.
+///   resolved `.md` path, identical to the direct arm.
 fn build_link_impact(change: &ApplyOp, parent_op: &MigrationOp, index: &GraphIndex) -> LinkImpact {
     use std::collections::BTreeSet;
 
@@ -1275,7 +1275,7 @@ fn build_report_ops(
 
             // NRN-237: index-derived incoming-link impact for a `delete_document`
             // op, so the `--format records` renderer's inputs ride the wire report
-            // and the routed path reproduces the direct path byte-for-byte. This
+            // and the routed path reproduces the direct path exactly. This
             // reproduces the CLI arm's former locals EXACTLY: `backlinks` for the
             // count, BTreeSet-distinct sorted source paths for the files, the
             // `link_risk`-sources fallback when `--rewrite-to` is set and no
@@ -1909,7 +1909,7 @@ mod tests {
     ///   already mutated on disk.
     /// - AFTER the fix: a write landed → `outcome = failed` (exit 1); op0 is
     ///   `applied` (X was written), op1 is `failed` carrying `error.code`, and the
-    ///   report never implies a byte-identical vault.
+    ///   report never implies an unchanged vault.
     ///
     /// (The delete targets an UNTRACKED path — `ghost.md` — which fails Phase B's
     /// `ensure_known_path` (`unknown-path`) BEFORE its bytes are fingerprinted, so
@@ -1989,7 +1989,7 @@ mod tests {
 
     /// NRN-150/183: the clean pre-write refusal path is PRESERVED. A single-op
     /// plan whose only op fails its Phase-A1 precondition writes nothing, so the
-    /// vault stays byte-identical and the outcome is `refused` (exit 2) — never
+    /// vault stays unchanged and the outcome is `refused` (exit 2) — never
     /// `failed` — on the report-on-refusal surface.
     #[test]
     fn clean_prewrite_refusal_leaves_the_vault_untouched() {
@@ -2034,7 +2034,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("a.md")).unwrap(),
             original,
-            "a clean refusal leaves the vault byte-identical"
+            "a clean refusal leaves the vault unchanged"
         );
     }
 
@@ -2042,7 +2042,7 @@ mod tests {
     /// whose `new_value` has no frontmatter object) crosses as a coded,
     /// report-shaped refusal on the `refuse_as_report` surface (`internal-error`
     /// plus the `{e:#}` message), NOT a bare `Err`. This is the class that made a
-    /// routed apply misreport post-send-uncertain; the vault stays byte-identical.
+    /// routed apply misreport post-send-uncertain; the vault stays unchanged.
     #[test]
     fn bare_prewrite_refusal_returns_report_under_refuse_as_report() {
         let (tmp, index) = synth_vault();
@@ -2096,7 +2096,7 @@ mod tests {
             "the message carries the (unchanged) error prose: {}",
             err.message
         );
-        // Byte-identical: nothing was created.
+        // Unchanged: nothing was created.
         assert!(!tmp.path().join("new.md").exists());
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), before);
     }
@@ -2174,7 +2174,7 @@ mod tests {
         // slips past the `FieldAlreadyPresent` refusal (which keys off span
         // presence) and would splice a duplicate `title:` line — unparseable YAML
         // that drops every field while the run reports success. The post-image
-        // gate must refuse before any write, leaving the file byte-identical.
+        // gate must refuse before any write, leaving the file unchanged.
         let tmp = tempfile::Builder::new()
             .prefix("applier-v1-ambig-")
             .tempdir()
@@ -2217,7 +2217,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("doc.md")).unwrap(),
             doc,
-            "file must be byte-identical after the refusal"
+            "file must be unchanged after the refusal"
         );
     }
 
@@ -2275,7 +2275,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("doc.md")).unwrap(),
             doc,
-            "file must be byte-identical after the refusal"
+            "file must be unchanged after the refusal"
         );
     }
 
@@ -2335,7 +2335,7 @@ mod tests {
             .find_map(|o| o.error.as_ref())
             .expect("refused report carries a coded error");
         assert_eq!(err.code, "containment-parent-traversal");
-        // Byte-identical: nothing escaped the vault.
+        // Unchanged: nothing escaped the vault.
         assert!(!tmp.path().join("escape.md").exists());
         assert!(!tmp.path().parent().unwrap().join("escape.md").exists());
 
@@ -2450,7 +2450,7 @@ mod tests {
             "message carries the (unchanged) error prose: {}",
             err.message
         );
-        // Byte-identical: no doc was created.
+        // Unchanged: no doc was created.
         assert!(!tmp.path().join("made.md").exists());
 
         // CLI surface: bare Err.
@@ -2499,7 +2499,7 @@ mod tests {
             err.code, "vault-root-mismatch",
             "a nonexistent plan root keeps the vault-root-mismatch code"
         );
-        // Byte-identical: the real vault is untouched.
+        // Unchanged: the real vault is untouched.
         assert!(tmp.path().join("a.md").exists());
         assert!(!tmp.path().join("renamed.md").exists());
 
@@ -2768,7 +2768,7 @@ mod tests {
     }
 
     /// Refusal is still TOTAL: a plan-level validation failure (a duplicate op id)
-    /// leaves every op not_run except the offender, byte-identically to today.
+    /// leaves every op not_run except the offender.
     #[test]
     fn plan_level_refusal_is_total() {
         let (tmp, index) = synth_vault();
@@ -2932,7 +2932,7 @@ mod tests {
     }
 
     /// Move CAS present-but-stale refuses `stale-document-hash` before the rename —
-    /// where the pre-0024 applier (and the donor) proceeded (move was unchecked).
+    /// where the pre-0024 applier proceeded (move was unchecked).
     /// A pre-write single-op failure surfaces as a clean refusal (exit 2).
     #[test]
     fn move_with_stale_hash_refuses() {

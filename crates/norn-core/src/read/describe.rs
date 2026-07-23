@@ -1,6 +1,6 @@
 //! The `describe` verb's execute seam (the 0016 Params/execute/Report vocabulary).
 //!
-//! Ported from the donor `src/describe/`: the vault STRUCTURE (folders, declared
+//! The vault STRUCTURE (folders, declared
 //! path rules, creatable rules, inbox, the full frontmatter schema) always, plus
 //! a CONTENTS-SUMMARY (totals, per-field distributions, date bounds, identity
 //! skips) when `--data`/`--stats` is set or `--by` is non-empty.
@@ -30,10 +30,10 @@ use crate::standards::config::VaultConfig;
 
 /// The auto identity-skip threshold: a field with (distinct / occurrences) at or
 /// above this is treated as an identity column and dropped from the auto
-/// distributions (donor `DataOptions::default().identity_ratio`).
+/// distributions.
 const IDENTITY_RATIO: f64 = 0.9;
 
-/// Default per-field value-bucket cap when `--limit` is absent (donor).
+/// Default per-field value-bucket cap when `--limit` is absent.
 const DEFAULT_LIMIT: usize = 20;
 
 /// Run a `describe` request against the warm cache + retained config.
@@ -55,7 +55,7 @@ pub fn execute(
     };
 
     // `--by` implies data — on the *normalized* by, so a comma/whitespace-only
-    // `--by` does not turn data on (donor gate parity).
+    // `--by` does not turn data on.
     let by = normalize_by(&params.by);
     let want_data = params.data || !by.is_empty();
 
@@ -148,7 +148,7 @@ fn creatable_rules(config: &VaultConfig) -> Vec<norn_wire::CreatableRule> {
 }
 
 /// Collect the `{{var.X}}` / `{{path.X}}` variable names a target template
-/// references, in first-occurrence order (donor `new::generate::referenced_vars`).
+/// references, in first-occurrence order.
 fn referenced_vars(target: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut rest = target;
@@ -177,7 +177,7 @@ fn referenced_vars(target: &str) -> Vec<String> {
     out
 }
 
-// ── Contents summary (donor `describe/data.rs`) ──────────────────────────────
+// ── Contents summary ──────────────────────────────────────────────────────────
 
 /// Trim each `--by` entry and drop empties (clap's `value_delimiter` does not
 /// trim). Idempotent — the CLI gate and this both apply it.

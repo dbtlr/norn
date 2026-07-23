@@ -1,8 +1,6 @@
 //! Owner lifecycle primitives: runtime dir, single-owner flock, socket bind.
 //!
-//! Ported from the donor `src/serve/lifecycle.rs` (retired tree), retargeted
-//! from one host daemon to a per-vault ephemeral owner (ADR 0017). The
-//! semantics are the donor's; the shapes are new-world:
+//! Targets a per-vault ephemeral owner rather than one host daemon (ADR 0017):
 //!
 //! - The advisory flock is the load-bearing single-owner primitive (ADR 0005,
 //!   carried forward by 0017): the owner holds it for its whole life, so a live

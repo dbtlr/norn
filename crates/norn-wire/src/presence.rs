@@ -20,10 +20,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// - [`Presence::Value`] — the source carries frontmatter (or any concrete
 ///   value); the inner value is serialized in place.
 ///
-/// The old donor tree encoded this imperatively (`strip_absent_frontmatter`
-/// removed the `frontmatter` key when the source block was absent, leaving
-/// `Some(Value::Null)` to render as `"frontmatter": null`). This type carries
-/// the same distinction by construction, so later `Report` types cannot lose it.
+/// An imperative encoding (`strip_absent_frontmatter` removing the
+/// `frontmatter` key when the source block was absent, leaving
+/// `Some(Value::Null)` to render as `"frontmatter": null`) can lose this
+/// distinction. This type carries it by construction, so later `Report` types
+/// cannot lose it.
 ///
 /// # Serde mechanics
 ///

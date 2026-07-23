@@ -201,7 +201,7 @@ pub fn open(config: &SummonConfig) -> Result<OwnerSession, ClientError> {
 }
 
 /// Resolve a vault through the central registry (name / binding / env / cwd).
-/// The tier is always ephemeral in the rewrite (ADR 0017: all dev builds), so an
+/// The tier is always ephemeral today (ADR 0017: all dev builds), so an
 /// [`ResolvedVia::UnregisteredCwd`] outcome is not an error — its root still gets
 /// a summoned ephemeral owner.
 pub fn resolve(home: ConfigHome, input: &ResolveInput) -> Result<Resolved, ClientError> {

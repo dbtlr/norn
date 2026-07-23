@@ -1,7 +1,7 @@
 //! The `rewrite-wikilink` execute seam: rewrite every `[[old]]` reference (body
 //! + frontmatter) to `[[new]]` across the vault.
 //!
-//! Ported from the donor `rewrite_wikilink::{mod, route}` (ADR 0018). A one-op
+//! A one-op
 //! `rewrite_wikilink` `MigrationPlan` runs through the shared executor: the
 //! planner expander resolves `old` against the graph and expands to per-document
 //! `rewrite_link` / `set_frontmatter` ops, or REFUSES (unresolvable `old`) — a

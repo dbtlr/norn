@@ -1,10 +1,10 @@
 //! Post-validation finding filters for `validate` (and, later, `repair`).
 //!
-//! Ported from the donor `src/validate_filter.rs` (ADR 0018). [`filter_findings`]
+//! [`filter_findings`]
 //! narrows a validated finding set by code (exact or glob), severity, path glob,
 //! field, rule, link target, and unresolved reason. Filtering only; it never
-//! re-runs a check. The donor's clap `From<&ValidateArgs>` / `From<&RepairArgs>`
-//! adapters are dropped here — the CLI/owner builds [`ValidateFilterOptions`]
+//! re-runs a check. No clap `From<&ValidateArgs>` / `From<&RepairArgs>`
+//! adapters live here — the CLI/owner builds [`ValidateFilterOptions`]
 //! from the wire params (norn-core never links clap).
 
 use std::collections::BTreeSet;

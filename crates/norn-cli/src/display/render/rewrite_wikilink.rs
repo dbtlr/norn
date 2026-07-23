@@ -1,8 +1,7 @@
 //! `rewrite-wikilink` (one of the cascade verbs) (NRN-409).
 //!
-//! Renders the shared `ApplyReport` the donor emits (byte-faithful to
-//! `retired/src/rewrite_wikilink/route.rs`). `--format json` is the report's
-//! PRETTY serialization (with a trailing newline); records is the donor's
+//! Renders the shared `ApplyReport`. `--format json` is the report's
+//! PRETTY serialization (with a trailing newline); records is the
 //! human summary. A refused report renders the coded `{code,message,path?}`
 //! envelope (json, pretty) or `error: <msg>` (records) and exits 2. Cascade
 //! failures (real FS errors) surface on stderr before the summary.
@@ -33,7 +32,7 @@ pub(crate) fn render_rewrite_wikilink(
 
     if report.outcome == ApplyOutcome::Refused {
         // `--out` is a write-to-file projection of the report; a refusal never
-        // reaches it (the donor refuses before rendering), so the envelope path
+        // reaches it (a refusal short-circuits before rendering), so the envelope path
         // is unconditional here.
         return render_apply_refusal(report, format, sink.writer(), conv);
     }
@@ -68,7 +67,7 @@ pub(crate) fn render_rewrite_wikilink(
     render_outcome(result, conv.writer())
 }
 
-/// Records-format rewrite-wikilink output (donor `rewrite_wikilink::render_records`).
+/// Records-format rewrite-wikilink output.
 /// A runtime op failure (`outcome = failed`) renders the truthful shared
 /// `render_cascade_failed` headline instead of the `would rewrite`/`rewrote`
 /// wording below, which only distinguishes forecast from success.

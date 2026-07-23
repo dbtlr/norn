@@ -20,8 +20,8 @@ use serde::Deserialize;
 use crate::error::ConfigError;
 use crate::registry::{RegisteredVault, Registry};
 
-/// Environment variable naming a vault root directly (donor semantics: a root
-/// path, empty/whitespace ignored). Consulted after the repo binding.
+/// Environment variable naming a vault root directly (a root path;
+/// empty/whitespace ignored). Consulted after the repo binding.
 pub const NORN_ROOT_ENV: &str = "NORN_ROOT";
 
 /// The committable repo-binding filename, discovered by walking up from the cwd.
@@ -127,7 +127,7 @@ impl Registry {
             return Ok(resolved_from(vault, ResolvedVia::RepoBinding { file }));
         }
 
-        // 4. NORN_ROOT — a direct root path (donor semantics).
+        // 4. NORN_ROOT — a direct root path.
         if let Some(raw) = input
             .norn_root_env
             .as_deref()

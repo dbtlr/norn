@@ -19,11 +19,10 @@ pub(crate) fn render_edit(
 ) -> i32 {
     let report = &view.report;
 
-    // A refusal is format-INDEPENDENT for edit (the donor's pre-existing
-    // asymmetry, `edit::route::emit`): `error: <message>` on stderr, exit 2, for
-    // records AND json alike — unlike set/new, which emit a structured JSON
-    // refusal object. `error.message` is the same `Display` prose the donor's
-    // direct arm interpolated, so the two are byte-identical.
+    // A refusal is format-INDEPENDENT for edit: `error: <message>` on stderr,
+    // exit 2, for records AND json alike — unlike set/new, which emit a
+    // structured JSON refusal object. `error.message` is the same `Display`
+    // prose the routed and direct arms interpolate, so both render identically.
     if report.outcome == MutationOutcome::Refused {
         let msg = report
             .error
@@ -37,8 +36,8 @@ pub(crate) fn render_edit(
         return render_outcome(result, conv.writer());
     }
 
-    // JSON: the compact whole-report serialization is the contract (donor
-    // `render_json` — `serde_json::to_writer` + one trailing newline).
+    // JSON: the compact whole-report serialization is the contract
+    // (`serde_json::to_writer` + one trailing newline).
     if format == Format::Json {
         let result: io::Result<i32> = (|| {
             writeln!(sink.writer(), "{}", serde_json::to_string(report)?)?;
@@ -47,8 +46,8 @@ pub(crate) fn render_edit(
         return render_outcome(result, conv.writer());
     }
 
-    // Records. Unstyled, like the donor `edit::report::render_records` (it never
-    // resolved a palette), so the piped / parity bytes are exact.
+    // Records. Unstyled (never resolves a palette), so the piped bytes are
+    // deterministic.
     let result: io::Result<i32> = (|| {
         let verb = if report.applied {
             "edit"

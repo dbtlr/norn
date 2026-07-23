@@ -7,8 +7,8 @@
 use serde::{Deserialize, Serialize};
 
 /// A location in a source string: 1-based `line` and `column`, 0-based
-/// `byte_offset`. Column counts bytes from the start of the line, matching the
-/// donor's editor-agnostic convention.
+/// `byte_offset`. Column counts bytes from the start of the line — an
+/// editor-agnostic convention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceSpan {
     pub line: usize,

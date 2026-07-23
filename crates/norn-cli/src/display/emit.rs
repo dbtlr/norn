@@ -6,12 +6,10 @@
 //! [`Conversation`], and derives the process exit code. A user error returns a
 //! [`Diagnostic`] instead, rendered through the one presenter path.
 //!
-//! The renderers themselves live one per verb under [`super::render`] (NRN-409);
-//! they are pinned to the donor CLI's output by the parity suite: the `find` /
-//! `get` projections run through the shared `output::projection` ladder;
-//! `count` / `describe` / `vault list` reproduce their bespoke text unstyled
-//! (they never resolved a palette in the donor, and their output is pinned by
-//! the parity cases).
+//! The renderers themselves live one per verb under [`super::render`]: the
+//! `find` / `get` projections run through the shared `output::projection`
+//! ladder; `count` / `describe` / `vault list` emit their bespoke text unstyled
+//! (they never resolve a palette).
 
 use std::io::{self, Write};
 
@@ -39,7 +37,7 @@ fn is_stdin_tty() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdin())
 }
 
-/// The effective terminal width for record wrapping (donor default 80).
+/// The effective terminal width for record wrapping (default 80).
 pub(crate) fn term_width() -> usize {
     terminal_size::terminal_size()
         .map(|(w, _)| w.0 as usize)
@@ -96,8 +94,8 @@ fn render_with<O: Write, E: Write, R>(
 /// resolved `Format` plus a ready [`Sink`] and never re-resolves any of them.
 ///
 /// The unstyled contract is STRUCTURAL here: `describe` / `count` / `vault list`
-/// (and the mutation verbs that never colorized in the donor) are handed a
-/// no-op ([`Palette::off`]) sink, so their pinned, unstyled bytes cannot acquire
+/// (and the mutation verbs that never colorize) are handed a
+/// no-op ([`Palette::off`]) sink, so their unstyled bytes cannot acquire
 /// styling even if a future edit routes them through a record primitive. Only
 /// the styled verbs (`find` / `get` / `validate` / `repair` / `set`) receive the
 /// resolved palette.
@@ -221,10 +219,9 @@ pub fn emit<O: Write, E: Write>(
 }
 
 /// Render a mutation verb's first report and, when the invocation is
-/// interactive-eligible, carry the donor's preview → prompt → apply
-/// conversation (NRN-389).
+/// interactive-eligible, carry the preview → prompt → apply conversation.
 ///
-/// The first render is BYTE-IDENTICAL to today's non-interactive path in
+/// The first render is IDENTICAL to the non-interactive path in
 /// every case — forecast (with its `Apply with --yes` hint), applied, or
 /// refused — because this wraps [`emit`] rather than changing it. Only when
 /// ALL of the following hold does anything additional happen:
@@ -236,18 +233,17 @@ pub fn emit<O: Write, E: Write>(
 ///   refusal or an operational error — nothing to confirm on those); and
 /// - stdin is a real terminal ([`is_stdin_tty`]).
 ///
-/// Then: prompt on stderr (blank line + `Proceed? [y/N] `, donor text). On a
+/// Then: prompt on stderr (blank line + `Proceed? [y/N] `). On a
 /// "y"/"yes" answer, call `rerun` — a SECOND routed request with `confirm`
 /// forced true, re-planned and applied fresh under the owner's lock, exactly
 /// as a direct `--yes` invocation would — and render its report as the FINAL
 /// outcome. On anything else (a declined answer, EOF, or an I/O error
 /// reading the prompt), decline: no second request, exit
-/// [`EXIT_OPERATIONAL`] (1) — the donor's `process::exit(1)` on a declined
-/// confirm, carried here as a return rather than a hard process exit.
+/// [`EXIT_OPERATIONAL`] (1) — a declined confirm exits 1, carried here as a
+/// return rather than a hard process exit.
 ///
 /// Piped / non-TTY invocations never reach the prompt at all (`is_stdin_tty`
-/// is false), so today's forecast-plus-hint contract for scripts and the
-/// parity harness is unchanged byte-for-byte.
+/// is false), so the forecast-plus-hint contract for scripts is unchanged.
 ///
 /// `--body-from-stdin` (`set`/`new`) at a TTY auto-declines rather than
 /// prompting: the body read already consumed stdin to EOF before the ladder
@@ -273,11 +269,9 @@ pub fn emit_mutation<O: Write, E: Write>(
     )
 }
 
-/// The injectable core of [`emit_mutation`] (NRN-389 F2). Identical decision
+/// The injectable core of [`emit_mutation`]. Identical decision
 /// logic, but with the stdin-tty read and the confirm reader taken as
-/// parameters instead of wired to the real process — the donor's own
-/// `prompt::confirm<R, W>` factoring is the precedent for pulling the I/O
-/// dependency out from behind the policy. Without this seam the prompt
+/// parameters instead of wired to the real process. Without this seam the prompt
 /// branch is unreachable under `cargo test`: the test process's stdin is
 /// never a real terminal, so `is_stdin_tty()` always reads false there.
 /// [`emit_mutation`] is the one production caller and always supplies the
@@ -310,7 +304,7 @@ mod tests {
     use crate::test_support::{global_args, FailingWriter};
     use norn_wire::{CodedError, MutationOutcome, SetReport};
 
-    // ── emit_mutation / confirm_and_finish (NRN-389 F2) ─────────────────────
+    // ── emit_mutation / confirm_and_finish ──────────────────────────────────
     //
     // `emit_mutation` itself just wires `confirm_and_finish` to the real
     // `is_stdin_tty()` and `prompt::confirm_interactive`; these tests pin
@@ -319,7 +313,7 @@ mod tests {
     // terminal under `cargo test`.
 
     /// A `set` report: `outcome: Refused` renders at exit 2; anything else
-    /// (the donor's `MutationOutcome::Applied`, which really means "a valid
+    /// (`MutationOutcome::Applied`, which really means "a valid
     /// plan" — `applied` is the separate bool distinguishing a forecast from
     /// a real write) renders at exit 0 regardless of `applied`.
     fn set_report(applied: bool, outcome: MutationOutcome) -> SetReport {

@@ -1,6 +1,6 @@
 //! The `find` verb's execute seam (the 0016 Params/execute/Report vocabulary).
 //!
-//! Ported from the donor `src/find/`: build the predicate query from the wire
+//! Build the predicate query from the wire
 //! [`FindParams`], resolve `--links-to` targets against the warm cache, run the
 //! sorted/paged [`Cache::find_documents`](crate::cache::Cache::find_documents),
 //! and project each match into the flat [`FindDoc`] the CLI renders.
@@ -18,8 +18,8 @@
 //!
 //! # Find-only limit default
 //!
-//! An absent `--limit` defaults to **10** here (the donor's `build_find_query`
-//! divergence), unless `--no-limit` is set. The wire carries the absent limit
+//! An absent `--limit` defaults to **10** here, unless `--no-limit` is set. The
+//! wire carries the absent limit
 //! verbatim; the default is the verb's, applied at execute.
 
 use anyhow::Result;
@@ -33,7 +33,7 @@ use crate::read::{connection_values, ConnectionValues};
 use crate::standards::VaultConfig;
 
 /// The find-only default limit applied when `--limit` is absent and
-/// `--no-limit` is not set (donor parity).
+/// `--no-limit` is not set.
 const DEFAULT_LIMIT: usize = 10;
 
 /// Run a `find` request against the warm cache. See the module docs for the
@@ -106,7 +106,7 @@ pub fn execute(
         returned: result.returned,
         // The report echoes the 1-based position of the first returned record
         // (offset + 1) — the "showing N–M" human line and the JSON envelope stay
-        // 1-based, so a default (offset 0) query is unchanged from the oracle.
+        // 1-based, so a default (offset 0) query reports position 1.
         starts_at: offset.saturating_add(1),
         truncated: result.truncated,
     }))

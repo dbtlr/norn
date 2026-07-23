@@ -6,17 +6,15 @@
 //! a config from disk or a registry do so in their own layer and inject the
 //! result here.
 //!
-//! # Ported seam (ADR 0018)
+//! # What lives elsewhere
 //!
-//! The donor `env/mod.rs` bundled this value-carrier with warm/cold cache modes,
-//! a held-open `Cache` per generation, a writer queue, a read pool, and the
-//! per-request self-heal / freshness pipeline. All of that is cache-engine and
-//! owner-daemon machinery and is deliberately NOT ported here:
+//! This value-carrier stays narrow. Warm/cold cache modes, a held-open `Cache`
+//! per generation, a writer queue, a read pool, and the per-request self-heal /
+//! freshness pipeline are all cache-engine and owner-daemon machinery, and are
+//! deliberately NOT here:
 //!
 //! - warm-slot / generation / read-pool state and the `query_cache` /
-//!   `load_graph_index` cache path → the cache-engine and `norn-owner` ports
-//!   (donor `env/generation.rs`, `env/refresh.rs`, `env/ensure.rs`,
-//!   `env/request_scope.rs`);
+//!   `load_graph_index` cache path → the cache-engine and `norn-owner` layers;
 //! - config *resolution* from a file or registry → the config layer
 //!   (norn-core may not depend on `norn-config`, so the resolved config is
 //!   injected as values, not loaded here).

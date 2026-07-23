@@ -1,5 +1,4 @@
-//! `--col` projection primitives for the read commands, ported from the donor
-//! `src/output/projection.rs` (retired tree).
+//! `--col` projection primitives for the read commands.
 //!
 //! Parses `--col` tokens into structural facets (dot-prefixed) and frontmatter
 //! field names (bare), projects a frontmatter object to named fields, and
@@ -8,8 +7,8 @@
 //! Deep facets (`.headings`, `.outgoing_links`, `.unresolved_links`,
 //! `.incoming_links`) are carried on the wire as pre-serialized JSON values (the
 //! cache's own `Heading` / `Link` / `IncomingLink` serialization). The JSON
-//! output emits them verbatim; the records renderer folds them to the donor's
-//! one-line display strings via [`headings_to_display`] and the link helpers.
+//! output emits them verbatim; the records renderer folds them to one-line
+//! display strings via [`headings_to_display`] and the link helpers.
 
 use serde_json::{Map, Value};
 use std::collections::HashSet;
@@ -99,9 +98,9 @@ pub fn unknown_facet_message(facet: &str) -> String {
     format!("unknown --col facet '.{facet}'{suggestion} (valid facets: {valid}; bare names select frontmatter fields)")
 }
 
-/// Render serialized `Heading` values as `# text` lines, one per heading
-/// (donor `headings_to_display`). Each value is `{ level, text, ... }`; a
-/// missing/negative level renders no `#` prefix.
+/// Render serialized `Heading` values as `# text` lines, one per heading.
+/// Each value is `{ level, text, ... }`; a missing/negative level renders no
+/// `#` prefix.
 pub fn headings_to_display(headings: &[Value]) -> String {
     headings
         .iter()
@@ -115,7 +114,7 @@ pub fn headings_to_display(headings: &[Value]) -> String {
 }
 
 /// Render serialized resolved `Link` values as `target  →  resolved` (or bare
-/// `target` when unresolved) — donor `outgoing_links_to_display`.
+/// `target` when unresolved).
 pub fn outgoing_links_to_display(links: &[Value]) -> String {
     links
         .iter()
@@ -130,8 +129,8 @@ pub fn outgoing_links_to_display(links: &[Value]) -> String {
         .join("\n")
 }
 
-/// Render serialized unresolved `Link` values as `target  (unresolved: reason)`
-/// (donor `unresolved_links_to_display`). The reason is the kebab-case
+/// Render serialized unresolved `Link` values as `target  (unresolved: reason)`.
+/// The reason is the kebab-case
 /// `unresolved_reason` serialization the cache already emits.
 pub fn unresolved_links_to_display(links: &[Value]) -> String {
     links
@@ -149,7 +148,7 @@ pub fn unresolved_links_to_display(links: &[Value]) -> String {
 }
 
 /// Render serialized `IncomingLink` values (`{ source_path, link }`) as
-/// `source_path  raw` (donor `incoming_links_to_display`).
+/// `source_path  raw`.
 pub fn incoming_links_to_display(links: &[Value]) -> String {
     links
         .iter()
@@ -193,7 +192,7 @@ pub fn warn_col_ignored(
 }
 
 /// Warn (once) that `--section` has no effect with a format that ignores it
-/// (`paths` / `markdown`) — donor `warn_section_ignored`.
+/// (`paths` / `markdown`).
 pub fn warn_section_ignored(
     sections: &[String],
     inert_format: Option<&str>,
@@ -208,7 +207,7 @@ pub fn warn_section_ignored(
 }
 
 /// Build the `sections` JSON value: a plain object keyed by heading text
-/// (`{heading: content, ...}`) — donor `sections_to_json_object`. Keys land in a
+/// (`{heading: content, ...}`). Keys land in a
 /// `serde_json::Map` (sorted), so the object is alphabetically keyed regardless
 /// of the request order the records renderer preserves.
 pub fn sections_to_json_object(sections: &[(String, String)]) -> Value {
@@ -437,7 +436,7 @@ pub fn project_pairs(view: &DocView<'_>, cols: &[String], all_cols: bool) -> Vec
         }
     }
     // `--section` (get only): one labeled block per requested heading, request
-    // order, the verbatim span (byte-identical to `--format json`).
+    // order, the verbatim span (identical to `--format json`).
     if let Some(sections) = view.sections {
         for (heading, content) in sections {
             pairs.push((heading.clone(), content.clone()));

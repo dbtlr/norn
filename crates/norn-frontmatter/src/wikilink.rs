@@ -8,11 +8,11 @@
 //!
 //! Matching a parsed `target` to a document in a vault — alias tables, path
 //! resolution, ambiguity, resolved/unresolved status — is **resolution**, not
-//! syntax. The donor entangled the two: `links::wikilink` produced a
-//! `core::Link` already carrying `resolved_path`, `candidates`, `status`, and a
-//! `source_context` naming the vault area. That resolution layer ports to
-//! `norn-core` in a later task. Here a [`Wikilink`] is a pure syntactic token
-//! with no vault knowledge; a resolver consumes these tokens later.
+//! syntax. Entangling the two — a token that already carries `resolved_path`,
+//! `candidates`, `status`, and a `source_context` naming the vault area — mixes
+//! vault knowledge into a syntactic token. That resolution layer lives in
+//! `norn-core`. Here a [`Wikilink`] is a pure syntactic token with no vault
+//! knowledge; a resolver consumes these tokens later.
 
 use std::ops::Range;
 use std::sync::LazyLock;
@@ -386,7 +386,8 @@ mod tests {
         // Emission fidelity: for a TIGHT link (no interior whitespace),
         // reconstructing with its own target round-trips to the exact raw across
         // every embed / alias / anchor / block-ref combination. (Padded links do
-        // NOT round-trip — that canonicalization is the decided PD-119 behavior.)
+        // NOT round-trip — that canonicalization is intentional, not a
+        // round-trip guarantee.)
         for raw in [
             "[[Target]]",
             "![[Target]]",

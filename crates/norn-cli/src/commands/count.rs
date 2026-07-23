@@ -2,8 +2,8 @@
 //!
 //! The command module maps its clap `Args` (`--by`, the shared filter surface,
 //! `--format`) into [`CountParams`], summons the vault owner, and returns the
-//! [`CountReport`] as an [`Output`] (NRN-370). The display layer renders it
-//! byte-faithfully to the donor: `text` (the default) is padded columns; `json`
+//! [`CountReport`] as an [`Output`] (NRN-370). The display layer renders it:
+//! `text` (the default) is padded columns; `json`
 //! is the untagged compact serialization.
 
 use norn_wire::CountParams;

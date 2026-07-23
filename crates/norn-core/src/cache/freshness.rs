@@ -8,8 +8,8 @@
 //! unchanged vault skip the writer queue entirely.
 //!
 //! [`FreshnessProbe`] is the named interface. The phase-2 implementation is the
-//! read-only [`StatSweepProbe`] (donor stat-sweep semantics at the request
-//! boundary — also oracle-parity behavior). A phase-4 watcher-events probe
+//! read-only [`StatSweepProbe`] (stat-sweep semantics at the request
+//! boundary). A phase-4 watcher-events probe
 //! slots in behind the same trait as a new implementation without touching this
 //! signature; the increment pipeline consumes this authority rather than
 //! embedding its own filesystem re-proof. The probe/change-detection interface

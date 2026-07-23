@@ -1,14 +1,13 @@
 //! The validate engine: run every configured check against a built graph.
 //!
-//! Ported from the donor `src/standards/engine.rs` (ADR 0018). One blessed
-//! public entry — [`validate_with_compiled`] — walks the graph index once,
-//! applies the graph/link/frontmatter checks per document plus the cross-doc
-//! alias checks, and returns the flat [`Finding`] list. It takes a
-//! [`CompiledConfig`] so path patterns are matched pre-compiled (the donor's
-//! per-document re-parse of every rule glob was the accidental quadratic; this
-//! path avoids it). The donor's `validate` / `validate_with_alias_field` /
-//! `validate_rule*` convenience wrappers were a second, uncompiled way to reach
-//! the same job — retained here only as `#[cfg(test)]` helpers.
+//! One blessed public entry — [`validate_with_compiled`] — walks the graph
+//! index once, applies the graph/link/frontmatter checks per document plus the
+//! cross-doc alias checks, and returns the flat [`Finding`] list. It takes a
+//! [`CompiledConfig`] so path patterns are matched pre-compiled (an uncompiled
+//! per-document re-parse of every rule glob is the accidental quadratic this
+//! path avoids). The `validate` / `validate_with_alias_field` / `validate_rule*`
+//! convenience wrappers are a second, uncompiled way to reach the same job —
+//! retained here only as `#[cfg(test)]` helpers.
 
 use crate::domain::{Document, GraphIndex};
 
@@ -246,11 +245,11 @@ fn rule_matches_compiled(
 
 // ── #[cfg(test)] convenience wrappers ────────────────────────────────────────
 //
-// The donor exposed `validate` / `validate_with_alias_field` (default-compiled
-// whole-index runs) and `validate_rule` / `validate_rule_compiled` (single-rule
-// runs over a pre-narrowed `DocumentSummary` scope) alongside the compiled
-// engine. They reach the same job a second, uncompiled way; here they exist only
-// to drive the ported tests, so they are gated to test builds.
+// `validate` / `validate_with_alias_field` (default-compiled whole-index runs)
+// and `validate_rule` / `validate_rule_compiled` (single-rule runs over a
+// pre-narrowed `DocumentSummary` scope) reach the same job the compiled engine
+// does, a second uncompiled way. They exist only to drive the tests, so they
+// are gated to test builds.
 
 #[cfg(test)]
 fn validate(index: &GraphIndex, config: &ValidateConfig) -> Vec<Finding> {

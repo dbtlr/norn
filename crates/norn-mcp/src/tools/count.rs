@@ -1,9 +1,9 @@
 //! `vault.count` — total or grouped document counts.
 //!
-//! The param struct is the donor's flat filter-args mirror (its schemars schema
+//! The param struct is a flat filter-args mirror (its schemars schema
 //! is the published `inputSchema`); the handler maps it to a norn-wire
 //! [`CountParams`] and routes to the owner, then projects the untagged
-//! [`CountReport`] into the flat [`CountEnvelope`] the donor advertised (rmcp
+//! [`CountReport`] into the flat [`CountEnvelope`] (rmcp
 //! requires an `outputSchema` with a `type: object` root, which an untagged enum
 //! cannot produce).
 

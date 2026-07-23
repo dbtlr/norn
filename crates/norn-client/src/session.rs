@@ -732,7 +732,7 @@ mod tests {
             ClientError::Rejected { message, .. } => {
                 assert!(
                     message.starts_with("invalid config "),
-                    "expected the oracle-shaped config message, got {message:?}"
+                    "expected the `invalid config` message, got {message:?}"
                 );
             }
             other => panic!("expected Rejected, got {other:?}"),

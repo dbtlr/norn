@@ -57,7 +57,7 @@ fn list_human(vaults: &[RegisteredVault], sink: &mut Sink<'_>, conv: &mut Conver
 }
 
 /// The stable machine shape: an array of objects, one per vault, absent overrides
-/// explicit JSON `null` (donor `vault::VaultJson`).
+/// explicit JSON `null`.
 #[derive(Serialize)]
 struct VaultJson {
     name: String,
@@ -96,7 +96,7 @@ fn list_json(vaults: &[RegisteredVault], sink: &mut Sink<'_>, conv: &mut Convers
     }
 }
 
-/// Lossy path→string for display and JSON (donor `vault::display`).
+/// Lossy path→string for display and JSON.
 fn path_display(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
 }

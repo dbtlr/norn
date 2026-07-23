@@ -133,7 +133,7 @@ pub enum ValueStyle {
 /// two fields) are included in `line_range` but do not produce their own
 /// `PropertySpan`.
 ///
-/// # The scanner proposes, serde is the oracle
+/// # The scanner proposes, serde decides
 ///
 /// A byte-offset scanner cannot, on its own, safely decide where a YAML value's
 /// bytes are — the corruption bugs it produced (a `# comment` spanned as a
@@ -493,7 +493,7 @@ fn is_yaml_null_token(s: &str) -> bool {
 }
 
 /// Re-parses a value byte-slice through the exact `serde_yaml → serde_json`
-/// pipeline `extract_frontmatter` uses, so representations match the oracle's
+/// pipeline `extract_frontmatter` uses, so representations match serde's
 /// (e.g. `12:30`, `1.10`, `yes` are read identically on both sides).
 fn reparse_yaml(s: &str) -> Option<serde_json::Value> {
     let value: serde_yaml::Value = serde_yaml::from_str(s).ok()?;
@@ -825,14 +825,14 @@ mod tests {
 mod span_tests {
     use super::*;
 
-    /// Parses `content[range]` into the serde oracle map and locates spans —
+    /// Parses `content[range]` into the serde map and locates spans —
     /// the same wiring `apply` uses (parse → `top_level_property_spans`).
     fn spans_for(content: &str, range: Range<usize>) -> Vec<PropertySpan> {
-        let object = oracle(content, range.clone());
+        let object = serde_map(content, range.clone());
         top_level_property_spans(content, range, &object)
     }
 
-    fn oracle(content: &str, range: Range<usize>) -> serde_json::Map<String, serde_json::Value> {
+    fn serde_map(content: &str, range: Range<usize>) -> serde_json::Map<String, serde_json::Value> {
         let yaml = &content[range];
         match serde_yaml::from_str::<serde_yaml::Value>(yaml)
             .ok()
@@ -976,7 +976,7 @@ mod span_tests {
 /// NRN-133 span-locator matrix: the scanner proposes, serde vetoes. Grounded in
 /// the YAML 1.2 spec (no third-party corpus). Every input is real, parseable
 /// frontmatter — the locator only ever runs after `extract_frontmatter`
-/// succeeds — so the oracle is built the same way `apply` builds it.
+/// succeeds — so the serde map is built the same way `apply` builds it.
 #[cfg(test)]
 mod locator_matrix_tests {
     use super::*;
@@ -990,8 +990,8 @@ mod locator_matrix_tests {
         start..(start + rel + 1)
     }
 
-    /// Builds the serde oracle from the frontmatter, exactly as `apply` does.
-    fn oracle(content: &str) -> serde_json::Map<String, serde_json::Value> {
+    /// Builds the serde map from the frontmatter, exactly as `apply` does.
+    fn serde_map(content: &str) -> serde_json::Map<String, serde_json::Value> {
         let yaml = &content[fm_range(content)];
         match serde_yaml::from_str::<serde_yaml::Value>(yaml)
             .ok()
@@ -1003,7 +1003,7 @@ mod locator_matrix_tests {
     }
 
     fn spans(content: &str) -> Vec<PropertySpan> {
-        top_level_property_spans(content, fm_range(content), &oracle(content))
+        top_level_property_spans(content, fm_range(content), &serde_map(content))
     }
 
     fn find<'a>(s: &'a [PropertySpan], name: &str) -> Option<&'a PropertySpan> {
@@ -1096,7 +1096,7 @@ mod locator_matrix_tests {
         assert_eq!(s[0].style, ValueStyle::FlowSequence);
         assert!(s[0].value_range.is_none());
         assert_eq!(
-            oracle(content)
+            serde_map(content)
                 .get("tags")
                 .unwrap()
                 .as_array()
@@ -1274,7 +1274,10 @@ mod locator_matrix_tests {
             key.value_range.is_none(),
             "a comment-only value (serde null) must not be spanned as the value"
         );
-        assert_eq!(oracle(content).get("key"), Some(&serde_json::Value::Null));
+        assert_eq!(
+            serde_map(content).get("key"),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     /// #2 CORRUPTION: a blank-line-interrupted fold folds to `hello\nworld` in
@@ -1350,7 +1353,7 @@ mod locator_matrix_tests {
     /// NOT — `serde_yaml` keeps `<<` as a literal key whose value is the aliased
     /// mapping (verified: keys = `["<<", "defaults", "name"]`, `<<` → `{x: 1}`),
     /// and norn's entire data model is that raw parse (`extract_frontmatter` never
-    /// calls `apply_merge`). So the oracle-driven locator follows serde: `<<` is a
+    /// calls `apply_merge`). So the locator follows serde: `<<` is a
     /// normal mapping-valued field — refused for `set` (`value_range` None) and
     /// removable as its own line — exactly consistent with what `validate`/`find`
     /// see. Nothing is silently dropped, because in norn's model there are no
@@ -1360,7 +1363,7 @@ mod locator_matrix_tests {
     #[test]
     fn bug7_merge_key_follows_serde_as_a_mapping_field() {
         let content = "---\ndefaults: &d\n  x: 1\n<<: *d\nname: y\n---\n";
-        let o = oracle(content);
+        let o = serde_map(content);
         assert!(
             o.contains_key("<<"),
             "serde_yaml keeps `<<` as a literal key (no auto-merge)"
@@ -1374,7 +1377,7 @@ mod locator_matrix_tests {
         assert_eq!(
             &content[merge.line_range.clone()],
             "<<: *d\n",
-            "remove is line-scoped and consistent with the oracle"
+            "remove is line-scoped and consistent with serde"
         );
         assert!(find(&s, "name").is_some());
     }
@@ -1386,7 +1389,7 @@ mod locator_matrix_tests {
     fn bug8_divergent_double_quoted_key_emits_no_wrong_span() {
         let content = "---\n\"\\x41\": v\n---\n";
         let s = spans(content);
-        let o = oracle(content);
+        let o = serde_map(content);
         let keys: Vec<&str> = o.keys().map(String::as_str).collect();
         // Whatever serde's decoded key is, we never emit a span under a name that
         // is not one of serde's keys (which would splice bytes serde reads
@@ -1467,7 +1470,7 @@ mod locator_matrix_tests {
     #[test]
     fn key_escape_collision_refuses_both_ambiguous_keys() {
         let content = "---\n\"\\x61\": v\nx61: w\n---\n";
-        let o = oracle(content);
+        let o = serde_map(content);
         // Precondition: serde sees two distinct keys, `a` and `x61`.
         assert!(
             o.contains_key("a") && o.contains_key("x61"),
@@ -1495,7 +1498,7 @@ mod locator_matrix_tests {
     #[test]
     fn unlocatable_serde_key_refuses_whole_document() {
         let content = "---\ntitle: hi\n\"\\x61\": 1\n---\n";
-        let o = oracle(content);
+        let o = serde_map(content);
         assert!(
             o.contains_key("a") && o.contains_key("title"),
             "precondition: serde sees keys {:?}",
@@ -1518,7 +1521,7 @@ mod locator_matrix_tests {
     #[test]
     fn collision_plus_wellformed_field_refuses_whole_document() {
         let content = "---\n\"\\x61\": v\nx61: w\nkeep: z\n---\n";
-        let o = oracle(content);
+        let o = serde_map(content);
         assert!(
             o.contains_key("a") && o.contains_key("x61") && o.contains_key("keep"),
             "precondition: serde keys {:?}",
@@ -1542,7 +1545,7 @@ mod locator_matrix_tests {
     #[test]
     fn quote_aware_absorb_does_not_expose_interior_flow_map_key() {
         let content = "---\ntitle: hi\nmeta: {\na: \"}\",\nnext: 1\n}\nnext: 2\n---\n";
-        let o = oracle(content);
+        let o = serde_map(content);
         assert!(
             o.contains_key("title") && o.contains_key("meta") && o.contains_key("next"),
             "precondition: serde keys {:?}",
@@ -1573,7 +1576,7 @@ mod locator_matrix_tests {
     #[test]
     fn quote_aware_absorb_v2_phantom_leaves_serde_key_unlocatable() {
         let content = "---\nfoo: [a,\n\"b]c\",\nbar: v]\n\"\\x62ar\": realvalue\n---\n";
-        let o = oracle(content);
+        let o = serde_map(content);
         assert!(
             o.contains_key("foo") && o.contains_key("bar"),
             "precondition: serde keys {:?}",
@@ -1596,7 +1599,7 @@ mod locator_matrix_tests {
     #[test]
     fn flow_absorb_seeds_quote_state_from_key_line() {
         let content = "---\nfoo: [\"a,\nb\", c]\ntitle: hi\n---\n";
-        let o = oracle(content);
+        let o = serde_map(content);
         assert!(
             o.contains_key("foo") && o.contains_key("title"),
             "precondition: serde keys {:?}",
@@ -1623,7 +1626,7 @@ mod locator_matrix_tests {
     #[test]
     fn flow_absorb_key_line_quote_shields_continuation_closer() {
         let content = "---\ntags: [\"a,\nb]: c\",\nphantom: v]\n\"\\x70hantom\": real\n---\n";
-        let o = oracle(content);
+        let o = serde_map(content);
         assert!(
             o.contains_key("tags") && o.contains_key("phantom"),
             "precondition: serde keys {:?}",
@@ -1645,7 +1648,7 @@ mod locator_matrix_tests {
     #[test]
     fn flow_absorb_ignores_key_line_comment() {
         let content = "---\nfoo: [ # \"x\n  a, b ]\ntitle: hi\n---\n";
-        let o = oracle(content);
+        let o = serde_map(content);
         assert!(
             o.contains_key("foo") && o.contains_key("title"),
             "precondition: serde keys {:?}",
@@ -1663,7 +1666,7 @@ mod locator_matrix_tests {
     #[test]
     fn flow_absorb_ignores_continuation_line_comment() {
         let content = "---\nfoo: [ a,\n  b, # it's\n  c ]\ntitle: hi\n---\n";
-        let o = oracle(content);
+        let o = serde_map(content);
         assert!(
             o.contains_key("foo") && o.contains_key("title"),
             "precondition: serde keys {:?}",
@@ -1700,7 +1703,7 @@ mod locator_matrix_tests {
             "---\nurl: http://x/#frag\n---\n",
         ];
         for content in corpus {
-            let o = oracle(content);
+            let o = serde_map(content);
             for span in spans(content) {
                 let Some(vr) = span.value_range.clone() else {
                     continue;

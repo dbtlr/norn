@@ -1,8 +1,7 @@
 //! `move` (one of the cascade verbs) (NRN-409).
 //!
-//! Renders the shared `ApplyReport` the donor emits (byte-faithful to
-//! `retired/src/move/route.rs`). `--format json` is the report's PRETTY
-//! serialization (with a trailing newline); records is the donor's human
+//! Renders the shared `ApplyReport`. `--format json` is the report's PRETTY
+//! serialization (with a trailing newline); records is the human
 //! summary. A refused report renders the coded `{code,message,path?}`
 //! envelope (json, pretty) or `error: <msg>` (records) and exits 2. Cascade
 //! failures (real FS errors) surface on stderr before the summary.
@@ -86,7 +85,7 @@ pub(crate) fn render_move(
     render_outcome(result, conv.writer())
 }
 
-/// Single-file move summary (donor `r#move::render_move_apply_tty`).
+/// Single-file move summary.
 fn render_move_apply_tty(
     out: &mut dyn Write,
     src: &str,
@@ -132,7 +131,7 @@ fn render_move_apply_tty(
     Ok(())
 }
 
-/// Folder move summary (donor `r#move::render_folder_apply_tty`). The headline
+/// Folder move summary. The headline
 /// reads the report's own outcome (`apply_status_label`), not `dry_run` alone,
 /// so a runtime op failure prints `move-folder failed` rather than the
 /// `applied` label a purely dry-run-keyed check would still emit.

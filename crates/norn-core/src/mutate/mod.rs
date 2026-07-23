@@ -3,7 +3,7 @@
 //! cache, returning a report. The frontmatter/body verbs (`set`/`new`/`edit`)
 //! answer with a compact wire twin; the cascade verbs
 //! (`move`/`delete`/`rewrite_wikilink`) answer with the shared
-//! [`norn_wire::ApplyReport`] the donor emits, which the owner
+//! [`norn_wire::ApplyReport`], which the owner
 //! serializes onto the wire as an opaque JSON value.
 pub mod apply;
 mod coerce;

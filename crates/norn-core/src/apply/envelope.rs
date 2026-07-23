@@ -7,10 +7,10 @@
 //!
 //! # Seam boundary (ADR 0018)
 //!
-//! The donor's full `from_anyhow` ladder downcast through the SURFACE / verb
+//! A full `from_anyhow` ladder could downcast through the SURFACE / verb
 //! error types too (`set::error::SetError`, `move`/`delete` preflight errors,
 //! `service::PostSendUncertainError`, `cache::CacheError::MutationLockTimeout`).
-//! Those are NOT re-homed here: the executor never receives them — the mutation
+//! Those are NOT handled here: the executor never receives them — the mutation
 //! lock is the owner's, and the verb-preflight refusals are coded by their verbs,
 //! which wrap the executor. This module downcasts only the types the mutation
 //! engine itself raises ([`standards::apply::ApplyError`](crate::standards::apply::ApplyError),

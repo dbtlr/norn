@@ -46,7 +46,7 @@ const MISSING_BUCKET: &str = "(missing)";
 /// OUTERMOST `--by` field is checked for a multi-field group tree — a nested
 /// field's presence would need a per-branch walk, out of scope here (a
 /// documented simplification, not a correctness bug: the outermost field is
-/// the common case and the one the donor's `--count-by` precedent covered).
+/// the common case).
 /// A zero-match count naturally produces an EMPTY `groups` map (not an
 /// all-`(missing)` one), so this never fires spuriously on `total: 0`.
 fn warn_unknown_by_count(report: &CountReport, err: &mut dyn Write) -> io::Result<()> {

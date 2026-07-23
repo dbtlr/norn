@@ -3,11 +3,9 @@
 //! its `to_params` mapping into the [`norn_wire`] vocabulary — the CLI's whole
 //! job on the request side is turning these flags into Params (ADR 0016).
 //!
-//! Help text is donor-exact (NRN-329): the doc comments below reproduce the
-//! retired `src/cli.rs` `FilterArgs` / `SortPaginateArgs` verbatim so the custom
-//! help renderer's output is matched per the help parity case. clap derives
-//! the flag help from the doc comment and strips its single trailing period —
-//! the oracle relies on exactly that, so the periods here are load-bearing.
+//! Help text is declared via the doc comments below. clap derives the flag help
+//! from the doc comment and strips its single trailing period, so the periods
+//! here are load-bearing: they produce the intended `-h` text.
 
 use clap::Args;
 use norn_wire::{FilterParams, SortPaginateParams};
@@ -177,7 +175,7 @@ pub struct SortPaginateArgs {
     // self-id is dropped here. clap resets the loser, so exactly one of the pair
     // reaches the wire (no ambiguity for the consuming verb): `--limit 5
     // --no-limit` is unlimited, `--no-limit --limit 5` is 5. The user-facing help
-    // stays oracle-exact — the doctrine note lives here, not in `--help`.
+    // stays terse — this doctrine note lives here, not in `--help`.
     #[arg(
         long,
         value_name = "N",

@@ -3,7 +3,7 @@
 //! [`DocumentQuery`] is the SQL-agnostic predicate model: a bag of typed
 //! frontmatter / path / date / body / link predicates a `find` / `count` /
 //! `get` invocation asks for. It carries *what* to match, never *how*. The
-//! matching itself — SQL emission over the EAV cache (the donor's
+//! matching itself — SQL emission over the EAV cache (the
 //! `json_path_for` JSON-path escaping, `documents_matching`, the string
 //! membership machinery) and the Rust post-passes — belongs to the cache
 //! engine and is a deliberate seam: this module builds and shapes queries;
@@ -25,8 +25,8 @@
 //!   string-membership SQL, the path-glob post-pass) is the cache-engine port.
 //! - **`links_to` resolution** — [`filter_args::build_document_query`] leaves
 //!   `DocumentQuery::links_to` empty; resolving a `--links-to TARGET` string to a
-//!   vault path needs the warm cache + target resolution (the donor's
-//!   `resolve_links_to`) and ports with the read verbs.
+//!   vault path needs the warm cache + target resolution and ports with the
+//!   read verbs.
 //! - **Sort / paging execution** — the wire carrier ([`norn_wire::SortPaginateParams`])
 //!   already exists; ORDER BY emission and offset/limit slicing are the cache /
 //!   verb port, not predicate shaping.

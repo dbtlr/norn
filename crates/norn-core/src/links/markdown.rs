@@ -1,11 +1,10 @@
-//! Markdown-link extraction — the link-producing half of the donor's
-//! `parse_commonmark` pass.
+//! Markdown-link extraction — the link-producing half of the commonmark pass.
 //!
-//! The donor walked the `pulldown-cmark` event stream once to collect both
-//! headings and `[text](url)` / `![alt](url)` links. Heading (and slug) parsing
-//! is text-layer syntax and now lives in `norn_frontmatter::heading`; this module
-//! keeps only the link half, which is part of the link *model* — it produces
-//! resolution-bearing [`Link`] records that later match to documents.
+//! Walking the `pulldown-cmark` event stream once collects both headings and
+//! `[text](url)` / `![alt](url)` links. Heading (and slug) parsing is text-layer
+//! syntax and lives in `norn_frontmatter::heading`; this module keeps only the
+//! link half, which is part of the link *model* — it produces resolution-bearing
+//! [`Link`] records that later match to documents.
 
 use crate::domain::{Link, LinkKind, LinkSourceArea, LinkSourceContext, LinkStatus, SourceSpan};
 use camino::Utf8Path;
@@ -16,8 +15,8 @@ use super::target::{is_local_file_target, is_local_markdown_target, split_and_de
 /// Extract every local Markdown link and image embed from a document body.
 ///
 /// `content` is the whole document and `body_start` the byte offset of `body`
-/// within it, so the recorded [`SourceSpan`] is absolute in the file (matching the
-/// donor). `[text](url)` links become [`LinkKind::Markdown`]; `![alt](url)` images
+/// within it, so the recorded [`SourceSpan`] is absolute in the file.
+/// `[text](url)` links become [`LinkKind::Markdown`]; `![alt](url)` images
 /// become [`LinkKind::Embed`]. External and same-note targets are skipped.
 pub fn parse_markdown_links(
     source_path: &Utf8Path,

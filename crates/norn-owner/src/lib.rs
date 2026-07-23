@@ -11,7 +11,7 @@
 //! `norn __norn-owner --socket <path> --vault-root <path> --ttl-secs <n>
 //! [--build <fp>] [--config <path>]`. That argv shape is an internal contract between the client
 //! (which builds it) and this crate (which parses it); it is deliberately NOT a
-//! clap subcommand, so it never touches the CLI grammar or the parity oracle.
+//! clap subcommand, so it never touches the CLI grammar.
 //! The bin calls [`run_if_owner_mode`] before `norn_cli::run`; a non-owner argv
 //! returns `None` and normal CLI dispatch proceeds.
 

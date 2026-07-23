@@ -1,6 +1,6 @@
 //! The `apply` execute seam: execute an already-reviewed `MigrationPlan`.
 //!
-//! Ported from the donor `apply::{run_direct, route}` (ADR 0018). Unlike the
+//! Unlike the
 //! other cascade verbs, `apply` does NOT synthesize a plan from a handful of
 //! arguments — the CLI has already read the plan source (file or stdin), detected
 //! its format, and parsed it into a `MigrationPlan` in the client-side preamble (a
@@ -186,7 +186,7 @@ mod tests {
     // "decodable-but-wrong-shape" plan value can no longer be constructed and
     // handed to `execute`; a genuine wire-shape fault fails frame deserialization
     // at the owner's read loop, before this seam. The client-side preamble still
-    // refuses a malformed/schema-mismatched plan source byte-identically.
+    // refuses a malformed/schema-mismatched plan source before the wire.
 
     /// A multi-op plan with two `{{seq}}` `create_document` ops allocates
     /// sequentially under one apply (the seq-alloc fold-in machinery): with an

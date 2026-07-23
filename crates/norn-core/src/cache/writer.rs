@@ -3,7 +3,7 @@
 //!
 //! # Full build (ADR 0003)
 //!
-//! [`full_build`](Cache::full_build) is the donor `Cache::rebuild` shape: walk
+//! [`full_build`](Cache::full_build): walk
 //! the vault via [`crate::graph::build_index_with_options`], clear every table,
 //! reinsert every document/file/link/heading/block-id/diagnostic and the EAV
 //! rows, then `ANALYZE document_fields` so the planner has real cardinalities.
@@ -31,9 +31,9 @@
 //! terminal publish) re-reads each affected file, requires the re-read hash to
 //! equal the parsed document's expected hash, and takes the committed
 //! `(mtime,size)` from that same stable observation — aborting with
-//! [`CacheError::IncrementSourceDrift`] on mismatch. The donor's broader
-//! `PublicationAuthority` (channel/symlink/excluded-subtree re-proof) is gone;
-//! the load-bearing parsed-hash re-proof stays.
+//! [`CacheError::IncrementSourceDrift`] on mismatch. A broader publication
+//! authority (channel/symlink/excluded-subtree re-proof) is intentionally not
+//! implemented; the load-bearing parsed-hash re-proof is what stays.
 //!
 //! # Chunked mutation increments (ADR 0013 / 0014, DORMANT here)
 //!

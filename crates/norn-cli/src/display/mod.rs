@@ -13,7 +13,7 @@
 //!   tty/piped default policy.
 //! - [`Output`] and its views — the value each verb returns.
 //! - [`Sink`] (stdout, styled record primitives) and [`Conversation`] (stderr,
-//!   the oracle-parity `note:` / `warning:` annotations).
+//!   the `note:` / `warning:` annotations).
 //! - [`Presenter`] / [`Diagnostic`] — the single stderr `norn:` diagnostic path.
 
 mod conversation;

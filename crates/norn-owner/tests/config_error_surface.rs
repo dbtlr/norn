@@ -5,7 +5,7 @@
 //! shutdown (exit 0), so a resummon re-reads a fixed config immediately rather
 //! than reconnecting to a stale-error owner for the whole idle TTL.
 //!
-//! The oracle (v0.48.1) surfaces the same class as, on stderr, exit 1:
+//! The CLI surfaces the same error class as, on stderr, exit 1:
 //!
 //!   invalid config <abs>/.norn/config.yaml: unknown field `bogus`, expected …
 //!
@@ -31,7 +31,7 @@ fn bad_config_warm_up_rejects_the_client_then_eager_reaps() {
     let vault_tmp = tempfile::TempDir::new().unwrap();
     let vault_root = Utf8PathBuf::from_path_buf(vault_tmp.path().to_path_buf()).unwrap();
     // A present-but-invalid config: a well-formed-YAML file with an unknown
-    // top-level field — the schema-invalid class the oracle rejects.
+    // top-level field, which the config schema rejects.
     std::fs::create_dir_all(vault_root.join(".norn").as_std_path()).unwrap();
     std::fs::write(
         vault_root.join(".norn/config.yaml").as_std_path(),
@@ -94,10 +94,10 @@ fn bad_config_warm_up_rejects_the_client_then_eager_reaps() {
     }
 
     let line = rejected_message.expect("the bad-config owner must reject the ping, not go away");
-    // The rejection carries the oracle-shaped config message verbatim.
+    // The rejection carries the config-error message verbatim.
     assert!(
         line.contains("invalid config "),
-        "expected the oracle config-error message, got {line:?}"
+        "expected the config-error message, got {line:?}"
     );
     assert!(
         line.contains("unknown field `bogus`"),

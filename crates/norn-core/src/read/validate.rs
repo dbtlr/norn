@@ -1,6 +1,6 @@
 //! The `validate` verb's execute seam (the 0016 Params/execute/Report vocabulary).
 //!
-//! Ported from the donor `Command::Validate` arm (ADR 0018). Validate is
+//! Validate is
 //! READ-ONLY: it loads the warm graph, runs the standards [`engine`] over it,
 //! triage-filters the findings, and returns them plus the run counts and the
 //! pre-rendered `--summary` JSON body — no repair, no mutation. Those live in a
@@ -15,8 +15,8 @@
 //! # Exit-code signal
 //!
 //! `has_errors` is computed over the WHOLE index before triage filtering, so a
-//! `--code`/`--severity` narrow never changes the process exit code — it mirrors
-//! the donor's `exit_code_for(&index)`, which reads the unfiltered graph.
+//! `--code`/`--severity` narrow never changes the process exit code: the signal
+//! reads the unfiltered graph.
 
 use anyhow::Result;
 
@@ -40,9 +40,9 @@ pub fn execute(
     let default_config = VaultConfig::default();
     let config = config.unwrap_or(&default_config);
 
-    // Compile the config's path patterns ONCE per request (the donor's
-    // uncompiled fallback re-parsed every rule glob per document — the accidental
-    // quadratic this pre-compile avoids). Routes through the single
+    // Compile the config's path patterns ONCE per request (an uncompiled path
+    // re-parses every rule glob per document — the accidental quadratic this
+    // pre-compile avoids). Routes through the single
     // `compile_config` path shared with `parse_config_compiled`.
     let source_path = cache.vault_root().join(".norn/config.yaml");
     let compiled = match compile_config(config, &source_path) {
@@ -53,7 +53,7 @@ pub fn execute(
     let mut index = cache.load_graph_index()?;
 
     // Non-verbose (the default) strips graph-diagnostic `detail` to the concise
-    // coded form — the donor `trim_diagnostics`. `has_errors` reads severity,
+    // coded form. `has_errors` reads severity,
     // which concise preserves, so the exit signal is unaffected by the trim.
     if !params.verbose {
         for document in &mut index.documents {

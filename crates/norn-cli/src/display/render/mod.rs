@@ -4,11 +4,9 @@
 //! for its verb plus whatever helpers only that verb needs. [`shared`] holds
 //! the handful of helpers more than one verb module reaches for.
 //!
-//! The renderers here are pinned to the donor CLI's output by the parity
-//! suite: the `find` / `get` projections run through the shared
-//! `output::projection` ladder; `count` / `describe` / `vault list` reproduce
-//! their bespoke text unstyled (they never resolved a palette in the donor,
-//! and their output is pinned by the parity cases).
+//! The renderers here: the `find` / `get` projections run through the shared
+//! `output::projection` ladder; `count` / `describe` / `vault list` emit
+//! their bespoke text unstyled (they never resolve a palette).
 
 pub(crate) mod apply;
 pub(crate) mod count;

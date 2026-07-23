@@ -54,3 +54,14 @@ The rewrite settled the crate boundary for end-user contract types, recorded her
 - **A crate edge must carry real code.** A dependency declared only to reference another crate's `CONTRACT` const — with no type or function actually used across it — is a manifest lie and comes out. The `norn-mcp → norn-core` edge was exactly such a CONTRACT-const-only edge and was removed.
 
 An engine method that needs `norn-core` internals cannot ride on a `norn-wire` type; it becomes a free function or extension in `norn-core` (the coded-error envelope constructors are the example).
+
+## Amendment — 2026-07-23: live-tree comments speak in present-tense code facts
+
+The parity harness, the divergence ledger, and the `retired/` donor tree are load-bearing *during* the rewrite — but they are point-in-time validation instruments, not durable authorities a reader of the live tree needs. Recorded here as the standing doctrine:
+
+- **A comment states the constraint or fact in present-tense code-and-principle terms** — what the contract IS and why it holds — never who or what once validated it. "This field set IS the wire contract (the `plan_hash` is its `canonical_hash()`)" earns its place; "pinned by the delete plan parity case" and "byte-identical to the donor" do not.
+- **Provenance belongs to git history and ADRs.** ADR references are durable decision records and stay. Harness / oracle / donor / ledger / `retired/`-tree citations, and PD-ledger ids used as rationale, do not — they answer "who once checked this?", a question git and ADRs already answer. A task id survives only where it marks genuinely pending work, never as historical attribution.
+- **Byte-identity framing is banned even as a factual description.** A clean refusal leaves the vault *unchanged*; two paths produce *identical* output. Say that.
+- **Reviews enforce it; the guard test is the forcing function.** `crates/norn-cli/tests/comment_truth_guard.rs` scans every live crate's whole tree (`src/`, `tests/`, and `benches/`) for the authority needles and fails on a match, with an explicit (and, by design, empty) allowlist for genuinely operational references. The one-time sweep that brought the tree to zero is NRN-450.
+
+This doctrine flips at graduation only in that `retired/` and the harness cease to exist; the present-tense rule for live-tree comments is permanent.

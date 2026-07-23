@@ -7,7 +7,7 @@
 //!
 //! The tools are split into two `#[tool_router]` blocks — `read_router` (the read
 //! tools) and `mutate_router` (the mutation tools) — merged by [`McpServer::new`]
-//! into one served surface, mirroring the donor's structure.
+//! into one served surface.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

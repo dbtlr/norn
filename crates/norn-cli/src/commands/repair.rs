@@ -44,8 +44,8 @@ pub fn run(args: &RepairArgs, global: &GlobalArgs) -> Result<Output, Diagnostic>
 }
 
 /// The active triage/confidence/skip-reason flags, reconstructed as an argv
-/// fragment for the `--format report` apply-guidance lines (donor
-/// `collect_active_filter_flags`). Glob-shaped values are single-quoted so the
+/// fragment for the `--format report` apply-guidance lines. Glob-shaped values
+/// are single-quoted so the
 /// printed command copy-pastes safely.
 fn active_filter_flags(args: &RepairArgs) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
