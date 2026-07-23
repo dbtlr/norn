@@ -383,7 +383,11 @@ const VALIDATE_CASES: &[Case] = &[
 /// counts + operation/skip tallies); `--plan` emits the plan.
 ///
 /// A `--plan --format json` case is NOT included — the raw serialized
-/// `MigrationPlan` is unpinnable for THREE independent reasons, any one fatal:
+/// `MigrationPlan` is unpinnable for THREE independent reasons, any one fatal
+/// (NRN-415 closed a fourth, adjacent instability — `MigrationPlan::canonical_hash`
+/// no longer depends on `generated_at`, so `plan_hash` itself is rerun-stable —
+/// but that fix does not reach the raw plan bytes rendered here, which still
+/// carry the field verbatim, so reason (a) below is unaffected by it):
 ///   (a) it carries a wall-clock `generated_at`, so its bytes are not
 ///       rerun-stable — the oracle self-check DRIFTS on it (the same class of
 ///       limitation that keeps bare `validate --format json` out of the suite);
