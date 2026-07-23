@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::error::ConfigError;
-use crate::registry::{RegisteredVault, Registry};
+use crate::registry::{canonicalize_best_effort, RegisteredVault, Registry};
 
 /// Environment variable naming a vault root directly (a root path;
 /// empty/whitespace ignored). Consulted after the repo binding.
@@ -74,11 +74,14 @@ pub enum ResolvedVia {
 /// resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
-    /// The vault root. Canonical for registry-resolved vias (`ExplicitName`,
-    /// `RepoBinding`, `ReverseLookup`); for the direct-path vias
-    /// (`ExplicitPath`, `NornRootEnv`) it is grounded against the cwd but NOT
-    /// canonicalized — those paths may not exist yet, so callers must not
-    /// assume symlink-free, `..`-free form here.
+    /// The vault root. Canonical for every via: registry-resolved vias
+    /// (`ExplicitName`, `RepoBinding`, `ReverseLookup`) already store a
+    /// canonical root; the direct-path vias (`ExplicitPath`, `NornRootEnv`)
+    /// are grounded against the cwd and then canonicalized by `ground`
+    /// (NRN-415), and `UnregisteredCwd` canonicalizes its cwd directly. A root
+    /// that does not exist yet cannot canonicalize, so it falls back to the
+    /// grounded-but-uncanonicalized form in that case — callers must not
+    /// assume symlink-free, `..`-free form when the root may not exist.
     pub root: PathBuf,
     pub name: Option<String>,
     pub via: ResolvedVia,
@@ -149,10 +152,7 @@ impl Registry {
 
         // 6. Unregistered cwd — the ephemeral outcome, not an error.
         Ok(Resolved {
-            root: input
-                .cwd
-                .canonicalize()
-                .unwrap_or_else(|_| input.cwd.clone()),
+            root: canonicalize_best_effort(&input.cwd),
             name: None,
             via: ResolvedVia::UnregisteredCwd,
         })
@@ -179,13 +179,24 @@ fn ensure_live(vault: &RegisteredVault) -> Result<(), ConfigError> {
     }
 }
 
-/// Absolute paths pass through; relative ones are grounded against `cwd`.
+/// Absolute paths pass through; relative ones are grounded against `cwd`. The
+/// grounded path is then canonicalized (resolving `..`, `.`, and symlinks —
+/// e.g. macOS's `/tmp` → `/private/tmp`) so every downstream consumer (an
+/// applied plan's `vault_root`, the owner's runtime dir derivation, a
+/// registry reverse lookup) sees one canonical spelling of the root
+/// regardless of how `-C`/`NORN_ROOT` spelled it (NRN-415). A root that does
+/// not exist yet cannot canonicalize (`fs::canonicalize` requires the path to
+/// exist) — that case falls back to the grounded-but-uncanonicalized path,
+/// preserving today's error surface: resolution itself never fails on a
+/// missing root, the same as before this canonicalization was added; a
+/// missing-root's user-facing classification is a separate concern (NRN-414).
 fn ground(cwd: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
+    let grounded = if path.is_absolute() {
         path.to_path_buf()
     } else {
         cwd.join(path)
-    }
+    };
+    canonicalize_best_effort(&grounded)
 }
 
 /// The subset of a repo binding this crate models. Unknown keys are tolerated.
@@ -267,7 +278,10 @@ mod tests {
         };
         let resolved = reg.resolve(&input).unwrap();
         assert_eq!(resolved.via, ResolvedVia::ExplicitPath);
-        assert_eq!(resolved.root, explicit);
+        // Canonical (NRN-415): the explicit path is grounded then
+        // canonicalized, so on macOS a `/tmp`-rooted tempdir compares against
+        // its `/private/...` canonical form, not the raw spelling.
+        assert_eq!(resolved.root, explicit.canonicalize().unwrap());
     }
 
     #[test]
@@ -390,14 +404,29 @@ mod tests {
             .unwrap();
 
         // cwd is inside the registered vault, but NORN_ROOT points elsewhere.
+        // A never-created tempdir child stays missing on every host, so the
+        // canonicalize fallback (grounded path, uncanonicalized) is what this
+        // pins; an existing NORN_ROOT canonicalizes like any other root.
+        let missing_root = tmp.path().join("never-created-env-root");
         let input = ResolveInput {
             cwd: vault.clone(),
-            norn_root_env: Some("/env/root".into()),
+            norn_root_env: Some(missing_root.to_str().unwrap().into()),
             ..ResolveInput::new(vault.clone())
         };
         let resolved = reg.resolve(&input).unwrap();
         assert_eq!(resolved.via, ResolvedVia::NornRootEnv);
-        assert_eq!(resolved.root, PathBuf::from("/env/root"));
+        assert_eq!(resolved.root, missing_root);
+
+        let existing_root = tmp.path().join("existing-env-root");
+        fs::create_dir_all(&existing_root).unwrap();
+        let input = ResolveInput {
+            cwd: vault.clone(),
+            norn_root_env: Some(existing_root.to_str().unwrap().into()),
+            ..ResolveInput::new(vault.clone())
+        };
+        let resolved = reg.resolve(&input).unwrap();
+        assert_eq!(resolved.via, ResolvedVia::NornRootEnv);
+        assert_eq!(resolved.root, existing_root.canonicalize().unwrap());
     }
 
     #[test]
@@ -482,5 +511,50 @@ mod tests {
             reg.resolve(&ResolveInput::new(cwd)).unwrap_err(),
             ConfigError::StaleEntry { .. }
         ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ground_resolves_through_a_constructed_symlink() {
+        // A symlink built deliberately for this test, not the incidental
+        // macOS `/tmp` -> `/private/tmp` symlink the other tests ride on
+        // (NRN-415 fix round) — pins `ground`'s canonicalization itself
+        // rather than a platform accident.
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let target = tmp.path().join("real-target");
+        fs::create_dir_all(&target).unwrap();
+        let link = tmp.path().join("via-symlink");
+        symlink(&target, &link).unwrap();
+
+        let input = ResolveInput {
+            explicit_path: Some(link),
+            ..ResolveInput::new(tmp.path())
+        };
+        let resolved = reg.resolve(&input).unwrap();
+        assert_eq!(resolved.via, ResolvedVia::ExplicitPath);
+        assert_eq!(resolved.root, target.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn ground_normalizes_dot_component() {
+        // `/path/./sub` must normalize to the same canonical form as
+        // `/path/sub` — pins normalization on every platform, independent of
+        // any incidental symlink in the tempdir's own path.
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        let dotted = tmp.path().join(".").join("sub");
+
+        let input = ResolveInput {
+            explicit_path: Some(dotted),
+            ..ResolveInput::new(tmp.path())
+        };
+        let resolved = reg.resolve(&input).unwrap();
+        assert_eq!(resolved.via, ResolvedVia::ExplicitPath);
+        assert_eq!(resolved.root, sub.canonicalize().unwrap());
     }
 }
