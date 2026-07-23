@@ -109,8 +109,14 @@ pub(crate) fn docs_parsed_count() -> usize {
 /// applies: a hidden component, symlink component, missing file, or
 /// `files.ignore` match contributes nothing (a delete or a now-excluded path
 /// simply drops out). A graph-visible file overlays its [`VaultFile`]; a Markdown
-/// file additionally overlays its parsed [`Document`]. Link resolution runs over
-/// the whole composite because a single changed file can flip the resolution of
+/// file additionally overlays its parsed [`Document`]. One physical file yields
+/// exactly one emitted document, matching the full walk's dirent-based
+/// enumeration: on a case-insensitive or otherwise normalizing filesystem, two
+/// distinct affected-path strings (e.g. `Note.md` and `note.md`) can name the
+/// same file on disk, so each affected path's canonical form is checked against
+/// every canonical form already emitted this overlay and the repeat is skipped —
+/// the first spelling emitted (sorted order) wins. Link resolution runs over the
+/// whole composite because a single changed file can flip the resolution of
 /// links that point at it from anywhere in the vault.
 pub(crate) fn overlay_changed_paths(
     baseline: &mut GraphIndex,
@@ -123,12 +129,24 @@ pub(crate) fn overlay_changed_paths(
         .documents
         .retain(|doc| !affected.contains(&doc.path));
     baseline.files.retain(|file| !affected.contains(&file.path));
+    let mut emitted_canonical: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
     for rel in &affected {
-        if let Some((file, document)) = parse_graph_path(root, rel, options) {
-            baseline.files.push(file);
-            if let Some(document) = document {
-                baseline.documents.push(document);
+        let Some((file, document)) = parse_graph_path(root, rel, options) else {
+            continue;
+        };
+        // A rel that fails to canonicalize does not exist as a distinct physical
+        // file (parse_graph_path already required it to be a regular file, so
+        // this is essentially unreachable); treat it as ungrouped rather than
+        // dropping it.
+        if let Ok(canonical) = fs::canonicalize(root.join(rel).as_std_path()) {
+            if !emitted_canonical.insert(canonical) {
+                continue;
             }
+        }
+        baseline.files.push(file);
+        if let Some(document) = document {
+            baseline.documents.push(document);
         }
     }
     baseline.documents.sort_by(|a, b| a.path.cmp(&b.path));
@@ -773,5 +791,47 @@ mod tests {
         let concise = concise_diagnostics(&doc);
         assert_eq!(concise[0].detail, None);
         assert_eq!(concise[0].code, "read-failed");
+    }
+
+    #[test]
+    fn overlay_changed_paths_dedups_two_spellings_of_one_physical_file() {
+        // Filesystem-independent duplicate-identity case: a literal duplicate
+        // entry and a distinct, non-normalized spelling (`./same.md`) of the
+        // SAME rel. Both resolve to one physical file on any platform — no
+        // case-insensitive filesystem required — so this exercises exactly the
+        // collision a case-insensitive/normalizing filesystem also produces
+        // from two differently-cased rels (e.g. `Note.md` and `note.md`).
+        let (_tmp, root) = vault();
+        write(&root, "same.md", "# Same\n");
+        let mut baseline = build_index(&root).unwrap();
+
+        let changed = vec![
+            Utf8PathBuf::from("same.md"),
+            Utf8PathBuf::from("same.md"),
+            Utf8PathBuf::from("./same.md"),
+        ];
+        overlay_changed_paths(&mut baseline, &root, &changed, &IndexOptions::default());
+
+        let matching_docs: Vec<_> = baseline
+            .documents
+            .iter()
+            .filter(|document| document.path.as_str().ends_with("same.md"))
+            .collect();
+        assert_eq!(
+            matching_docs.len(),
+            1,
+            "one physical file must overlay exactly one document regardless of how many \
+             affected-path spellings named it, got {matching_docs:?}"
+        );
+
+        let matching_files = baseline
+            .files
+            .iter()
+            .filter(|file| file.path.as_str().ends_with("same.md"))
+            .count();
+        assert_eq!(
+            matching_files, 1,
+            "one physical file must overlay exactly one VaultFile too"
+        );
     }
 }

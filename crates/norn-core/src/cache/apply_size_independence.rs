@@ -130,6 +130,20 @@ fn apply_refresh_scope_is_vault_size_independent() {
         large_parsed <= SCOPE_CEILING,
         "large-vault apply parsed {large_parsed} docs for {CHANGED_PATHS} changed path(s)"
     );
+    // Floor: the tally must have counted AT LEAST the changed set. Without this,
+    // a parse that moved off the thread the tally instruments (e.g. onto a
+    // background worker) would read 0 and the ceiling checks above would pass
+    // vacuously, silently certifying a broken measurement as scope-independence.
+    assert!(
+        small_parsed >= CHANGED_PATHS,
+        "small-vault apply parsed {small_parsed} docs, below the {CHANGED_PATHS} changed-path \
+         floor — the parse tally likely ran off the measuring thread"
+    );
+    assert!(
+        large_parsed >= CHANGED_PATHS,
+        "large-vault apply parsed {large_parsed} docs, below the {CHANGED_PATHS} changed-path \
+         floor — the parse tally likely ran off the measuring thread"
+    );
 
     // Bounded ratio: the ~7.5x larger vault must not inflate the parse count.
     assert!(
