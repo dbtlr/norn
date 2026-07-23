@@ -130,7 +130,7 @@ fn render_find_records(sink: &mut Sink<'_>, view: &FindView) -> io::Result<()> {
 }
 
 /// Warn for unresolved `--col` tokens: an unknown dot-facet, or a bare field
-/// absent from every match (donor `find::warn_unknown_cols`, `warning:` prefix).
+/// absent from every match (`warning:` prefix).
 fn warn_unknown_cols_find(
     report: &FindReport,
     cols: &[String],

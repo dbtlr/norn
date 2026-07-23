@@ -260,12 +260,11 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
         Command::Service(_) => presenter.not_yet_ported("service"),
         Command::Audit(_) => presenter.not_yet_ported("audit"),
         Command::Manpage => presenter.not_yet_ported("manpage"),
-        // The intentionally-new registry namespace (ADR 0017): no oracle, and
-        // the first namespace that EXECUTES — resolve the ambient config home
-        // and hand it the effective cwd, then render the returned Output through
-        // the same single `emit` seam. The ambient-resolution failures stay
-        // headline-only diagnostics (a bad config home / cwd has no useful
-        // recovery hint), byte-identical to the donor.
+        // The registry namespace (ADR 0017), the first namespace that EXECUTES —
+        // resolve the ambient config home and hand it the effective cwd, then
+        // render the returned Output through the same single `emit` seam. The
+        // ambient-resolution failures stay headline-only diagnostics (a bad
+        // config home / cwd has no useful recovery hint).
         Command::Vault(cmd) => {
             let result = match ConfigHome::from_env() {
                 Ok(home) => match effective_cwd(&cli.global) {

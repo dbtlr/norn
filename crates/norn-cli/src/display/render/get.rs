@@ -35,14 +35,14 @@ pub(crate) fn render_get(
         Format::Paths => render_get_paths(&view.report),
         Format::Records => {
             // NRN-362: get records render through the SAME resolved palette find
-            // uses — threaded in via the sink. Piped (parity, pipelines) it is
-            // off → byte-unchanged.
+            // uses — threaded in via the sink. Piped (pipelines) it is
+            // off → bytes unchanged.
             render_get_records(&view.report, sink.palette(), sink.width(), &view.cols)
         }
         Format::Markdown => unreachable!("markdown handled above"),
     };
     let result: io::Result<i32> = (|| {
-        // Exactly one trailing newline (donor `emit`).
+        // Exactly one trailing newline.
         if text.ends_with('\n') {
             write!(sink.writer(), "{text}")?;
         } else {
@@ -68,7 +68,7 @@ pub(crate) fn render_get(
     render_outcome(result, conv.writer())
 }
 
-/// `--format markdown`: the exact source bytes (donor `emit_markdown`). Errors
+/// `--format markdown`: the exact source bytes. Errors
 /// unless exactly one document resolved; `--col`/`--section` are ignored (warned).
 fn render_get_markdown(view: &GetView, out: &mut dyn Write, conv: &mut Conversation<'_>) -> i32 {
     let result: io::Result<i32> = (|| {
@@ -173,8 +173,8 @@ fn render_get_records(
     String::from_utf8(buf).unwrap_or_default()
 }
 
-/// Warn for `--col` tokens that won't resolve (donor `get::warn_unknown_cols`,
-/// `warn:` prefix — distinct from find's `warning:`).
+/// Warn for `--col` tokens that won't resolve (`warn:` prefix — distinct from
+/// find's `warning:`).
 fn warn_unknown_cols_get(
     cols: &[String],
     report: &GetReport,
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn get_records_colorize_under_an_enabled_palette() {
         // NRN-362: get honors the resolved palette. Color on → ANSI escapes;
-        // off (the piped / parity path) → bytes unchanged.
+        // off (the piped path) → bytes unchanged.
         let report = GetReport {
             records: vec![get_record("a.md", json!({"title": "A"}))],
             notes: vec![],

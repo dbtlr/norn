@@ -1,12 +1,10 @@
-//! Record-block line writers, ported from the donor `src/output/primitives.rs`
-//! (retired tree). `find --format records` needs [`count_line`],
+//! Record-block line writers. `find --format records` needs [`count_line`],
 //! [`record_block`], and [`separator`]; `validate --format records` adds
-//! [`status_headline`], [`severity_tally`], and [`tally_group`] (ported with the
-//! first verb that emits them, NRN-381).
+//! [`status_headline`], [`severity_tally`], and [`tally_group`].
 //!
-//! Non-tty parity note: the parity harness runs piped, so the palette is `off`
-//! (every style a no-op) and `term_width` is 80 with separators capped at 60 —
-//! see the `find` render layer for where those are set.
+//! Non-tty note: a piped run has the palette `off` (every style a no-op) and
+//! `term_width` 80 with separators capped at 60 — see the `find` render layer
+//! for where those are set.
 
 use std::io::{self, Write};
 
@@ -142,7 +140,7 @@ pub fn tally_group(
 /// ` {→} {after}` when an `after` value is given (a set: `status: draft → done`;
 /// a remove/push/pop passes `after = None` and folds its own suffix into
 /// `before`). ASCII-mode-aware via the arrow glyph, and styled through the
-/// palette — with the palette OFF (the piped / parity path) the bytes are the
+/// palette — with the palette OFF (the piped path) the bytes are the
 /// plain `  {label}: {before} → {after}`, so styling never perturbs a pipeline.
 pub fn change_line(
     out: &mut dyn Write,
@@ -363,7 +361,7 @@ mod tests {
         assert_eq!(s.chars().filter(|c| *c == '─').count(), 60);
     }
 
-    // ── status_headline (ported from the donor primitives suite) ─────────────
+    // ── status_headline ──────────────────────────────────────────────────────
 
     #[test]
     fn status_headline_writes_text_then_ellipsis_and_newline() {
@@ -390,7 +388,7 @@ mod tests {
         assert!(s.contains("x…"));
     }
 
-    // ── severity_tally (ported from the donor primitives suite) ──────────────
+    // ── severity_tally ─────────────────────────────────────────────────────────
 
     #[test]
     fn severity_tally_pure_pass_shows_only_check_row() {
@@ -445,7 +443,7 @@ mod tests {
         assert!(!s.contains("1 errors"));
     }
 
-    // ── tally_group (ported from the donor primitives suite) ─────────────────
+    // ── tally_group ────────────────────────────────────────────────────────────
 
     #[test]
     fn tally_group_emits_header_and_rows() {

@@ -22,7 +22,7 @@ pub(crate) fn render_set(
     let report = &view.report;
 
     // JSON: the compact whole-report serialization is the contract (struct field
-    // order, donor-faithful). Structured on refusal too (ADR 0016 unifies the
+    // order). Structured on refusal too (ADR 0016 unifies the
     // surfaces on the structured envelope).
     if format == Format::Json {
         let result: io::Result<i32> = (|| {
@@ -74,7 +74,7 @@ pub(crate) fn render_set(
                 ascii,
             )?;
         }
-        // Warnings block (donor: on STDOUT): `  warnings: N` then `    - <short>`
+        // Warnings block (on STDOUT): `  warnings: N` then `    - <short>`
         // for the first three, then `    … (K more)`.
         if !report.warnings.is_empty() {
             let shorts: Vec<String> = report.warnings.iter().map(warning_short).collect();
@@ -92,7 +92,7 @@ pub(crate) fn render_set(
 }
 
 /// One `set` change line, dispatched by the normalized op. An absent prior value
-/// (a field added by an upsert) renders its `before` as `<none>` (donor).
+/// (a field added by an upsert) renders its `before` as `<none>`.
 fn render_frontmatter_change(
     sink: &mut Sink<'_>,
     change: &FrontmatterChange,

@@ -1,12 +1,9 @@
-//! Build a [`HelpModel`] from a [`clap::Command`]. Ported from the donor
-//! `src/help/extract.rs` (retired tree).
+//! Build a [`HelpModel`] from a [`clap::Command`].
 //!
-//! Two deliberate changes versus the donor:
-//! - The globals filter also drops `is_hide_set()` args. The donor had no
-//!   hidden global; the rewrite marks the new-world `--vault` global (ADR
-//!   0017) hidden so it parses but never pollutes the GLOBAL OPTIONS block —
-//!   keeping every command's help matched per the help parity case, which
-//!   predates `--vault`. No donor command has a hidden global, so this is a no-op there.
+//! Two things to note:
+//! - The globals filter drops `is_hide_set()` args. The `--vault` global (ADR
+//!   0017) is marked hidden so it parses but never pollutes the GLOBAL OPTIONS
+//!   block, keeping every command's help output stable.
 //! - The `live_examples_fn` extras hook is gone (see `model.rs`).
 
 use clap::Command;

@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::display::conversation::Conversation;
 use crate::display::{Format, EXIT_OK, EXIT_USAGE};
 
-/// `""` for a count of 1, `"s"` otherwise — the donor pluralization.
+/// `""` for a count of 1, `"s"` otherwise.
 pub(super) fn plural(n: usize) -> &'static str {
     if n == 1 {
         ""
@@ -28,8 +28,7 @@ pub(super) fn noun(n: usize, singular: &'static str, plural: &'static str) -> &'
 }
 
 /// Render a value for a change line: a bare string prints unquoted (`draft`),
-/// every other JSON value prints its compact JSON (`3`, `["a","b"]`, `null`) —
-/// the donor `value_repr`.
+/// every other JSON value prints its compact JSON (`3`, `["a","b"]`, `null`).
 pub(super) fn value_repr(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -48,14 +47,12 @@ pub(super) fn mutation_exit(outcome: MutationOutcome) -> i32 {
 }
 
 /// Render the non-fatal mutation warnings (count + the first three messages, with
-/// a `… (N more)` tail) — the donor truncation, on the stderr conversation.
-/// The mutation warning's records short form — the donor `warning_label`
-/// vocabulary, computed per `code` from the unified `{ code, field, message }`
-/// envelope (the JSON shape is a deliberate divergence; see
-/// `norn_wire::MutationWarning`). Kinds whose records line differs from the
-/// message (`unknown-field`, `force-bypass`, `title-ignored`) are rebuilt from
-/// `code` + `field`; the rest print their `message` verbatim (it already equals
-/// the donor label — e.g. the wikilink warnings).
+/// a `… (N more)` tail) on the stderr conversation.
+/// The mutation warning's records short form, computed per `code` from the
+/// unified `{ code, field, message }` envelope (see `norn_wire::MutationWarning`).
+/// Kinds whose records line differs from the message (`unknown-field`,
+/// `force-bypass`, `title-ignored`) are rebuilt from `code` + `field`; the rest
+/// print their `message` verbatim (e.g. the wikilink warnings).
 pub(super) fn warning_short(w: &MutationWarning) -> String {
     let field = w.field.as_deref().unwrap_or("");
     match w.code.as_str() {
@@ -72,7 +69,7 @@ pub(super) fn apply_report_exit(report: &ApplyReport) -> i32 {
     report.exit_code()
 }
 
-/// Render a refused cascade `ApplyReport` (the donor `emit_refusal`): the pretty
+/// Render a refused cascade `ApplyReport`: the pretty
 /// coded error envelope on stdout for `--format json`, else `error: <message>` on
 /// stderr. Exit 2.
 pub(super) fn render_apply_refusal(
@@ -108,7 +105,7 @@ pub(super) fn render_apply_refusal(
     }
 }
 
-/// The truncation note both `paths` and `jsonl` emit on stderr (donor parity).
+/// The truncation note both `paths` and `jsonl` emit on stderr.
 pub(super) fn truncation_note(report: &FindReport) -> String {
     format!(
         "note: showing {} of {} (--no-limit for all)",
@@ -149,7 +146,7 @@ pub(super) fn apply_status_label(report: &ApplyReport) -> &'static str {
 }
 
 /// The counts + preconditions + per-op + warnings body of the generic
-/// apply-report records block (donor `apply::render_records`), independent of
+/// apply-report records block, independent of
 /// the headline: shared by `apply`'s own full report render and by
 /// [`render_cascade_failed`], the truthful fallback the other cascade verbs
 /// render when their own report's outcome is `failed`.
@@ -204,7 +201,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn f5_warning_short_rebuilds_the_donor_records_labels_per_code() {
+    fn f5_warning_short_rebuilds_the_records_labels_per_code() {
         let uf = MutationWarning {
             code: "unknown-field".into(),
             field: Some("status".into()),

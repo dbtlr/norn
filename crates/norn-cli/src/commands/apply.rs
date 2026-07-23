@@ -1,7 +1,7 @@
 //! `norn apply <plan>` — execute an already-reviewed `MigrationPlan`.
 //!
-//! Ported from the donor `apply::{preamble, run_direct, route}` (ADR 0018). The
-//! client-side PREAMBLE runs before any wire activity: read the plan source (file
+//! The client-side PREAMBLE runs before any wire activity (ADR 0018): read the
+//! plan source (file
 //! or stdin `-`), detect its format (`.yaml`/`.yml` → YAML, else JSON; stdin
 //! defaults JSON; `--input-format` overrides), and parse it into a
 //! `MigrationPlan`. A malformed plan or an unreadable source is an operational
@@ -35,9 +35,7 @@ pub fn run(args: &ApplyArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> 
 /// directly with `confirm: true` after a TTY 'y' answer. This is a SECOND
 /// routed request, not a replay of the cached forecast: the plan is re-read
 /// and re-executed fresh under the owner's lock, exactly as a direct `--yes`
-/// invocation would (the donor's own `apply` prompt worked the same way — it
-/// prompted, then executed the SAME in-process `ApplyContext`, which the
-/// routed owner boundary here re-runs instead of replaying).
+/// invocation would.
 pub(crate) fn run_confirm(
     args: &ApplyArgs,
     global: &GlobalArgs,
@@ -77,8 +75,8 @@ pub(crate) fn run_confirm(
 }
 
 /// Read the plan source: stdin for `-`, else the file at `plan_path`. A read
-/// failure is an operational diagnostic (the donor's `{e:#}` chain, rewrapped
-/// through the one error seam).
+/// failure is an operational diagnostic (the `{e:#}` error chain, through the
+/// one error seam).
 fn read_plan_source(plan_path: &str) -> Result<String, Diagnostic> {
     if plan_path == "-" {
         let mut buf = String::new();
@@ -99,8 +97,7 @@ fn read_plan_source(plan_path: &str) -> Result<String, Diagnostic> {
 }
 
 /// Determine the input format from an explicit override, else the path extension
-/// (`.yaml`/`.yml` → YAML), else JSON (also the stdin default). Donor
-/// `apply::determine_input_format`.
+/// (`.yaml`/`.yml` → YAML), else JSON (also the stdin default).
 fn determine_input_format(plan_path: &str, override_fmt: Option<InputFormat>) -> InputFormat {
     if let Some(fmt) = override_fmt {
         return fmt;
@@ -117,7 +114,7 @@ fn determine_input_format(plan_path: &str, override_fmt: Option<InputFormat>) ->
 }
 
 /// Parse a `MigrationPlan` from raw text in the given format. A parse failure is
-/// an operational diagnostic naming the source. Donor `apply::parse_plan`.
+/// an operational diagnostic naming the source.
 fn parse_plan(raw: &str, fmt: InputFormat, source: &str) -> Result<MigrationPlan, Diagnostic> {
     match fmt {
         InputFormat::Yaml => serde_yaml::from_str(raw).map_err(|e| {

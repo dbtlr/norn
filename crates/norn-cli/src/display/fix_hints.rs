@@ -1,5 +1,5 @@
-//! Hardcoded fix-hint lookup keyed by finding code, ported from the donor
-//! `src/validate/fix_hints.rs`. Not every code needs a hint (the message + code
+//! Hardcoded fix-hint lookup keyed by finding code. Not every code needs a hint
+//! (the message + code
 //! are sometimes enough to point an operator at the fix); the `validate
 //! --format records` full view appends one under each finding when present.
 

@@ -110,7 +110,7 @@ fn unique_doc_count(findings: &[Value]) -> usize {
 }
 
 /// `--summary` records: status headline, severity tally, and (when non-empty) a
-/// by-code tally group. Donor `render_records_summary`.
+/// by-code tally group.
 fn render_validate_summary(
     sink: &mut Sink<'_>,
     findings: &[Value],
@@ -130,7 +130,7 @@ fn render_validate_summary(
 
     if !findings.is_empty() {
         writeln!(sink.writer())?;
-        // by-code counts, sorted by code (donor `summarize().codes`, a BTreeMap).
+        // by-code counts, sorted by code (a BTreeMap).
         let mut by_code: std::collections::BTreeMap<&str, usize> =
             std::collections::BTreeMap::new();
         for f in findings {
@@ -146,7 +146,7 @@ fn render_validate_summary(
 
 /// Full records: status headline; then per-code groups (first-occurrence order)
 /// with a severity glyph header, each finding's path + message + optional fix
-/// hint; then a pass/shown footer. Donor `render_records_full`.
+/// hint; then a pass/shown footer.
 fn render_validate_full(
     sink: &mut Sink<'_>,
     findings: &[Value],
@@ -226,8 +226,7 @@ fn render_validate_full(
     Ok(())
 }
 
-/// Group findings by `code`, preserving first-occurrence code order (donor
-/// `group_by_code`).
+/// Group findings by `code`, preserving first-occurrence code order.
 fn group_by_code(findings: &[Value]) -> Vec<(&str, Vec<&Value>)> {
     let mut order: Vec<&str> = Vec::new();
     let mut map: std::collections::BTreeMap<&str, Vec<&Value>> = std::collections::BTreeMap::new();
@@ -253,10 +252,9 @@ mod tests {
     use crate::output::palette::Palette;
     use serde_json::json;
 
-    // ── validate records renderers (ported from the donor `validate::render`
-    // suite, adapted to the Value-fed `render_validate_full` / `_summary` seam;
-    // input order is fixed per test so the renderers are exercised
-    // deterministically despite the engine's order nondeterminism) ────────────
+    // ── validate records renderers: input order is fixed per test so the
+    // renderers are exercised deterministically despite the engine's order
+    // nondeterminism ──────────────────────────────────────────────────────────
 
     /// A minimal finding value — the renderers read only these four fields.
     fn vf(code: &str, severity: &str, path: &str, message: &str) -> Value {
@@ -269,7 +267,7 @@ mod tests {
     }
 
     /// Three warning findings across three docs: two share a code (grouping),
-    /// one is a second code — the donor `sample_findings` shape.
+    /// one is a second code.
     fn sample_validate_findings() -> Vec<Value> {
         vec![
             vf(

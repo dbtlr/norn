@@ -2,9 +2,8 @@
 //!
 //! Bare `norn repair` prints the findings summary; `--plan` emits the
 //! `MigrationPlan` (report / json / paths) and/or writes it to `--out`. The exit
-//! code is `has_diagnostic_errors` for both — the donor's `exit_code_for`,
-//! independent of the triage filters (a `--code` narrow never masks a vault
-//! error). Byte-faithful to the donor `repair::{run_summary, emit_plan, render}`.
+//! code is `has_diagnostic_errors` for both, independent of the triage filters
+//! (a `--code` narrow never masks a vault error).
 
 use std::io::{self, Write};
 
@@ -48,7 +47,7 @@ pub(crate) fn render_repair(
 
 /// Bare `norn repair`: a read-only findings summary — total findings across the
 /// vault, a per-code tally, and how many the planner would turn into operations
-/// vs. skip. Donor `repair::run_summary`.
+/// vs. skip.
 fn write_repair_summary(
     out: &mut dyn Write,
     report: &norn_wire::RepairReport,
@@ -76,7 +75,7 @@ fn write_repair_summary(
 
 /// `norn repair --plan`: `--out` writes the JSON plan to a file (independent of
 /// `--format`); `--format` governs stdout (report / json / paths), silent when
-/// `--out` is set without `--format`. Donor `repair::emit_plan`.
+/// `--out` is set without `--format`.
 fn emit_repair_plan(
     sink: &mut Sink<'_>,
     plan: &MigrationPlan,
@@ -85,8 +84,8 @@ fn emit_repair_plan(
     is_tty: bool,
 ) -> io::Result<()> {
     // The verbatim `--format json` / `--out` bytes: the plan crosses typed now, so
-    // the CLI serializes it here (byte-identical to the owner's former
-    // `to_string_pretty`, same function over the same plan). Serialization of an
+    // the CLI serializes it here — the same `to_string_pretty` over the same plan,
+    // so the bytes match what the owner would emit. Serialization of an
     // in-memory MigrationPlan cannot fail.
     let plan_json = serde_json::to_string_pretty(plan)
         .expect("MigrationPlan must always serialize (matches canonical_hash)");
@@ -123,7 +122,7 @@ fn emit_repair_plan(
 }
 
 /// The vault-relative paths a single op touches — frontmatter/link ops carry
-/// `path`; structural moves carry `src`/`dst`. Donor `render::op_paths`.
+/// `path`; structural moves carry `src`/`dst`.
 fn repair_op_paths(op: &norn_wire::MigrationOp) -> Vec<String> {
     let mut paths = Vec::new();
     if let Some(obj) = op.fields.as_object() {
@@ -137,7 +136,7 @@ fn repair_op_paths(op: &norn_wire::MigrationOp) -> Vec<String> {
 }
 
 /// `--format paths`: every affected vault-relative path, sorted + deduplicated,
-/// one per line. Donor `render::write_paths`.
+/// one per line.
 fn write_repair_paths(out: &mut dyn Write, plan: &MigrationPlan) -> io::Result<()> {
     let paths: std::collections::BTreeSet<String> =
         plan.operations.iter().flat_map(repair_op_paths).collect();
@@ -149,7 +148,7 @@ fn write_repair_paths(out: &mut dyn Write, plan: &MigrationPlan) -> io::Result<(
 
 /// `--format report`: the human decision-support summary — a headline, an
 /// operations-by-kind tally, footnotes, a skipped-by-reason tally, top affected
-/// files, and filter-aware apply guidance. Donor `render::write_report`.
+/// files, and filter-aware apply guidance.
 fn write_repair_report(
     sink: &mut Sink<'_>,
     plan: &MigrationPlan,
@@ -228,7 +227,7 @@ fn write_repair_report(
         }
     }
 
-    // Apply guidance — filter-aware (donor).
+    // Apply guidance — filter-aware.
     let confidence_active = filter_flags.iter().any(|f| f == "--confidence");
     let skip_reason_active = filter_flags.iter().any(|f| f == "--skip-reason");
     let has_actionable = n_ops > 0 || !plan.skipped.is_empty();
@@ -273,7 +272,7 @@ fn write_repair_report(
 }
 
 /// A `norn repair --plan <flags> <trailing>` command string for the report's
-/// apply-guidance lines. Donor `render::build_command`.
+/// apply-guidance lines.
 fn repair_command(filter_flags: &[String], trailing: &[&str]) -> String {
     let mut parts: Vec<String> = vec!["norn".into(), "repair".into(), "--plan".into()];
     parts.extend(filter_flags.iter().cloned());
@@ -281,9 +280,8 @@ fn repair_command(filter_flags: &[String], trailing: &[&str]) -> String {
     parts.join(" ")
 }
 
-/// User-facing prose for a stable skip-reason code (donor
-/// `repair::skip_reasons::prose_for`). One point of evolution: a new
-/// `SkipReason::code()` variant adds a matching arm here.
+/// User-facing prose for a stable skip-reason code. One point of evolution: a
+/// new `SkipReason::code()` variant adds a matching arm here.
 fn skip_reason_prose(code: &str) -> &'static str {
     match code {
         "missing-default" => "missing field has no configured deterministic default",

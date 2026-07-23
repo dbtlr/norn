@@ -4,7 +4,7 @@
 //! The command maps its clap `Args` into [`DescribeParams`], summons the owner
 //! (which serves the structure from its retained config and the data summary
 //! from the warm cache), and returns the [`DescribeReport`] as an [`Output`]
-//! (NRN-370). The display layer renders it byte-faithfully to the donor: `text`
+//! (NRN-370). The display layer renders it: `text`
 //! (default) is the count/summary block; `json` is the whole struct serialized.
 
 use norn_wire::DescribeParams;

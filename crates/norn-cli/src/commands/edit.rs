@@ -10,15 +10,15 @@
 //!
 //! Apply-vs-forecast is the same client-side ladder as `set`/`new`: `--dry-run`
 //! forecasts, `--yes` applies, everything else forecasts (a safe implicit
-//! dry-run). A human at a TTY additionally gets the donor's preview → prompt →
-//! apply conversation (NRN-389), wired through [`run_confirm`] and
+//! dry-run). A human at a TTY additionally gets the preview → prompt →
+//! apply conversation, wired through [`run_confirm`] and
 //! `display::emit_mutation`.
 //!
 //! # A CLI-side resolution error is a coded refusal, not a `norn:` diagnostic
 //!
 //! An op-resolution failure (a sugar conflict, malformed edits JSON, an empty
-//! array) is rendered as `error: <message>` on stderr at exit 2 — the donor's
-//! edit-refusal surface — so it is carried as a locally-built refused
+//! array) is rendered as `error: <message>` on stderr at exit 2 — edit's
+//! refusal surface — so it is carried as a locally-built refused
 //! [`EditReport`] rather than a [`Diagnostic`] (which would use the `norn:`
 //! prefix and the operational exit). Every edit refusal — CLI-side or owner-side
 //! preflight — thus renders through the one refusal branch in `render_edit`.
@@ -112,8 +112,8 @@ enum Payload {
     ReplaceAll,
 }
 
-/// Desugar the single-op flags into a one-element ops array (donor
-/// `edit::sugar::desugar`). `Ok(None)` — no op flag, fall back to the canonical
+/// Desugar the single-op flags into a one-element ops array.
+/// `Ok(None)` — no op flag, fall back to the canonical
 /// source; `Ok(Some(vec![op]))` — exactly one op flag with a valid payload;
 /// `Err(msg)` — more than one op flag, an op flag combined with the canonical
 /// source, or a missing/unconsumed payload.

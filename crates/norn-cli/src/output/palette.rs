@@ -2,8 +2,7 @@
 //!
 //! [`Palette`] maps the norn-brand token set to `anstyle::Style` values.
 //! Use [`resolve`] to get a palette calibrated to the current environment
-//! (TTY detection, `NO_COLOR`, `CLICOLOR_FORCE`). Ported from the donor
-//! `src/output/palette.rs` (retired tree) for the custom help renderer.
+//! (TTY detection, `NO_COLOR`, `CLICOLOR_FORCE`).
 
 use std::io::IsTerminal;
 
@@ -18,8 +17,8 @@ use crate::output::env_flag;
 /// false`) every style is `Style::new()` (a no-op). When color is enabled
 /// the styles carry ANSI-256 color codes drawn from the norn-brand token set.
 /// Trimmed to the tokens the custom help renderer consumes (`bone`, `thread`,
-/// `moss`, `dim`, `section`); the donor's full brand set (`amber`, `rune`,
-/// `label`, `header`) ports with the record-block primitives, not the help
+/// `moss`, `dim`, `section`); the fuller brand set (`amber`, `rune`,
+/// `label`, `header`) lives with the record-block primitives, not the help
 /// surface.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {

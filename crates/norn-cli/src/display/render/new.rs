@@ -13,14 +13,14 @@ use crate::display::EXIT_OK;
 
 use super::shared::{mutation_exit, value_repr, warning_short};
 
-/// A `new`-report key/value line: `{label:<9}  {value}` (value column at 11), the
-/// donor's aligned block. Unstyled (like `count` / `describe`) so the piped /
-/// parity bytes are exact.
+/// A `new`-report key/value line: `{label:<9}  {value}` (value column at 11), an
+/// aligned block. Unstyled (like `count` / `describe`) so the piped bytes are
+/// deterministic.
 fn new_kv(out: &mut dyn Write, label: &str, value: &str) -> io::Result<()> {
     writeln!(out, "{label:<9}  {value}")
 }
 
-/// The provenance detail for a created field (donor `report.rs`): the source
+/// The provenance detail for a created field: the source
 /// label as the core already set it (`operator-flag` / `operator-flag-json` /
 /// `schema-default` — one vocabulary, no remap), plus the crediting rule when a
 /// default carried one: `schema-default, task-rule`.
@@ -39,15 +39,14 @@ pub(crate) fn render_new(
 ) -> i32 {
     let report = &view.report;
 
-    // JSON: pretty-printed with ALPHABETICAL keys (the donor serialized through a
+    // JSON: pretty-printed with ALPHABETICAL keys (serialized through a
     // `serde_json::Value`, whose map is a BTreeMap without `preserve_order`).
     if format == Format::Json {
         let result: io::Result<i32> = (|| {
             let value = serde_json::to_value(report)?;
-            // The donor's `new --format json` emits NO trailing newline (unlike
-            // `set --format json`, which does) — a known cross-verb JSON framing
-            // inconsistency, unified by NRN-408 (one trailing-newline rule);
-            // current behavior held here (`write!`, not `writeln!`) until then.
+            // `new --format json` emits NO trailing newline, unlike
+            // `set --format json` (`writeln!`) — a cross-verb JSON framing
+            // inconsistency preserved here (`write!`, not `writeln!`).
             write!(sink.writer(), "{}", serde_json::to_string_pretty(&value)?)?;
             Ok(mutation_exit(report.outcome))
         })();
@@ -82,7 +81,7 @@ pub(crate) fn render_new(
         if report.frontmatter_created.is_empty() {
             new_kv(sink.writer(), "fields", "none")?;
         } else {
-            // Field-name sub-column padding (donor report.rs max_field_w): every
+            // Field-name sub-column padding (`max_field_w`): every
             // `field` cell is left-padded to the widest name so the `=` aligns.
             let field_w = report
                 .frontmatter_created

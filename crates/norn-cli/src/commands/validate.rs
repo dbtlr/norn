@@ -48,7 +48,7 @@ pub fn run(args: &ValidateArgs, global: &GlobalArgs) -> Result<Output, Diagnosti
         summary: args.summary,
         format: FormatChoice {
             explicit: args.format.map(Format::from),
-            // Donor default: records on a tty, jsonl when piped.
+            // Default: records on a tty, jsonl when piped.
             spec: FormatSpec {
                 tty: Format::Records,
                 piped: Format::Jsonl,

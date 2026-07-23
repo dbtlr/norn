@@ -11,7 +11,7 @@
 //! forecasts; `--yes` applies; everything else forecasts (a safe implicit
 //! dry-run). Agents drive `--yes` / `--dry-run` / `--format json` and are
 //! fully served by that ladder alone; a human at a TTY additionally gets the
-//! donor's preview → prompt → apply conversation (NRN-389), wired through
+//! preview → prompt → apply conversation, wired through
 //! [`run_confirm`] and `display::emit_mutation`.
 
 use std::io::Read;

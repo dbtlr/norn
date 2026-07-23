@@ -1,9 +1,8 @@
 //! Glyph rendering — UTF-8 symbols with ASCII fallbacks.
 //!
-//! Trimmed port of the donor `src/output/glyphs.rs` (retired tree): only the
-//! glyphs the custom help renderer references are carried over — the live-example
-//! marker and its separator dot. `use_ascii()` probes the environment for the
-//! caller's preferred mode.
+//! Only the glyphs the custom help renderer references are carried: the
+//! live-example marker and its separator dot. `use_ascii()` probes the
+//! environment for the caller's preferred mode.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Glyph {
@@ -60,8 +59,8 @@ pub fn use_ascii() -> bool {
 /// and an all-unset environment yields `""` (→ ASCII fallback).
 ///
 /// TTY-only in effect: glyph rendering only differs on an interactive terminal,
-/// and the parity harness runs piped, so this precedence is not pinnable by a
-/// parity case — hence no ledger entry, only the precedence unit tests below.
+/// so this locale precedence is exercised by the unit tests below rather than
+/// end-to-end.
 fn effective_locale() -> String {
     for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
         match std::env::var(key) {

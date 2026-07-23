@@ -109,8 +109,8 @@ pub struct ValidateView {
 /// `repair`'s renderable report plus the surface knobs. Bare `norn repair`
 /// prints the findings summary; `--plan` emits the `MigrationPlan` in the
 /// requested `format` (report / json / paths) and/or writes it to `--out`. The
-/// exit code is `report.has_diagnostic_errors` for both (the donor's
-/// `exit_code_for`), independent of the triage filters.
+/// exit code is `report.has_diagnostic_errors` for both, independent of the
+/// triage filters.
 pub struct RepairView {
     pub report: norn_wire::RepairReport,
     /// `--plan`: emit the `MigrationPlan` instead of the bare findings summary.
@@ -149,8 +149,8 @@ pub struct NewMutationView {
 
 /// `edit`'s renderable report. Only `records` and `json` are valid. A refused
 /// report (`outcome = refused`) renders as `error: <message>` on stderr at exit
-/// 2 for BOTH formats (the donor's pre-existing format-independent refusal
-/// asymmetry — unlike `set`/`new`, which emit a structured JSON refusal); an
+/// 2 for BOTH formats (a format-independent refusal, unlike `set`/`new`, which
+/// emit a structured JSON refusal); an
 /// applied/forecast report renders at exit 0.
 pub struct EditMutationView {
     pub report: EditReport,
@@ -158,8 +158,8 @@ pub struct EditMutationView {
 }
 
 /// `move`'s renderable report. The cascade verbs render the shared
-/// [`ApplyReport`] the donor emits: `--format json` is its pretty serialization;
-/// records is the donor's single/folder move summary. A refused report renders
+/// [`ApplyReport`]: `--format json` is its pretty serialization;
+/// records is the single/folder move summary. A refused report renders
 /// the coded error envelope (json) or `error: <msg>` (records) and exits 2.
 pub struct MoveMutationView {
     pub report: ApplyReport,
@@ -189,7 +189,7 @@ pub struct RewriteWikilinkView {
 }
 
 /// `apply`'s renderable report. Unlike the other cascade verbs, `apply` renders
-/// the donor's generic apply-report summary (`apply <status>` + counts +
+/// the generic apply-report summary (`apply <status>` + counts +
 /// preconditions + per-op + warnings): `--format json` is the report's pretty
 /// serialization; records is that summary. A refused report renders the coded
 /// error envelope (envelope-only refusals) or, for an owner-set precondition

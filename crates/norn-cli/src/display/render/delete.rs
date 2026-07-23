@@ -1,8 +1,7 @@
 //! `delete` (one of the cascade verbs) (NRN-409).
 //!
-//! Renders the shared `ApplyReport` the donor emits (byte-faithful to
-//! `retired/src/delete/route.rs`). `--format json` is the report's PRETTY
-//! serialization (with a trailing newline); records is the donor's human
+//! Renders the shared `ApplyReport`. `--format json` is the report's PRETTY
+//! serialization (with a trailing newline); records is the human
 //! summary. A refused report renders the coded `{code,message,path?}`
 //! envelope (json, pretty) or `error: <msg>` (records) and exits 2. Cascade
 //! failures (real FS errors) surface on stderr before the summary.
@@ -58,7 +57,7 @@ pub(crate) fn render_delete(
     render_outcome(result, conv.writer())
 }
 
-/// Records-format delete output (donor `delete::render_delete_records`). A
+/// Records-format delete output. A
 /// runtime op failure (`outcome = failed`) renders the truthful shared
 /// `render_cascade_failed` headline instead of the applied/preview wording
 /// below — nothing here can tell "deleted" from "failed to delete" once a real
@@ -104,7 +103,7 @@ fn render_delete_records(
     Ok(())
 }
 
-/// The delete summary (donor `delete::render_delete_apply_tty`).
+/// The delete summary.
 #[allow(clippy::too_many_arguments)]
 fn render_delete_apply_tty(
     out: &mut dyn Write,

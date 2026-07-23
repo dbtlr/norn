@@ -1,11 +1,11 @@
 //! `norn get` — one or more documents in detail, over the shared sort/paging
 //! surface. Same command-module pattern as `find`.
 //!
-//! Grammar + help text are donor-exact (NRN-329). The owner resolves the targets
+//! The owner resolves the targets
 //! and returns each document's full facet set (frontmatter, headings, the three
 //! link sets, hash/stem, and body when asked); `run` returns the `GetReport` as an
 //! [`Output`], and the display layer projects `--col` / `--all-cols` / `--section`
-//! / `--format` byte-faithfully to the donor (NRN-370). `--format markdown` prints
+//! / `--format` (NRN-370). `--format markdown` prints
 //! the exact source bytes the owner read from disk (ADR 0014).
 
 use clap::Args;

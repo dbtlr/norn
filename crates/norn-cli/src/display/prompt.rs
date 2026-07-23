@@ -1,22 +1,13 @@
-//! The interactive TTY confirm prompt (NRN-389): preview → prompt → apply.
+//! The interactive TTY confirm prompt: preview → prompt → apply.
 //!
-//! Ported from the donor `prompt::confirm` (`retired/src/prompt.rs`): read one
-//! line, true on a case-insensitive "y"/"yes", false on anything else —
-//! including EOF and garbage. The donor spread this across several
-//! verb-specific call sites with drifted details: `set`/`edit`/`move`/`delete`
-//! prompted `"Proceed? [y/N] "`, `new` prompted `"Apply? [y/N] "`, `apply`
-//! prompted `"Apply migration plan? [y/N] "`, `rewrite-wikilink` prompted
-//! `"Apply wikilink rewrite? [y/N] "` — and `new` alone gated on
-//! `stdout.is_terminal()` where every other verb gated on `stdin.is_terminal()`
-//! (a prompt READS from stdin, so stdin is the correct terminal to test; the
-//! donor's `new` gate reads as an oversight, not a deliberate choice).
+//! Read one line, true on a case-insensitive "y"/"yes", false on anything else
+//! — including EOF and garbage.
 //!
-//! This port standardizes on ONE prompt string and ONE gate (`stdin`) across
-//! all seven mutation verbs that write (`set`/`new`/`edit`/`move`/`delete`/
-//! `rewrite-wikilink`/`apply` — `repair` stays read-only, and `init` is not
-//! yet ported) (NRN-389 uniformity) — a deliberate redesign call the parity
-//! harness cannot observe either way, since this text is TTY-only and never
-//! appears in piped output.
+//! ONE prompt string and ONE gate (`stdin`) across every mutation verb that
+//! writes (`set`/`new`/`edit`/`move`/`delete`/`rewrite-wikilink`/`apply`;
+//! `repair` stays read-only). The gate is `stdin.is_terminal()`, not stdout: a
+//! prompt READS from stdin, so stdin is the terminal to test. This text is
+//! TTY-only and never appears in piped output.
 
 use std::io::{self, BufRead, Write};
 
@@ -40,9 +31,8 @@ pub(crate) fn confirm<R: BufRead, W: Write>(
     Ok(answer == "y" || answer == "yes")
 }
 
-/// Wire [`confirm`] to the real process stdin/stderr, with the donor's
-/// leading blank line separating the already-rendered forecast from the
-/// prompt itself.
+/// Wire [`confirm`] to the real process stdin/stderr, with a leading blank line
+/// separating the already-rendered forecast from the prompt itself.
 pub(crate) fn confirm_interactive() -> io::Result<bool> {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
