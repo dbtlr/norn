@@ -468,6 +468,7 @@ mod tests {
             returned: 1,
             starts_at: 1,
             truncated: true,
+            has_diagnostic_errors: false,
         };
         let mut err = Vec::new();
         let mut conv = Conversation::new(&mut err);
@@ -486,6 +487,7 @@ mod tests {
             returned: 0,
             starts_at: 0,
             truncated: false,
+            has_diagnostic_errors: false,
         };
         let mut err = Vec::new();
         let mut conv = Conversation::new(&mut err);
@@ -504,6 +506,7 @@ mod tests {
             returned: 1,
             starts_at: 1,
             truncated: false,
+            has_diagnostic_errors: false,
         };
         let mut err = Vec::new();
         let mut conv = Conversation::new(&mut err);
