@@ -218,8 +218,15 @@ pub fn execute(
     let mut warnings = built.warnings;
     if applied {
         if let Some(created_path) = path.as_deref() {
-            let extra =
-                post_create_validate(cfg, &compiled, &vault_root, config, created_path, &warnings);
+            let extra = post_create_validate(
+                cfg,
+                &compiled,
+                &vault_root,
+                config,
+                &index,
+                created_path,
+                &warnings,
+            );
             warnings.extend(extra);
         }
     }
@@ -244,16 +251,17 @@ pub fn execute(
 
 // ── Post-create validate (NRN-390) ──────────────────────────────────────────
 
-/// Run the general validate engine over a fresh, filesystem-scanned index and
-/// surface any finding for the newly-created document that `build_create`'s
-/// hand-computed warnings (missing-required/unknown-field/wikilink/
-/// stem-collision) don't already cover.
+/// Run the general validate engine over the created document and surface any
+/// finding for it that `build_create`'s hand-computed warnings
+/// (missing-required/unknown-field/wikilink/stem-collision) don't already cover.
 ///
-/// A plain filesystem walk (not the SQL cache) is the only way to see the new
-/// file at this point: the write already landed under `apply_migration_plan`,
-/// but the owner's cache increment for `touched_paths` commits later, so a
-/// filesystem walk is forced for this one-shot pass. Alias checks are skipped
-/// (`alias_field: None`) for this pass.
+/// Scope is the created path, not the vault: the warm pre-create graph
+/// (`baseline`) is overlaid with just the new file re-read from disk (the write
+/// already landed under `apply_migration_plan`; the owner's cache increment for
+/// `touched_paths` commits later). Link resolution runs across the composite so
+/// the new document's own links resolve against the whole vault, but only the one
+/// changed path is read from disk. Findings are then filtered to the created doc.
+/// Alias checks are skipped (`alias_field: None`) for this pass.
 ///
 /// Dedup: a `RequiredFrontmatterMissing` finding whose field is already covered
 /// by a synth-phase `missing-required-field` warning is dropped and every other
@@ -263,23 +271,24 @@ pub fn execute(
 /// finding's own field when its body carries one (the unified
 /// `{code, field?, message}` envelope is richer than a flat
 /// `ValidationFinding{code,message}`).
+#[allow(clippy::too_many_arguments)]
 fn post_create_validate(
     cfg: &VaultConfig,
     compiled: &CompiledConfig,
     vault_root: &Utf8Path,
     config: Option<&VaultConfig>,
+    baseline: &GraphIndex,
     doc_path: &str,
     existing_warnings: &[MutationWarning],
 ) -> Vec<MutationWarning> {
     let index_options = super::owner_index_options(config);
-    let fresh_index = match crate::graph::build_index_with_options(vault_root, &index_options) {
-        Ok(idx) => idx,
-        // A post-write scan failure is a diagnostic-only miss here, not a
-        // create failure — the file is already on disk and the primary report
-        // stands regardless. Skip the extra findings rather than turning a
-        // successful create into an error.
-        Err(_) => return Vec::new(),
-    };
+    let mut fresh_index = baseline.clone();
+    crate::graph::overlay_changed_paths(
+        &mut fresh_index,
+        vault_root,
+        &[Utf8PathBuf::from(doc_path)],
+        &index_options,
+    );
 
     let findings =
         crate::standards::validate_with_compiled(&fresh_index, &cfg.validate, compiled, None);
