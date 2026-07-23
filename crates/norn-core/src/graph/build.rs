@@ -73,6 +73,99 @@ pub fn build_index_with_options(
     })
 }
 
+// Test-only, PER-THREAD tally of documents parsed from disk on the current
+// thread. A full walk parses one per graph-visible Markdown file; a targeted
+// overlay parses one per changed path. The size-independence guard resets it,
+// drives an apply-increment (whose parse runs synchronously on the same thread),
+// and reads the count to prove refresh scope tracks the changed set, not the
+// vault. Thread-local so the parallel test runner's other parsers never pollute
+// the measurement.
+#[cfg(test)]
+thread_local! {
+    static DOCS_PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Reset the current thread's document-parse tally (test-only).
+#[cfg(test)]
+pub(crate) fn docs_parsed_reset() {
+    DOCS_PARSED.with(|count| count.set(0));
+}
+
+/// Read the current thread's document-parse tally (test-only).
+#[cfg(test)]
+pub(crate) fn docs_parsed_count() -> usize {
+    DOCS_PARSED.with(|count| count.get())
+}
+
+/// Overlay the freshly-parsed state of `changed_paths` onto `baseline`, then
+/// re-resolve every link across the composite graph. Only the changed paths are
+/// read from disk — every other document and file is reused from `baseline` — so
+/// the disk work is O(changed-files), not O(vault). This is the apply-time
+/// targeted-refresh primitive: a mutation that knows exactly which paths it
+/// touched refreshes only those, leaving a full walk for cold start / integrity
+/// recovery / the off-request health scan.
+///
+/// Each changed path is resolved through the SAME visibility rules the full walk
+/// applies: a hidden component, symlink component, missing file, or
+/// `files.ignore` match contributes nothing (a delete or a now-excluded path
+/// simply drops out). A graph-visible file overlays its [`VaultFile`]; a Markdown
+/// file additionally overlays its parsed [`Document`]. Link resolution runs over
+/// the whole composite because a single changed file can flip the resolution of
+/// links that point at it from anywhere in the vault.
+pub(crate) fn overlay_changed_paths(
+    baseline: &mut GraphIndex,
+    root: &Utf8Path,
+    changed_paths: &[Utf8PathBuf],
+    options: &IndexOptions,
+) {
+    let affected: std::collections::BTreeSet<Utf8PathBuf> = changed_paths.iter().cloned().collect();
+    baseline
+        .documents
+        .retain(|doc| !affected.contains(&doc.path));
+    baseline.files.retain(|file| !affected.contains(&file.path));
+    for rel in &affected {
+        if let Some((file, document)) = parse_graph_path(root, rel, options) {
+            baseline.files.push(file);
+            if let Some(document) = document {
+                baseline.documents.push(document);
+            }
+        }
+    }
+    baseline.documents.sort_by(|a, b| a.path.cmp(&b.path));
+    baseline.files.sort_by(|a, b| a.path.cmp(&b.path));
+    resolve_links(&baseline.files, &mut baseline.documents);
+}
+
+/// Parse ONE vault-relative path into its graph representation under the exact
+/// visibility rules of the full walk. Returns `None` when the path is not a
+/// graph-visible regular file — a hidden or symlink component, a missing file, a
+/// non-file, or a `files.ignore` match — so a deleted or excluded path
+/// contributes nothing. A graph-visible file yields its [`VaultFile`]; a Markdown
+/// file additionally yields its parsed [`Document`]. Links are NOT resolved here;
+/// the caller resolves across the whole overlaid graph.
+pub(crate) fn parse_graph_path(
+    root: &Utf8Path,
+    rel: &Utf8Path,
+    options: &IndexOptions,
+) -> Option<(VaultFile, Option<Document>)> {
+    if !subtree_is_reachable_by_graph_walk(root, rel) {
+        return None;
+    }
+    if is_ignored(rel, &options.ignore) {
+        return None;
+    }
+    let absolute = root.join(rel);
+    // The reachability check rejects a symlink leaf but admits a directory leaf;
+    // the full walk yields only regular files, so require one here too.
+    if !std::fs::metadata(absolute.as_std_path()).is_ok_and(|meta| meta.is_file()) {
+        return None;
+    }
+    let file = parse_file(root, &absolute);
+    let document = is_markdown(&absolute)
+        .then(|| parse_document(root, &absolute, options.alias_field.as_deref()));
+    Some((file, document))
+}
+
 /// Return the graph-visible Markdown paths at or below one vault-relative
 /// path, using the exact file walk, hidden-component, extension, and ignore
 /// semantics used by [`build_index_with_options`]. Publication verification
@@ -181,6 +274,8 @@ fn parse_document(
     absolute_path: &Utf8Path,
     alias_field: Option<&str>,
 ) -> Document {
+    #[cfg(test)]
+    DOCS_PARSED.with(|count| count.set(count.get() + 1));
     let path = absolute_path
         .strip_prefix(root)
         .unwrap_or(absolute_path)
