@@ -848,6 +848,14 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                         Ok(v) => v,
                         Err(msg) => return Ok(Err(FieldRejection::from(msg))),
                     };
+                    // A reversed range (`--since` after `--until`) can never
+                    // match an event — silently returning an empty report would
+                    // read as "no events in range" rather than "the range is
+                    // backwards". Reject it the same way as an unparseable date
+                    // (exit 1, the read-verb convention) instead of failing open.
+                    if let Err(msg) = read::validate_bounds(since, until) {
+                        return Ok(Err(FieldRejection::from(msg)));
+                    }
                     let filter = read::Filter {
                         trace: params.trace.clone(),
                         status: params.status.clone(),
@@ -1079,6 +1087,14 @@ async fn dispatch_mutation<R: Send + 'static>(
                 // once per mutation, NRN-400 review): the sweep only visits the
                 // events dir the first time a confirmed mutation lands on a day
                 // the owner has not yet swept.
+                //
+                // Deliberate bound: both `prune_events` (age) and
+                // `enforce_size_cap` (total bytes) constrain PRIOR days' files
+                // only — today's file is never removed by either, so it is
+                // unbounded by design. The store never drops a record from the
+                // day still being written; `enforce_size_cap` fires a distinct
+                // warning when today's file alone is already over the cap
+                // (retention cannot correct that by sweeping older days).
                 if mark_swept_if_new_day(&start_ts[..10]) {
                     norn_core::telemetry::store::prune_events(
                         dir,

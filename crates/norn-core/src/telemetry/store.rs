@@ -60,11 +60,23 @@ pub fn prune_events(dir: &camino::Utf8Path, retention: std::time::Duration, toda
 }
 
 /// Internal non-configurable total-size guardrail for the events dir (256 MiB).
+///
+/// Deliberate bound: this caps PRIOR days' event files only. The active
+/// day's file is never unlinked, so it is unbounded by design — the store
+/// never drops a record from the day still being written (`enforce_size_cap`
+/// below). A single day's writes exceeding the cap is a distinct, rarer
+/// condition the sweep cannot correct (see its "exceeds the size cap"
+/// warning).
 pub const EVENTS_SIZE_CAP_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Internal guardrail: if total size of event files exceeds `cap_bytes`, unlink
-/// oldest files (by filename date) until under the cap. Never unlinks `today`.
-/// Emits ONE stderr warning if anything was dropped. Best-effort.
+/// oldest files (by filename date) until under the cap. Never unlinks `today` —
+/// the size cap constrains PRIOR days only; the active day's file is unbounded
+/// by design (the store never drops a record from the day still being
+/// written). Emits ONE stderr warning if anything was dropped, and a second,
+/// distinct warning if today's file alone exceeds `cap_bytes` (in that case
+/// the sweep cannot bring total usage under the cap no matter how many prior
+/// days it drops). Best-effort.
 pub fn enforce_size_cap(dir: &camino::Utf8Path, cap_bytes: u64, today: &str) {
     let today_name = daily_file_name(today);
 
@@ -109,6 +121,22 @@ pub fn enforce_size_cap(dir: &camino::Utf8Path, cap_bytes: u64, today: &str) {
     if dropped > 0 {
         eprintln!(
             "warning: mutation event log exceeded {cap_bytes} bytes; dropped {dropped} old daily file(s)"
+        );
+    }
+
+    // Sweeping prior days can only reduce usage so far — today's file is never
+    // dropped. If today's file alone is over the cap, no amount of sweeping
+    // brings total usage under it; that is a distinct condition from "dropped
+    // some old files", so it gets its own warning even when `dropped == 0`
+    // (e.g. the events dir holds only today's file).
+    let today_size = files
+        .iter()
+        .find(|(_, path, _)| path.file_name().and_then(|n| n.to_str()) == Some(today_name.as_str()))
+        .map(|(_, _, size)| *size)
+        .unwrap_or(0);
+    if today_size > cap_bytes {
+        eprintln!(
+            "warning: todays audit file exceeds the size cap; retention never drops the active day"
         );
     }
 }

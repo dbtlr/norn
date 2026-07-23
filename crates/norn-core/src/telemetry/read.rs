@@ -206,6 +206,24 @@ fn parse_bound(s: &str, end_of_day: bool) -> Result<chrono::DateTime<chrono::Utc
     ))
 }
 
+/// Reject a reversed `--since`/`--until` range. A `since` strictly after
+/// `until` can never match an event, so letting it through would silently
+/// return an empty report — indistinguishable from "no events in range".
+/// This is a clean rejection (the same read-verb `Rejected` convention as an
+/// unparseable date), not an empty result. `since == until` (a single-instant
+/// range) and either bound absent both pass through unchanged.
+pub fn validate_bounds(
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<(), String> {
+    if let (Some(s), Some(u)) = (since, until) {
+        if s > u {
+            return Err("since is after until".to_string());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +345,33 @@ mod tests {
         assert!(until.to_rfc3339().starts_with("2026-06-01T23:59:59"));
         assert!(parse_since("garbage").is_err());
         assert!(parse_since("2026-06-22T14:00:00Z").is_ok());
+    }
+
+    #[test]
+    fn validate_bounds_rejects_since_after_until() {
+        let since = parse_since("2026-06-10").unwrap();
+        let until = parse_until("2026-06-01").unwrap();
+        let err = validate_bounds(Some(since), Some(until))
+            .expect_err("since after until must be rejected");
+        assert_eq!(err, "since is after until");
+    }
+
+    #[test]
+    fn validate_bounds_accepts_since_before_or_equal_until() {
+        let since = parse_since("2026-06-01").unwrap();
+        let until = parse_until("2026-06-10").unwrap();
+        assert!(validate_bounds(Some(since), Some(until)).is_ok());
+
+        // The same instant for both bounds is a valid single-point range.
+        let same = parse_since("2026-06-01").unwrap();
+        assert!(validate_bounds(Some(same), Some(same)).is_ok());
+    }
+
+    #[test]
+    fn validate_bounds_passes_when_either_bound_is_absent() {
+        let one = parse_since("2026-06-01").unwrap();
+        assert!(validate_bounds(Some(one), None).is_ok());
+        assert!(validate_bounds(None, Some(one)).is_ok());
+        assert!(validate_bounds(None, None).is_ok());
     }
 }

@@ -59,9 +59,16 @@ pub(crate) fn render_apply(
     let exit = apply_report_exit(report);
 
     // `--out`: write the (always-JSON, pretty) report to the file, silence stdout.
+    // The degraded-telemetry advisory is a stderr operator signal, independent
+    // of where the report body landed — `--out` redirects the payload, not the
+    // conversation channel, so it fires here exactly as it does on the records
+    // path below (never skipped just because the report went to a file).
     if let Some(out_path) = &view.out {
         let result: io::Result<i32> = (|| {
             write_report_to_out_file(out_path, report)?;
+            if report.telemetry_degraded {
+                conv.telemetry_degraded_warning()?;
+            }
             Ok(exit)
         })();
         return render_outcome(result, conv.writer());

@@ -272,7 +272,7 @@ impl McpServer {
     /// `vault.audit` — read the per-vault mutation audit trail.
     #[tool(
         name = "vault.audit",
-        description = "Read the per-vault mutation audit trail — the append-only event stream every CONFIRMED mutation appends to. Filter by trace (prefix), status, target path, and time range; newest-first, capped by limit (default 20). Returns { events: [...] } (flattened projection, or raw OTEL objects with raw:true). Read-only; an absent stream returns an empty array.",
+        description = "Read the per-vault mutation audit trail — the append-only event stream a CONFIRMED mutation appends to on a REGISTERED vault, when the durable sink is healthy (an unregistered vault keeps no durable records; a degraded write is flagged on the mutation report via telemetry_degraded). Filter by trace (prefix), status, target path, and time range; newest-first, capped by limit (default 20). Returns { events: [...] } (flattened projection, or raw OTEL objects with raw:true). Read-only; an absent stream returns an empty array.",
         output_schema = output_schema_for::<crate::tools::audit::AuditEnvelope>()
     )]
     async fn audit(

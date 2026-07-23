@@ -85,17 +85,29 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
     // first summon would decide durability by luck of addressing. A reverse
     // lookup over the canonical root answers "is this root registered?"
     // independent of the addressing.
-    let events_dir = registry
-        .reverse_lookup(&resolved.root)
-        .ok()
-        .flatten()
-        .and_then(|vault| {
+    //
+    // Fail-safe on a registry I/O or parse error: `.ok()` alone would collapse
+    // `Err` onto the same `None` as a genuinely unregistered root, silently
+    // dropping durability for a vault that IS registered — the operator would
+    // lose the audit trail with no signal. Distinguish the two: an `Err` prints
+    // one client-side warning through the closed `warning:` vocabulary and
+    // proceeds with `events_dir = None`; the mutation itself is never blocked
+    // on the registry read.
+    let events_dir = match registry.reverse_lookup(&resolved.root) {
+        Ok(found) => found.and_then(|vault| {
             norn_config::events_dir_for(
                 |key| std::env::var_os(key),
                 &resolved.root,
                 vault.logs.as_deref(),
             )
-        });
+        }),
+        Err(e) => {
+            eprintln!(
+                "warning: vault registry unreadable; audit trail disabled for this invocation ({e})"
+            );
+            None
+        }
+    };
 
     let exe = std::env::current_exe()
         .map_err(|e| Diagnostic::new(format!("cannot locate the norn executable: {e}")))?;
