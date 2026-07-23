@@ -142,6 +142,12 @@ pub fn emit<O: Write, E: Write>(
                 render::describe::render_describe(view, format, sink, conv)
             })
         }
+        Output::Audit(view) => {
+            let format = view.format.resolve(is_tty);
+            render_with(presenter, &plain, width, |sink, conv| {
+                render::audit::render_audit(view, format, sink, conv)
+            })
+        }
         Output::Validate(view) => {
             let format = view.format.resolve(is_tty);
             render_with(presenter, &styled, width, |sink, conv| {

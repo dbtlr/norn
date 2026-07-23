@@ -11,6 +11,7 @@
 
 pub mod apply;
 pub mod args;
+pub mod audit;
 pub mod count;
 pub mod delete;
 pub mod describe;

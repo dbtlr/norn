@@ -11,8 +11,8 @@
 use norn_config::RegisteredVault;
 use norn_wire::ApplyReport;
 use norn_wire::{
-    CountReport, DescribeReport, EditReport, FindReport, GetReport, NewReport, SetReport,
-    ValidateReport,
+    AuditReport, CountReport, DescribeReport, EditReport, FindReport, GetReport, NewReport,
+    SetReport, ValidateReport,
 };
 
 use super::format::FormatChoice;
@@ -29,6 +29,8 @@ pub enum Output {
     Count(CountView),
     /// `describe`: the structure + optional data summary.
     Describe(DescribeView),
+    /// `audit`: the newest-first mutation event stream.
+    Audit(AuditView),
     /// `validate`: the findings, summary body, and run counts.
     Validate(ValidateView),
     /// `repair`: the findings-derived `MigrationPlan` (bare summary or `--plan`).
@@ -124,6 +126,17 @@ pub struct RepairView {
     /// Active triage/confidence/skip-reason flags, for the report-format
     /// apply-guidance command lines.
     pub filter_flags: Vec<String>,
+}
+
+/// `audit`'s renderable report. `records` (default) is the vertical key-value
+/// block per event; `json` is the flattened array, or the raw OTEL passthrough
+/// when `raw` is set (`--raw` affects json only, ignored by records).
+pub struct AuditView {
+    pub report: AuditReport,
+    /// `--raw`: emit the stored OTEL objects verbatim instead of the flattened
+    /// projection (json format only).
+    pub raw: bool,
+    pub format: FormatChoice,
 }
 
 /// `vault list`'s registered vaults.

@@ -261,7 +261,11 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
         },
         Command::Serve(_) => presenter.not_yet_ported("serve"),
         Command::Service(_) => presenter.not_yet_ported("service"),
-        Command::Audit(_) => presenter.not_yet_ported("audit"),
+        Command::Audit(args) => emit(
+            commands::audit::run(&args, &cli.global),
+            &cli.global,
+            presenter,
+        ),
         Command::Manpage => presenter.not_yet_ported("manpage"),
         // The registry namespace (ADR 0017), the first namespace that EXECUTES —
         // resolve the ambient config home and hand it the effective cwd, then
