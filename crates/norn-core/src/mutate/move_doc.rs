@@ -12,6 +12,7 @@
 use super::{owner_index_options, MutationExecution};
 use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::domain::GraphIndex;
+use crate::target::{resolve_target, TargetResolution};
 use camino::Utf8PathBuf;
 use norn_wire::{ApplyError, ApplyOutcome, ApplyReport};
 use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
@@ -155,7 +156,26 @@ fn preflight_single(
     vault_root: &camino::Utf8Path,
     params: &norn_wire::MoveParams,
 ) -> Result<Utf8PathBuf, MoveRefusal> {
-    let src_rel = resolve_src(index, &params.from)?;
+    let src_rel = match resolve_target(index, &params.from) {
+        TargetResolution::Resolved(path) => path,
+        TargetResolution::NotFound => {
+            return Err(MoveRefusal {
+                code: "target-not-found",
+                message: format!("source does not exist: {}", params.from),
+                path: None,
+            });
+        }
+        TargetResolution::Ambiguous(candidates) => {
+            return Err(MoveRefusal {
+                code: "target-ambiguous",
+                message: format!(
+                    "source resolves ambiguously by stem: {} → {candidates:?}",
+                    params.from
+                ),
+                path: None,
+            });
+        }
+    };
     let dst_rel = Utf8PathBuf::from(&params.to);
 
     // Same-path (no-op) BEFORE the existence check so `--force` cannot silence it.
@@ -208,33 +228,6 @@ fn preflight_single(
     }
 
     Ok(src_rel)
-}
-
-/// Resolve a source specifier to a vault-relative path: exact path first, then a
-/// case-insensitive stem match.
-fn resolve_src(index: &GraphIndex, src: &str) -> Result<Utf8PathBuf, MoveRefusal> {
-    if let Some(doc) = index.documents.iter().find(|d| d.path == src) {
-        return Ok(doc.path.clone());
-    }
-    let candidates: Vec<Utf8PathBuf> = index
-        .documents
-        .iter()
-        .filter(|d| d.stem.eq_ignore_ascii_case(src))
-        .map(|d| d.path.clone())
-        .collect();
-    match candidates.as_slice() {
-        [single] => Ok(single.clone()),
-        [] => Err(MoveRefusal {
-            code: "target-not-found",
-            message: format!("source does not exist: {src}"),
-            path: None,
-        }),
-        _ => Err(MoveRefusal {
-            code: "target-ambiguous",
-            message: format!("source resolves ambiguously by stem: {src} → {candidates:?}"),
-            path: None,
-        }),
-    }
 }
 
 fn one_op_plan(vault_root: String, op: MigrationOp) -> MigrationPlan {
