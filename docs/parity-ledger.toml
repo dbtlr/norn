@@ -631,3 +631,57 @@ old = "the section resolver requires the bare heading text: a `replace_section` 
 new = "the resolver tries the anchor exactly, then strips a leading ATX prefix (and any trailing closer) on the miss and matches on heading TEXT (level is syntax noise): `## Section One` resolves the `Section One` section and the edit applies (exit 0)"
 reason = "decided-better"
 decision = "docs/decisions/0010-cli-grammar-forgiving-inputs.md"
+
+# NRN-407 (ADR 0022, decided-better): the read-verb annotation channel converges
+# onto the closed `{note, warning, error}` stderr prefix set, driven by a typed
+# severity rather than any message-text prefix. `get`'s resolution notes and its
+# `--col`/`--sort` warnings previously spoke two off-set prefixes: an ambiguous
+# stem printed `note:` and an unresolved `--col` field printed `warn:`. Both now
+# render `warning:` — the ambiguity is a `warning`-severity typed note, and the
+# `--col`/`--sort` annotation joins the one closed vocabulary every other verb
+# already speaks. stdout, exit, and post-state are unchanged; only the stderr
+# annotation prefix diverges. See `crates/norn-cli/src/display/conversation.rs`
+# (`severity_prefix` / the note/warning/error constructors) and
+# `crates/norn-cli/src/display/render/get.rs`.
+[[entry]]
+id = "PD-131"
+surface = "get (stderr annotation prefix — closed note/warning/error vocabulary)"
+cases = ["read-get-ambiguous-json-zoo", "read-get-unknown-col-warning-zoo"]
+old = "an ambiguous stem prints `note: '<stem>' resolved to N docs` and an unresolved `--col` field prints `warn: --col field '<f>' not present ...` — two prefixes outside the closed set"
+new = "both render on the closed `warning:` prefix: the ambiguity is a `warning`-severity typed note and the `--col`/`--sort` annotation speaks the one closed vocabulary; stdout / exit / post-state unchanged, only the stderr prefix diverges"
+reason = "decided-better"
+decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
+
+# NRN-407 (ADR 0022, decided-better): a records-format op / precondition status
+# label is the value's serde-kebab name (via the one `serde_label` renderer),
+# not a `Debug`-lowercased variant identifier. The `NotRun` status Debug-lowered
+# to the hyphen-free `notrun`; it now renders `not-run`, matching the status's
+# own `#[serde(rename_all = "kebab-case")]` wire value so the printed label and
+# the serialized value are one string. Surfaces on the refused-apply records body
+# (the not-run op under a failed precondition). See
+# `crates/norn-cli/src/display/mod.rs` (`serde_label`) and
+# `crates/norn-cli/src/display/render/shared.rs`.
+[[entry]]
+id = "PD-132"
+surface = "apply (records — not-run op/precondition status label)"
+cases = ["apply-authored-precondition-mismatch-refusal-zoo"]
+old = "a not-run op label is the `Debug`-lowercased variant, printing `[notrun]` (hyphen-free) — a label that does not match the status's kebab wire value"
+new = "the label is the serde-kebab name, printing `[not-run]` — the same string as the `OpStatus::NotRun` wire value; only this records-body label diverges (exit 2, write-free on both)"
+reason = "decided-better"
+decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
+
+# NRN-407 (ADR 0022, decided-better): the MCP `vault.get` diagnostics cross as
+# typed `{severity, code, message}` notes, so a client decides `isError` and
+# branches remediation on the typed fields rather than parsing a prose string.
+# The `isError` bit (derived from an `error`-severity note) is unchanged; the
+# `structuredContent.notes` payload changes shape from an array of strings to an
+# array of typed note objects. See `crates/norn-wire/src/finding.rs` (`Note`) and
+# `crates/norn-mcp/src/tools/get.rs`.
+[[entry]]
+id = "PD-133"
+surface = "mcp vault.get (structuredContent.notes — typed severity notes)"
+cases = ["mcp-tools-call-get-missing-zoo"]
+old = "`structuredContent.notes` is an array of prose strings (e.g. `\"error: '<t>' did not resolve to any doc\"`); a client recovers severity only by matching the `error:` prefix"
+new = "`structuredContent.notes` is an array of typed `{severity, code, message}` objects; the `isError: true` bit is unchanged (derived from the `error`-severity note), only the notes payload shape diverges"
+reason = "decided-better"
+decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
