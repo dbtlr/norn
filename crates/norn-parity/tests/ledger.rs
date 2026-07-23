@@ -83,10 +83,14 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // the serde-kebab `[not-run]` instead of the Debug-lowered `[notrun]`, one
     // case), and PD-133 (decided-better: MCP `vault.get` notes cross as typed
     // `{severity, code, message}` objects instead of prose strings, one case).
+    // NRN-417 added PD-134 (decided-better: the service-local `--vault <PATH>`
+    // fossil, which collided with the global `--vault <NAME>` selector and
+    // PANICKED the rewrite, is deleted — both collision orderings now parse
+    // clean through to the uniform not-yet-ported outcome instead, two cases).
     assert_eq!(
         ledger.entries.len(),
-        33,
-        "expected exactly PD-101..PD-133, found {}",
+        34,
+        "expected exactly PD-101..PD-134, found {}",
         ledger.entries.len()
     );
 

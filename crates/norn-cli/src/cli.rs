@@ -936,9 +936,16 @@ pub struct ServiceActionArgs {
 
 #[derive(Debug, Args)]
 pub struct ServiceStatusArgs {
-    /// Canonicalize and report this vault's serving and writer-progress state.
-    #[arg(long, value_name = "PATH")]
-    pub vault: Option<PathBuf>,
+    // NRN-417: the service-local `--vault <PATH>` was deleted. It collided
+    // with the global `--vault <NAME>` (registered-vault selector, ADR 0017)
+    // on the same clap arg id, and clap's `ArgMatches` panics (not a clean
+    // parse error) the moment two differently-typed args share an id and one
+    // is downcast against the other's type — see the
+    // `vault_flag_after_service_status_no_longer_panics_on_id_collision` /
+    // `vault_global_flag_before_service_subcommand_no_longer_panics_on_id_collision`
+    // tests below. Vault selection is the global selectors' job (`-C`,
+    // `--vault NAME`) on every verb; a second, differently-shaped `--vault`
+    // on one subcommand was a fossil, not a feature to rename.
     /// Output format. Default text; `json` emits a machine-readable object.
     #[arg(long, value_enum, default_value_t = ServiceFormat::Text, help_heading = "Output")]
     pub format: ServiceFormat,
@@ -1165,6 +1172,33 @@ mod tests {
     }
 
     #[test]
+    fn vault_flag_after_service_status_no_longer_panics_on_id_collision() {
+        // NRN-417: `service status --vault <PATH>` used to collide with the
+        // global `--vault <NAME>` at the clap id level — both an id-level
+        // collision, and clap PANICKED (exit 101) trying to downcast the
+        // match against the wrong stored type, instead of erroring cleanly.
+        // The service-local flag is deleted, so the id is now unambiguously
+        // the global `Option<String>` (`global = true` propagates it into
+        // every subcommand's parser, the same way `-C/--cwd` already parses
+        // after a subcommand — see `global_cwd_accepted_after_subcommand`).
+        // This argv now parses CLEANLY as the global vault-name selector
+        // instead of the deleted local path flag: no panic, no error.
+        let cli = Cli::try_parse_from(["norn", "service", "status", "--vault", "/tmp/x"]).unwrap();
+        assert_eq!(cli.global.vault.as_deref(), Some("/tmp/x"));
+        assert!(matches!(cli.command, Command::Service(_)));
+    }
+
+    #[test]
+    fn vault_global_flag_before_service_subcommand_no_longer_panics_on_id_collision() {
+        // NRN-417: the other collision ordering — the global `--vault NAME`
+        // given before `service status` — used to panic on the same id
+        // mismatch. It must now parse cleanly as the global selector.
+        let cli = Cli::try_parse_from(["norn", "--vault", "atlas", "service", "status"]).unwrap();
+        assert_eq!(cli.global.vault.as_deref(), Some("atlas"));
+        assert!(matches!(cli.command, Command::Service(_)));
+    }
+
+    #[test]
     fn removed_global_config_is_a_parse_error() {
         // The global `--config` was deleted (ADR 0017 resolver-derived config);
         // it must no longer parse as a global flag.
@@ -1251,8 +1285,16 @@ mod tests {
 
     #[test]
     fn derive_tree_is_valid() {
-        // Catches derive-level ambiguities (duplicate flags, bad global setup,
-        // help-flag conflicts) at test time rather than first real invocation.
+        // `debug_assert()` checks the STATIC derive tree — duplicate flag
+        // declarations, malformed `ArgGroup`/conflict wiring, help-flag setup —
+        // at test time rather than first real invocation. It does NOT catch a
+        // clap id collision between two args of different types (e.g. two
+        // `--vault` flags, one global `Option<String>` and one subcommand-local
+        // `Option<PathBuf>`): that class only panics at PARSE time, when
+        // `ArgMatches` downcasts a matched id against the wrong stored type
+        // (NRN-417). The `vault_flag_after_service_status_*` /
+        // `vault_global_flag_before_service_subcommand_*` tests below exercise
+        // the real parse path instead.
         Cli::command().debug_assert();
     }
 
