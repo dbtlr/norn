@@ -15,19 +15,24 @@ pub enum Normalization {
     /// lines naming the invoked binary) is deliberately NOT normalized —
     /// that is a real parity surface, not noise.
     VaultRoot,
-    /// Strip the telemetry trace id from a CONFIRMED-apply mutation report, on
+    /// Mask the telemetry trace id from a CONFIRMED-apply mutation report, on
     /// both surfaces it appears: the records footer `trace: <hex>` and the JSON
     /// `"trace_id":"<hex>"` field. Keyed precisely to the donor's two spellings
     /// — the run of ascii-hexdigits immediately following each marker is
-    /// removed, nothing else. The pinned oracle mints a fresh random id on every
-    /// apply (empirically non-deterministic: 3 runs of one op yield 3 distinct
-    /// ids), while the rewrite emits an EMPTY id by documented contract (the
-    /// owner's discard sink does not mint a placeholder until durable telemetry
-    /// lands — see `norn-wire::mutate::SetReport::trace_id`). Normalizing the
-    /// oracle's id to empty makes a confirmed apply that is otherwise byte-equal
-    /// Match, without over-normalizing anything but the id run itself. Applied
-    /// per-case, only on the confirmed-apply cases that need it — never a read
-    /// case, and never a refusal/forecast (which carry no id on either side).
+    /// removed, nothing else; the marker itself is left in place, so whether
+    /// the line/field is PRESENT AT ALL stays a pinned, un-normalized part of
+    /// the comparison. The pinned oracle mints a fresh random id on every apply
+    /// (empirically non-deterministic: 3 runs of one op yield 3 distinct ids).
+    /// The rewrite's own id varies by verb: `set`/`new`/`edit` carry an
+    /// empty-until-real id (their verb paths don't yet route through
+    /// `EventSink` — NRN-400 wires it), while the four cascade verbs
+    /// (`apply`/`move`/`delete`/`rewrite-wikilink`) already emit a real 32-hex
+    /// `EventSink`-derived id on a confirmed apply. Masking both sides' id text
+    /// makes a confirmed apply that is otherwise byte-equal Match regardless of
+    /// which of those the rewrite's id happens to be, without over-normalizing
+    /// anything but the id run itself. Applied per-case, only on the
+    /// confirmed-apply cases that need it — never a read case, and never a
+    /// refusal/forecast (which carry no id on either side).
     TraceId,
     /// Strip the `plan_hash` hex from a cascade-verb `--format json` report (the
     /// pretty `"plan_hash": "<hex>"` field). `plan_hash` is
@@ -95,11 +100,13 @@ pub fn normalize_text(text: &str, vault_roots: &[&Path], steps: &[Normalization]
 
 /// Remove the run of ascii-hexdigits immediately following each occurrence of
 /// `marker` in `text`, leaving `marker` (and everything else) intact. The
-/// donor's applied trace id is a fixed-format hex run right after a literal
-/// marker on both the records (`trace: `) and JSON (`"trace_id":"`) surfaces, so
-/// this collapses the oracle's random id to the rewrite's empty id without
-/// touching anything but the id itself. A marker followed by no hexdigit (the
-/// rewrite's already-empty id) is a no-op.
+/// applied trace id is a fixed-format hex run right after a literal marker on
+/// both the records (`trace: `) and JSON (`"trace_id":"`) surfaces on EITHER
+/// side, so this masks whatever id text follows the marker — the oracle's
+/// random hex, the rewrite's own real `EventSink`-derived hex on the four
+/// cascade verbs, or `set`/`new`/`edit`'s empty-until-real id — without
+/// touching anything but the id run itself. A marker followed by no hexdigit
+/// (an empty id) is a no-op.
 fn strip_hex_run_after(text: &str, marker: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;

@@ -82,6 +82,9 @@ pub(crate) fn render_set(
             let shorts: Vec<String> = report.warnings.iter().map(warning_short).collect();
             sink.mutation_warnings_block(&shorts)?;
         }
+        // `set`'s verb path doesn't route through `EventSink` yet, so `trace_id` is
+        // `String::new()` here — an empty-until-real placeholder line until telemetry
+        // wires through (NRN-400).
         if report.applied {
             sink.trace_footer(&report.trace_id)?;
         } else {
