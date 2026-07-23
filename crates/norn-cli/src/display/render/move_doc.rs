@@ -15,27 +15,31 @@ use crate::display::conversation::Conversation;
 use crate::display::emit::render_outcome;
 use crate::display::output::MoveMutationView;
 use crate::display::sink::Sink;
+use crate::display::Format;
 use crate::output::glyphs::{self, Glyph};
 
 use super::shared::{
-    apply_report_exit, apply_status_label, plural, render_apply_refusal, write_report_json,
+    apply_report_exit, apply_status_label, plural, render_apply_refusal, render_cascade_failed,
+    write_report_json,
 };
 
 pub(crate) fn render_move(
     view: MoveMutationView,
+    format: Format,
     sink: &mut Sink<'_>,
     conv: &mut Conversation<'_>,
 ) -> i32 {
     let report = &view.report;
+    let json = matches!(format, Format::Json);
 
     if report.outcome == ApplyOutcome::Refused {
-        return render_apply_refusal(report, view.json, sink.writer(), conv);
+        return render_apply_refusal(report, format, sink.writer(), conv);
     }
 
     conv.cascade_failure_warnings(report);
     let exit = apply_report_exit(report);
 
-    if view.json {
+    if json {
         let result: io::Result<i32> = (|| {
             write_report_json(sink.writer(), report)?;
             Ok(exit)
@@ -51,6 +55,11 @@ pub(crate) fn render_move(
     let result: io::Result<i32> = (|| {
         if is_folder {
             render_folder_apply_tty(sink.writer(), report)?;
+        } else if report.outcome == ApplyOutcome::Failed {
+            // A failed single-file move renders the truthful shared failure
+            // block — the moved/preview wording below cannot express a report
+            // whose op did not land.
+            render_cascade_failed(sink.writer(), "move", report)?;
         } else {
             let (link_total, link_files) = report
                 .operations
@@ -204,6 +213,62 @@ mod tests {
         assert_eq!(
             String::from_utf8(out).unwrap(),
             "move-folder failed\n  applied: 1  skipped: 0  failed: 1\n  [applied] moved a/x.md -> b/x.md\n  [failed] move a/y.md -> b/y.md: permission denied\n"
+        );
+    }
+
+    #[test]
+    fn f1_a_failed_single_file_move_headlines_failed_not_preview() {
+        use crate::display::format::{FormatChoice, FormatSpec};
+        use crate::display::output::MoveMutationView;
+        use crate::display::Presenter;
+        use crate::output::palette::Palette;
+
+        let mut report = failed_report();
+        // A single-file move: one op, no folder provenance (`from` empty).
+        report.applied = 0;
+        report.trace_id = "abc123".into();
+        report.operations = vec![ApplyReportOp {
+            op_id: "0".into(),
+            kind: "move_document".into(),
+            status: OpStatus::Failed,
+            from: None,
+            path: Some("b/x.md".into()),
+            stem: Some("x".into()),
+            summary: "move a/x.md -> b/x.md: permission denied".into(),
+            error: None,
+            footnote: None,
+            cascade: None,
+            link_impact: None,
+            finding_code: None,
+            repair_rule: None,
+        }];
+
+        let view = MoveMutationView {
+            report,
+            src: "a/x.md".into(),
+            dst: "b/x.md".into(),
+            format: FormatChoice {
+                explicit: Some(Format::Records),
+                spec: FormatSpec {
+                    tty: Format::Records,
+                    piped: Format::Records,
+                },
+            },
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        {
+            let mut presenter = Presenter::new(&mut out, &mut err);
+            let format = view.format.resolve(false);
+            let palette = Palette::off();
+            let (o, e) = presenter.streams();
+            let mut sink = Sink::new(o, &palette, 80);
+            let mut conv = Conversation::new(e);
+            render_move(view, format, &mut sink, &mut conv);
+        }
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "move failed\n  applied: 0  skipped: 0  failed: 1  remaining: 0\n  [failed] move a/x.md -> b/x.md: permission denied\ntrace: abc123\n"
         );
     }
 }

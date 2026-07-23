@@ -26,7 +26,7 @@ use norn_config::{
     ConfigError, ConfigHome, RegisteredVault, Registry, VaultChanges, VaultOverrides,
 };
 
-use crate::display::{Diagnostic, Format, FormatSpec, Output, VaultListView};
+use crate::display::{Diagnostic, Format, FormatChoice, FormatSpec, Output, VaultListView};
 
 /// The `vault` namespace: manage the central vault registry.
 #[derive(Subcommand, Debug)]
@@ -245,10 +245,12 @@ fn list(registry: &Registry, args: &ListArgs) -> Result<Output, Diagnostic> {
     let vaults = registry.list().map_err(fail)?;
     Ok(Output::VaultList(VaultListView {
         vaults,
-        explicit: Some(args.format.into()),
-        spec: FormatSpec {
-            tty: Format::Records,
-            piped: Format::Records,
+        format: FormatChoice {
+            explicit: Some(args.format.into()),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
         },
     }))
 }

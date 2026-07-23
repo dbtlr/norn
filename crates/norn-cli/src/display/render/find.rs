@@ -225,7 +225,7 @@ fn find_doc_view(doc: &FindDoc) -> DocView<'_> {
 mod tests {
     use super::*;
     use crate::cli::GlobalArgs;
-    use crate::display::format::FormatSpec;
+    use crate::display::format::{FormatChoice, FormatSpec};
     use crate::display::Presenter;
     use crate::display::EXIT_OPERATIONAL;
     use crate::test_support::{global_args, FailingWriter};
@@ -238,7 +238,7 @@ mod tests {
         global: &GlobalArgs,
         presenter: &mut Presenter<O, E>,
     ) -> i32 {
-        let format = view.spec.resolve(view.explicit, false);
+        let format = view.format.resolve(false);
         let palette = crate::output::palette::resolve(global.color);
         let (out, err) = presenter.streams();
         let mut sink = Sink::new(out, &palette, 80);
@@ -272,10 +272,12 @@ mod tests {
             cols: vec![],
             all_cols: false,
             sort_field: None,
-            explicit: Some(Format::Paths),
-            spec: FormatSpec {
-                tty: Format::Records,
-                piped: Format::Paths,
+            format: FormatChoice {
+                explicit: Some(Format::Paths),
+                spec: FormatSpec {
+                    tty: Format::Records,
+                    piped: Format::Paths,
+                },
             },
         }
     }

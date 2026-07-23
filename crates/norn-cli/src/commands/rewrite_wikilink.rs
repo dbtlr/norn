@@ -8,7 +8,7 @@
 //! display layer renders. `--out` writes the JSON report to a file.
 
 use crate::cli::{GlobalArgs, RewriteWikilinkArgs};
-use crate::display::{Diagnostic, Output, RewriteWikilinkView};
+use crate::display::{Diagnostic, Format, FormatChoice, FormatSpec, Output, RewriteWikilinkView};
 use norn_wire::RewriteWikilinkParams;
 
 /// Run a `rewrite-wikilink` mutation and return its report as an [`Output`], or a
@@ -16,7 +16,7 @@ use norn_wire::RewriteWikilinkParams;
 /// `OLD` arrives IN the report (`outcome = refused`) the display renders at
 /// exit 2.
 pub fn run(args: &RewriteWikilinkArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
-    run_confirm(args, global, args.yes && !args.dry_run)
+    run_confirm(args, global, args.mode.confirm())
 }
 
 /// Same as [`run`], but with `confirm` supplied rather than derived from
@@ -45,7 +45,13 @@ pub(crate) fn run_confirm(
         report,
         old: args.old.clone(),
         new: args.new.clone(),
-        json: matches!(args.format, crate::cli::RewriteWikilinkFormat::Json),
+        format: FormatChoice {
+            explicit: Some(args.mode.format.into()),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
+        },
         out: args.out.clone(),
     }))
 }

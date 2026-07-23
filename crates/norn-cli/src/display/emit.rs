@@ -121,31 +121,31 @@ pub fn emit<O: Write, E: Write>(
 
     match output {
         Output::Find(view) => {
-            let format = view.spec.resolve(view.explicit, is_tty);
+            let format = view.format.resolve(is_tty);
             render_with(presenter, &styled, width, |sink, conv| {
                 render::find::render_find(view, format, sink, conv)
             })
         }
         Output::Get(view) => {
-            let format = view.spec.resolve(view.explicit, is_tty);
+            let format = view.format.resolve(is_tty);
             render_with(presenter, &styled, width, |sink, conv| {
                 render::get::render_get(view, format, sink, conv)
             })
         }
         Output::Count(view) => {
-            let format = view.spec.resolve(view.explicit, is_tty);
+            let format = view.format.resolve(is_tty);
             render_with(presenter, &plain, width, |sink, conv| {
                 render::count::render_count(view, format, sink, conv)
             })
         }
         Output::Describe(view) => {
-            let format = view.spec.resolve(view.explicit, is_tty);
+            let format = view.format.resolve(is_tty);
             render_with(presenter, &plain, width, |sink, conv| {
                 render::describe::render_describe(view, format, sink, conv)
             })
         }
         Output::Validate(view) => {
-            let format = view.spec.resolve(view.explicit, is_tty);
+            let format = view.format.resolve(is_tty);
             render_with(presenter, &styled, width, |sink, conv| {
                 render::validate::render_validate(view, format, sink, conv)
             })
@@ -154,41 +154,53 @@ pub fn emit<O: Write, E: Write>(
             render::repair::render_repair(view, is_tty, sink, conv)
         }),
         Output::VaultList(view) => {
-            let format = view.spec.resolve(view.explicit, is_tty);
+            let format = view.format.resolve(is_tty);
             render_with(presenter, &plain, width, |sink, conv| {
                 render::vault::render_vault_list(view, format, sink, conv)
             })
         }
         Output::Set(view) => {
-            let format = view.spec.resolve(view.explicit, is_tty);
+            let format = view.format.resolve(is_tty);
             render_with(presenter, &styled, width, |sink, conv| {
                 render::set::render_set(view, format, sink, conv)
             })
         }
         Output::New(view) => {
-            let format = view.spec.resolve(view.explicit, is_tty);
+            let format = view.format.resolve(is_tty);
             render_with(presenter, &plain, width, |sink, conv| {
                 render::new::render_new(view, format, sink, conv)
             })
         }
         Output::Edit(view) => {
-            let format = view.spec.resolve(view.explicit, is_tty);
+            let format = view.format.resolve(is_tty);
             render_with(presenter, &plain, width, |sink, conv| {
                 render::edit::render_edit(view, format, sink, conv)
             })
         }
-        Output::Move(view) => render_with(presenter, &plain, width, |sink, conv| {
-            render::move_doc::render_move(view, sink, conv)
-        }),
-        Output::Delete(view) => render_with(presenter, &plain, width, |sink, conv| {
-            render::delete::render_delete(view, sink, conv)
-        }),
-        Output::RewriteWikilink(view) => render_with(presenter, &plain, width, |sink, conv| {
-            render::rewrite_wikilink::render_rewrite_wikilink(view, sink, conv)
-        }),
-        Output::Apply(view) => render_with(presenter, &plain, width, |sink, conv| {
-            render::apply::render_apply(view, sink, conv)
-        }),
+        Output::Move(view) => {
+            let format = view.format.resolve(is_tty);
+            render_with(presenter, &plain, width, |sink, conv| {
+                render::move_doc::render_move(view, format, sink, conv)
+            })
+        }
+        Output::Delete(view) => {
+            let format = view.format.resolve(is_tty);
+            render_with(presenter, &plain, width, |sink, conv| {
+                render::delete::render_delete(view, format, sink, conv)
+            })
+        }
+        Output::RewriteWikilink(view) => {
+            let format = view.format.resolve(is_tty);
+            render_with(presenter, &plain, width, |sink, conv| {
+                render::rewrite_wikilink::render_rewrite_wikilink(view, format, sink, conv)
+            })
+        }
+        Output::Apply(view) => {
+            let format = view.format.resolve(is_tty);
+            render_with(presenter, &plain, width, |sink, conv| {
+                render::apply::render_apply(view, format, sink, conv)
+            })
+        }
         Output::Line(line) => {
             let (out, err) = presenter.streams();
             let result: io::Result<i32> = (|| {
@@ -293,7 +305,7 @@ fn confirm_and_finish<O: Write, E: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::display::format::{Format, FormatSpec};
+    use crate::display::format::{Format, FormatChoice, FormatSpec};
     use crate::display::output::SetMutationView;
     use crate::test_support::{global_args, FailingWriter};
     use norn_wire::{CodedError, MutationOutcome, SetReport};
@@ -337,10 +349,12 @@ mod tests {
     fn set_output(applied: bool, outcome: MutationOutcome) -> Result<Output, Diagnostic> {
         Ok(Output::Set(SetMutationView {
             report: set_report(applied, outcome),
-            explicit: Some(Format::Records),
-            spec: FormatSpec {
-                tty: Format::Records,
-                piped: Format::Records,
+            format: FormatChoice {
+                explicit: Some(Format::Records),
+                spec: FormatSpec {
+                    tty: Format::Records,
+                    piped: Format::Records,
+                },
             },
         }))
     }

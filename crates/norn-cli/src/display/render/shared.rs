@@ -7,7 +7,7 @@ use norn_wire::{ApplyOutcome, ApplyReport, FindReport, MutationOutcome, Mutation
 use serde_json::Value;
 
 use crate::display::conversation::Conversation;
-use crate::display::{EXIT_OK, EXIT_USAGE};
+use crate::display::{Format, EXIT_OK, EXIT_USAGE};
 
 /// `""` for a count of 1, `"s"` otherwise — the donor pluralization.
 pub(super) fn plural(n: usize) -> &'static str {
@@ -77,10 +77,11 @@ pub(super) fn apply_report_exit(report: &ApplyReport) -> i32 {
 /// stderr. Exit 2.
 pub(super) fn render_apply_refusal(
     report: &ApplyReport,
-    json: bool,
+    format: Format,
     out: &mut dyn Write,
     conv: &mut Conversation,
 ) -> i32 {
+    let json = matches!(format, Format::Json);
     let error = report
         .operations
         .iter()

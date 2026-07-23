@@ -13,7 +13,7 @@ use norn_wire::{GetParams, SortPaginateParams};
 
 use crate::cli::GlobalArgs;
 use crate::commands::args::SortPaginateArgs;
-use crate::display::{Diagnostic, Format, FormatSpec, GetView, Output};
+use crate::display::{Diagnostic, Format, FormatChoice, FormatSpec, GetView, Output};
 use crate::output::projection::split_cols;
 
 #[derive(Args, Debug)]
@@ -163,10 +163,12 @@ pub fn run(args: &GetArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
         cols: args.col.clone(),
         sections: args.section.clone(),
         sort_field: args.paging.sort.clone(),
-        explicit: Some(args.format.into()),
-        spec: FormatSpec {
-            tty: Format::Records,
-            piped: Format::Records,
+        format: FormatChoice {
+            explicit: Some(args.format.into()),
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
         },
     }))
 }

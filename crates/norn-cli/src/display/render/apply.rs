@@ -16,6 +16,7 @@ use crate::display::conversation::Conversation;
 use crate::display::emit::render_outcome;
 use crate::display::output::ApplyMutationView;
 use crate::display::sink::Sink;
+use crate::display::Format;
 
 use super::shared::{
     apply_report_exit, apply_status_label, render_apply_refusal, render_apply_report_body,
@@ -24,10 +25,12 @@ use super::shared::{
 
 pub(crate) fn render_apply(
     view: ApplyMutationView,
+    format: Format,
     sink: &mut Sink<'_>,
     conv: &mut Conversation<'_>,
 ) -> i32 {
     let report = &view.report;
+    let json = matches!(format, Format::Json);
 
     if report.outcome == ApplyOutcome::Refused {
         // Envelope-only refusal (schema mismatch, expansion, a bad create path):
@@ -39,7 +42,7 @@ pub(crate) fn render_apply(
         // exactly as the donor's routed `emit` does — `emit_refusal` would drop
         // the preconditions.
         if !report.preconditions.iter().any(|p| p.error.is_some()) {
-            return render_apply_refusal(report, view.json, sink.writer(), conv);
+            return render_apply_refusal(report, format, sink.writer(), conv);
         }
     }
 
@@ -55,7 +58,7 @@ pub(crate) fn render_apply(
         return render_outcome(result, conv.writer());
     }
 
-    if view.json {
+    if json {
         let result: io::Result<i32> = (|| {
             write_report_json(sink.writer(), report)?;
             Ok(exit)

@@ -478,6 +478,75 @@ pub enum ConfidenceArg {
     High,
 }
 
+// The shared mode-flag block every mutation verb flattens: `--yes` /
+// `--dry-run` / `--format`. One declaration replaces the seven per-verb copies
+// (each of which carried its own `dry_run` / `yes` / `format` field plus a
+// bespoke `{Records, Json}` format enum), and the derivations that fold these
+// three into the apply-vs-forecast decision live here as `confirm` /
+// `can_prompt` instead of being re-spelled at each `run` site and dispatch arm.
+//
+// A plain comment, NOT a doc comment: clap adopts a flattened struct's doc
+// comment as the host command's `long_about`, which would leak into every
+// mutation verb's `--help` (the same constraint `GlobalArgs` documents).
+//
+// One contiguous flatten means all seven mutation verbs render `--yes` /
+// `--dry-run` / `--format` in one consistent block with one shared wording —
+// the flag is the same flag everywhere, so it reads the same everywhere. That
+// consistency is the design goal; the resulting help-order/wording shift for
+// verbs that previously spelled these three differently is a deliberate,
+// user-visible change (recorded in the CHANGELOG, NRN-410).
+#[derive(Debug, Args)]
+pub struct MutationModeArgs {
+    /// Apply the change without an interactive confirm prompt.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Preview the change without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = MutationFormat::Records)]
+    pub format: MutationFormat,
+}
+
+impl MutationModeArgs {
+    /// Apply-without-prompting: `--yes` answered the apply question and
+    /// `--dry-run` did not veto it. `--dry-run` always wins over `--yes`.
+    pub fn confirm(&self) -> bool {
+        self.yes && !self.dry_run
+    }
+
+    /// Whether an interactive confirm prompt is eligible. A prompt is offered
+    /// only when none of the three flags has already settled the decision:
+    /// `--dry-run` and `--yes` each answer the apply question outright, and
+    /// `--format json` is output-shape-only and never implies interactive
+    /// consent.
+    pub fn can_prompt(&self) -> bool {
+        !self.dry_run && !self.yes && !matches!(self.format, MutationFormat::Json)
+    }
+}
+
+/// The output format every mutation verb accepts: `records` (the human summary)
+/// or `json` (the structured report). One shared enum replaces the seven
+/// identical per-verb copies; it maps into the display layer's [`Format`].
+///
+/// [`Format`]: crate::display::Format
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationFormat {
+    Records,
+    Json,
+}
+
+impl From<MutationFormat> for crate::display::Format {
+    fn from(f: MutationFormat) -> Self {
+        match f {
+            MutationFormat::Records => crate::display::Format::Records,
+            MutationFormat::Json => crate::display::Format::Json,
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct SetArgs {
     /// The doc to mutate. Path, stem, or wikilink-shaped (with or without [[]]).
@@ -524,23 +593,8 @@ pub struct SetArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Apply the mutation without an interactive confirm prompt.
-    #[arg(long)]
-    pub yes: bool,
-
-    /// Preview the mutation without writing.
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// Output format.
-    #[arg(long, value_enum, default_value_t = SetFormat::Records)]
-    pub format: SetFormat,
-}
-
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SetFormat {
-    Records,
-    Json,
+    #[command(flatten)]
+    pub mode: MutationModeArgs,
 }
 
 #[derive(Debug, Args)]
@@ -602,23 +656,8 @@ pub struct EditArgs {
     #[arg(long = "expected-hash", value_name = "HASH")]
     pub expected_hash: Option<String>,
 
-    /// Apply the edits without an interactive confirm prompt.
-    #[arg(long)]
-    pub yes: bool,
-
-    /// Preview the edits without writing.
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// Output format.
-    #[arg(long, value_enum, default_value_t = EditFormat::Records)]
-    pub format: EditFormat,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-pub enum EditFormat {
-    Records,
-    Json,
+    #[command(flatten)]
+    pub mode: MutationModeArgs,
 }
 
 #[derive(Debug, Args)]
@@ -659,23 +698,8 @@ pub struct NewArgs {
     #[arg(short = 'p', long = "parents")]
     pub parents: bool,
 
-    /// Mutate without TTY confirmation.
-    #[arg(long)]
-    pub yes: bool,
-
-    /// Preview only; never write.
-    #[arg(long = "dry-run")]
-    pub dry_run: bool,
-
-    /// Output format.
-    #[arg(long, value_enum, default_value_t = NewFormat::Records)]
-    pub format: NewFormat,
-}
-
-#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NewFormat {
-    Records,
-    Json,
+    #[command(flatten)]
+    pub mode: MutationModeArgs,
 }
 
 #[derive(Debug, Args)]
@@ -694,14 +718,6 @@ pub struct MoveArgs {
     #[arg(value_name = "TO")]
     pub dst: String,
 
-    /// Skip interactive confirm and apply.
-    #[arg(long)]
-    pub yes: bool,
-
-    /// Print summary, exit. No write, no confirm.
-    #[arg(long)]
-    pub dry_run: bool,
-
     /// Move the file but skip backlink rewrites.
     #[arg(long)]
     pub no_link_rewrite: bool,
@@ -719,29 +735,14 @@ pub struct MoveArgs {
     #[arg(long, short = 'r')]
     pub recursive: bool,
 
-    /// Stdout format. `records` is the default TTY summary; `json` emits the ApplyReport.
-    #[arg(long, value_enum, default_value_t = MoveFormat::Records)]
-    pub format: MoveFormat,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum MoveFormat {
-    Records,
-    Json,
+    #[command(flatten)]
+    pub mode: MutationModeArgs,
 }
 
 #[derive(Debug, Args)]
 pub struct DeleteArgs {
     /// Document to delete: vault-relative path or unique stem.
     pub doc: String,
-
-    /// Skip interactive confirm and apply.
-    #[arg(long)]
-    pub yes: bool,
-
-    /// Print summary, exit. No write, no confirm.
-    #[arg(long)]
-    pub dry_run: bool,
 
     /// Acknowledge that incoming links will break. Required if the doc has incoming
     /// links and --rewrite-to is not provided.
@@ -752,15 +753,8 @@ pub struct DeleteArgs {
     #[arg(long, value_name = "ALT_DOC")]
     pub rewrite_to: Option<String>,
 
-    /// Stdout format. `records` is the default TTY summary; `json` emits the ApplyReport.
-    #[arg(long, value_enum, default_value_t = DeleteFormat::Records)]
-    pub format: DeleteFormat,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum DeleteFormat {
-    Records,
-    Json,
+    #[command(flatten)]
+    pub mode: MutationModeArgs,
 }
 
 #[derive(Debug, Args)]
@@ -768,18 +762,6 @@ pub struct ApplyArgs {
     /// Path to MigrationPlan file (YAML or JSON). Use `-` for stdin.
     #[arg(value_name = "PLAN")]
     pub plan_path: String,
-
-    /// Preview without mutating. Exit code 0, dry_run=true in JSON report.
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// Skip TTY confirmation prompt and apply immediately.
-    #[arg(long)]
-    pub yes: bool,
-
-    /// Output format.
-    #[arg(long, value_enum, default_value_t = ApplyFormat::Records)]
-    pub format: ApplyFormat,
 
     /// Input plan format. Auto-detected by extension (.yaml/.yml → YAML, else JSON).
     /// Required for stdin (`-`) when the plan is YAML.
@@ -794,12 +776,9 @@ pub struct ApplyArgs {
     /// Write the JSON apply report to this file instead of stdout.
     #[arg(long)]
     pub out: Option<String>,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum ApplyFormat {
-    Records,
-    Json,
+    #[command(flatten)]
+    pub mode: MutationModeArgs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -818,27 +797,12 @@ pub struct RewriteWikilinkArgs {
     #[arg(value_name = "NEW")]
     pub new: String,
 
-    /// Preview changes without writing files.
-    #[arg(long)]
-    pub dry_run: bool,
-
-    /// Skip TTY confirmation prompt and apply immediately.
-    #[arg(long)]
-    pub yes: bool,
-
-    /// Output format.
-    #[arg(long, value_enum, default_value_t = RewriteWikilinkFormat::Records)]
-    pub format: RewriteWikilinkFormat,
-
     /// Write the JSON apply report to this file instead of stdout.
     #[arg(long)]
     pub out: Option<String>,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum RewriteWikilinkFormat {
-    Records,
-    Json,
+    #[command(flatten)]
+    pub mode: MutationModeArgs,
 }
 
 #[derive(Debug, Args)]
@@ -1296,5 +1260,64 @@ mod tests {
         // Catches derive-level ambiguities (duplicate flags, bad global setup,
         // help-flag conflicts) at test time rather than first real invocation.
         Cli::command().debug_assert();
+    }
+
+    // The shared mode ladder (NRN-410). One set of assertions replaces the four
+    // per-verb `confirm = yes && !dry_run` ladder copies (set / edit / move /
+    // apply) that duplicated this logic. `set` is a representative flatten host;
+    // the flatten is identical across all seven mutation verbs.
+    fn set_mode(argv: &[&str]) -> MutationModeArgs {
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::Set(a) => a.mode,
+            other => panic!("expected set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirm_dry_run_wins_over_yes() {
+        assert!(
+            !set_mode(&["norn", "set", "a.md", "x=1", "--yes", "--dry-run"]).confirm(),
+            "dry-run must veto yes"
+        );
+        assert!(
+            set_mode(&["norn", "set", "a.md", "x=1", "--yes"]).confirm(),
+            "--yes alone applies"
+        );
+        assert!(
+            !set_mode(&["norn", "set", "a.md", "x=1"]).confirm(),
+            "no flag is a forecast"
+        );
+    }
+
+    #[test]
+    fn can_prompt_only_when_no_flag_settles_the_decision() {
+        assert!(
+            set_mode(&["norn", "set", "a.md", "x=1"]).can_prompt(),
+            "bare invocation is prompt-eligible"
+        );
+        assert!(
+            !set_mode(&["norn", "set", "a.md", "x=1", "--yes"]).can_prompt(),
+            "--yes answers the apply question"
+        );
+        assert!(
+            !set_mode(&["norn", "set", "a.md", "x=1", "--dry-run"]).can_prompt(),
+            "--dry-run answers the apply question"
+        );
+        assert!(
+            !set_mode(&["norn", "set", "a.md", "x=1", "--format", "json"]).can_prompt(),
+            "--format json is shape-only and never implies consent"
+        );
+    }
+
+    #[test]
+    fn mutation_format_defaults_to_records() {
+        assert_eq!(
+            set_mode(&["norn", "set", "a.md", "x=1"]).format,
+            MutationFormat::Records
+        );
+        assert_eq!(
+            set_mode(&["norn", "set", "a.md", "x=1", "--format", "json"]).format,
+            MutationFormat::Json
+        );
     }
 }

@@ -16,25 +16,16 @@
 
 use std::io::Read;
 
-use crate::cli::{GlobalArgs, SetArgs, SetFormat};
-use crate::display::{Diagnostic, Format, FormatSpec, Output, SetMutationView};
+use crate::cli::{GlobalArgs, SetArgs};
+use crate::display::{Diagnostic, Format, FormatChoice, FormatSpec, Output, SetMutationView};
 use norn_wire::SetParams;
-
-impl From<SetFormat> for Format {
-    fn from(f: SetFormat) -> Self {
-        match f {
-            SetFormat::Records => Format::Records,
-            SetFormat::Json => Format::Json,
-        }
-    }
-}
 
 /// Run a `set` mutation and return its report as an [`Output`], or a
 /// soft-landing [`Diagnostic`] on a connection/owner failure. A clean pre-write
 /// decline is NOT a `Diagnostic` — it arrives as a report with `outcome =
 /// refused` the display layer renders at exit 2.
 pub fn run(args: &SetArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
-    run_confirm(args, global, args.yes && !args.dry_run)
+    run_confirm(args, global, args.mode.confirm())
 }
 
 /// Same as [`run`], but with `confirm` supplied rather than derived from
@@ -79,12 +70,14 @@ pub(crate) fn run_confirm(
 
     Ok(Output::Set(SetMutationView {
         report,
-        explicit: Some(args.format.into()),
-        // Mutations do not switch format on isatty — the mode ladder decides
-        // apply-vs-forecast, and `--format` (default records) decides shape.
-        spec: FormatSpec {
-            tty: Format::Records,
-            piped: Format::Records,
+        format: FormatChoice {
+            explicit: Some(args.mode.format.into()),
+            // Mutations do not switch format on isatty — the mode ladder decides
+            // apply-vs-forecast, and `--format` (default records) decides shape.
+            spec: FormatSpec {
+                tty: Format::Records,
+                piped: Format::Records,
+            },
         },
     }))
 }
@@ -119,35 +112,6 @@ mod tests {
         assert_eq!(
             fields,
             vec!["status=done".to_string(), "kind=note".to_string()]
-        );
-    }
-
-    /// The `confirm = yes && !dry_run` ladder: dry-run wins over yes, yes alone
-    /// applies, no flag forecasts.
-    fn confirm(a: &SetArgs) -> bool {
-        a.yes && !a.dry_run
-    }
-
-    #[test]
-    fn confirm_ladder_dry_run_wins_over_yes() {
-        assert!(
-            !confirm(&set_args(&[
-                "norn",
-                "set",
-                "a.md",
-                "x=1",
-                "--yes",
-                "--dry-run"
-            ])),
-            "dry-run must win over yes"
-        );
-        assert!(
-            confirm(&set_args(&["norn", "set", "a.md", "x=1", "--yes"])),
-            "--yes alone applies"
-        );
-        assert!(
-            !confirm(&set_args(&["norn", "set", "a.md", "x=1"])),
-            "no flag is a forecast"
         );
     }
 }

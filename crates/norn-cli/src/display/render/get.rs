@@ -248,7 +248,7 @@ fn get_record_view(rec: &GetRecord) -> DocView<'_> {
 mod tests {
     use super::*;
     use crate::cli::GlobalArgs;
-    use crate::display::format::FormatSpec;
+    use crate::display::format::{FormatChoice, FormatSpec};
     use crate::display::Presenter;
     use crate::test_support::{global_args, FailingWriter};
     use serde_json::json;
@@ -259,7 +259,7 @@ mod tests {
         global: &GlobalArgs,
         presenter: &mut Presenter<O, E>,
     ) -> i32 {
-        let format = view.spec.resolve(view.explicit, false);
+        let format = view.format.resolve(false);
         let palette = crate::output::palette::resolve(global.color);
         let (out, err) = presenter.streams();
         let mut sink = Sink::new(out, &palette, 80);
@@ -338,10 +338,12 @@ mod tests {
             cols: vec![],
             sections: vec![],
             sort_field: None,
-            explicit: Some(explicit),
-            spec: FormatSpec {
-                tty: Format::Records,
-                piped: Format::Records,
+            format: FormatChoice {
+                explicit: Some(explicit),
+                spec: FormatSpec {
+                    tty: Format::Records,
+                    piped: Format::Records,
+                },
             },
         }
     }

@@ -104,7 +104,7 @@ fn path_display(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::display::format::FormatSpec;
+    use crate::display::format::{FormatChoice, FormatSpec};
     use crate::display::Presenter;
     use crate::display::EXIT_OPERATIONAL;
     use crate::output::palette::Palette;
@@ -114,7 +114,7 @@ mod tests {
     /// Drive `render_vault_list` through the same resolution `emit` performs —
     /// `vault list` is unstyled, so a no-op palette sink.
     fn drive<O: Write, E: Write>(view: VaultListView, presenter: &mut Presenter<O, E>) -> i32 {
-        let format = view.spec.resolve(view.explicit, false);
+        let format = view.format.resolve(false);
         let palette = Palette::off();
         let (out, err) = presenter.streams();
         let mut sink = Sink::new(out, &palette, 80);
@@ -135,10 +135,12 @@ mod tests {
     fn vault_list_view(explicit: Format) -> VaultListView {
         VaultListView {
             vaults: vec![sample_vault()],
-            explicit: Some(explicit),
-            spec: FormatSpec {
-                tty: Format::Records,
-                piped: Format::Records,
+            format: FormatChoice {
+                explicit: Some(explicit),
+                spec: FormatSpec {
+                    tty: Format::Records,
+                    piped: Format::Records,
+                },
             },
         }
     }

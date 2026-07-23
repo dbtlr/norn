@@ -134,7 +134,7 @@ fn count_group_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::display::format::FormatSpec;
+    use crate::display::format::{FormatChoice, FormatSpec};
     use crate::display::Presenter;
     use crate::display::EXIT_OPERATIONAL;
     use crate::output::palette::Palette;
@@ -144,7 +144,7 @@ mod tests {
     /// Drive `render_count` through the same resolution `emit` performs — count
     /// is unstyled, so a no-op palette sink.
     fn drive<O: Write, E: Write>(view: CountView, presenter: &mut Presenter<O, E>) -> i32 {
-        let format = view.spec.resolve(view.explicit, false);
+        let format = view.format.resolve(false);
         let palette = Palette::off();
         let (out, err) = presenter.streams();
         let mut sink = Sink::new(out, &palette, 80);
@@ -198,10 +198,12 @@ mod tests {
     fn count_view(explicit: Format) -> CountView {
         CountView {
             report: CountReport::Total { total: 3 },
-            explicit: Some(explicit),
-            spec: FormatSpec {
-                tty: Format::Records,
-                piped: Format::Records,
+            format: FormatChoice {
+                explicit: Some(explicit),
+                spec: FormatSpec {
+                    tty: Format::Records,
+                    piped: Format::Records,
+                },
             },
         }
     }
@@ -302,10 +304,12 @@ mod tests {
                 total: 3,
                 groups,
             },
-            explicit: Some(Format::Json),
-            spec: FormatSpec {
-                tty: Format::Records,
-                piped: Format::Records,
+            format: FormatChoice {
+                explicit: Some(Format::Json),
+                spec: FormatSpec {
+                    tty: Format::Records,
+                    piped: Format::Records,
+                },
             },
         };
         let mut out = Vec::new();
