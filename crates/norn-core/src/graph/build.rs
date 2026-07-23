@@ -229,9 +229,8 @@ fn parse_document(
         extract_frontmatter(&content, &mut diagnostics);
     let body_text = body.to_string();
     // `parse_headings` reports spans relative to `body`; re-base them to
-    // content-absolute so a
-    // document's heading spans stay consistent with its link spans and with the
-    // pre-rewrite output contract.
+    // content-absolute so a document's heading spans stay consistent with its
+    // link spans.
     let headings = parse_headings(body)
         .into_iter()
         .map(|mut heading| {

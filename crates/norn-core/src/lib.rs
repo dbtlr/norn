@@ -3,7 +3,7 @@
 //!
 //! May never: Touch sockets, clap, rmcp, the central config, process spawning, or ambient env/XDG/CWD resolution — all roots and paths arrive as values.
 //!
-//! # Surface (ported from the pre-rewrite tree, ADR 0018)
+//! # Surface (ADR 0018)
 //!
 //! - [`domain`] — the serializable graph vocabulary: [`domain::Document`],
 //!   [`domain::GraphIndex`], the [`domain::Link`] model, and the diagnostic /

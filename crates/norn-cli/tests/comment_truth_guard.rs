@@ -2,20 +2,30 @@
 //! code facts. Provenance — who or what once validated a shape — belongs to git
 //! history and ADRs, never to a source comment.
 //!
-//! This test scans every live crate's `src/` tree and rejects the authority
-//! needles a migration leaves behind: "donor" attributions, "oracle" /
-//! "parity"-harness citations, byte-identity framing, and PD-ledger ids used as
-//! rationale. A shape's justification must be the constraint itself (what the
-//! contract IS and why it holds), stated in the present tense.
+//! This test scans every live crate's `src/`, `tests/`, and `benches/` trees
+//! and rejects the authority needles a migration leaves behind: "donor"
+//! attributions, "oracle" / "parity"-harness citations, byte-identity framing,
+//! retired-tree citations, and PD-ledger ids used as rationale. A shape's
+//! justification must be the constraint itself (what the contract IS and why
+//! it holds), stated in the present tense.
+//!
+//! The scan matches on whole file text — code and string literals alike, not
+//! just `//` / `///` comments — so a needle inside a test identifier or an
+//! assertion message trips it exactly like a needle inside a comment. That is
+//! why the sweep this guard enforces renamed a handful of test helpers and
+//! functions rather than only editing comments.
 //!
 //! ADR references (`ADR 0018`) and pending-work task ids (`NRN-123`) are FINE —
 //! they are durable decision records and live TODO markers, not point-in-time
 //! validation authorities. The needle list below is deliberately narrow so it
 //! catches the disease without flagging legitimate uses of the word "parity"
-//! (e.g. "dry-run/apply parity", "CLI ⇄ plan parity", "EAV/scan parity").
+//! (e.g. "dry-run/apply parity", "CLI ⇄ plan parity", "EAV/scan parity") or of
+//! the word "retired" in ordinary prose (e.g. "the split was retired (ADR
+//! 0022)") — only the `retired/` path form is a needle.
 //!
-//! It lives in `tests/` (outside every scanned `src/` tree) so its own needle
-//! literals are never scanned.
+//! It lives in `tests/` under `norn-cli`, whose own `tests/` directory IS
+//! scanned by this guard — so this file's own needle literals must stay out of
+//! its source text (this doc comment paraphrases rather than quotes them).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -63,6 +73,18 @@ const NEEDLES: &[(&str, &str)] = &[
         "parity-pinned",
         "a contract is not \"parity-pinned\"; state what makes it a contract",
     ),
+    (
+        "retired/",
+        "a retired/-tree citation is not a rationale; state the present-tense contract",
+    ),
+    (
+        "ported from",
+        "provenance belongs to git history, not a comment; state the contract itself",
+    ),
+    (
+        "pre-rewrite",
+        "the pre-rewrite tree is not a comment authority; state the present-tense contract",
+    ),
 ];
 
 /// An explicit allowlist for genuinely operational references that would
@@ -73,6 +95,11 @@ const NEEDLES: &[(&str, &str)] = &[
 ///
 /// Format: `(crate-relative path, needle, reason)`.
 const ALLOWLIST: &[(&str, &str, &str)] = &[];
+
+/// This guard's own test file, excluded from the scan despite living in a
+/// scanned `tests/` tree: it must define the needle literals verbatim to
+/// match against, so it cannot itself be needle-free text.
+const SELF_PATH: &str = "crates/norn-cli/tests/comment_truth_guard.rs";
 
 /// A PD-ledger id (`PD-1`, `PD-42`, …) cited as rationale is the same disease:
 /// a point-in-time ledger reference standing in for the present-tense contract.
@@ -160,6 +187,9 @@ fn scan_dir(dir: &Path, root: &Path, hits: &mut Vec<String>) {
             .expect("scanned path is under the workspace root")
             .to_string_lossy()
             .replace('\\', "/");
+        if rel == SELF_PATH {
+            continue;
+        }
         scan_file(&path, &rel, hits);
     }
 }
@@ -180,10 +210,12 @@ fn live_tree_comments_carry_no_authority_needles() {
         if !crate_dir.is_dir() || UNSCANNED_CRATES.contains(&name) {
             continue;
         }
-        let src = crate_dir.join("src");
-        if src.is_dir() {
-            scanned_any = true;
-            scan_dir(&src, &root, &mut hits);
+        for sub in ["src", "tests", "benches"] {
+            let dir = crate_dir.join(sub);
+            if dir.is_dir() {
+                scanned_any = true;
+                scan_dir(&dir, &root, &mut hits);
+            }
         }
     }
 

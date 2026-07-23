@@ -159,7 +159,7 @@ fn second_open_connects_to_the_same_owner() {
 
 /// NRN-360, the whole user story: summoning against a vault whose
 /// `.norn/config.yaml` is present but invalid surfaces the config error on the
-/// USER-error path ([`ClientError::Rejected`], carrying the oracle-shaped
+/// USER-error path ([`ClientError::Rejected`], carrying the
 /// `invalid config …` message) — never an owner-health/owner-gone failure or a
 /// crash loop. The failed owner then EAGER-REAPS (well under the idle TTL, since
 /// it can never serve a useful frame), so once the operator FIXES the config an
@@ -202,7 +202,7 @@ fn invalid_config_surfaces_error_eager_reaps_then_a_fix_is_picked_up() {
         ClientError::Rejected { message, .. } => {
             assert!(
                 message.contains("invalid config "),
-                "expected the oracle config-error message, got {message:?}"
+                "expected the config-error message, got {message:?}"
             );
             assert!(
                 message.contains("unknown field `bogus`"),
