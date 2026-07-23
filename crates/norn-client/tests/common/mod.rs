@@ -87,6 +87,10 @@ pub fn wait_until(budget: std::time::Duration, mut cond: impl FnMut() -> bool) -
 /// prints nothing. Both mean the runtime is gone and the connection is closed, so
 /// "no longer running" is the true terminal condition. Portable across macOS and
 /// Linux, no libc dependency in the test crate.
+///
+/// Requires a `ps` supporting `-o state=` (standard procps on Linux, BSD `ps` on
+/// macOS); a busybox `ps` lacks it, which is fine for the CI runners this suite
+/// targets today.
 pub fn owner_still_running(pid: u32) -> bool {
     match std::process::Command::new("ps")
         .args(["-o", "state=", "-p", &pid.to_string()])

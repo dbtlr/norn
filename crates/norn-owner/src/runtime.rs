@@ -601,6 +601,10 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                 slot.serve_read(|cache| Ok(cache.documents_matching(&Default::default())?.len()))
             })
             .await;
+            // Probe returns a bare count, never a report-or-`FieldRejection`, so it
+            // keeps this local classifier rather than `classify_read` — the same
+            // fault arms (cache error, task panic), minus the `Rejected` arm a
+            // report-shaped read needs.
             match result {
                 Ok(Ok(count)) => OwnerFrame::Probe {
                     document_count: count as u64,
@@ -615,7 +619,7 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                 Err(join_err) => {
                     state.go_fatal();
                     OwnerFrame::Error {
-                        message: format!("read task panicked (exit-to-heal): {join_err}"),
+                        message: format!("probe task panicked (exit-to-heal): {join_err}"),
                     }
                 }
             }
@@ -922,12 +926,19 @@ async fn dispatch_read<R: Send + 'static>(
 /// owner's single-writer lock (ADR 0013/0017, NRN-411): the ready-slot gate, lock
 /// acquisition, the blocking critical section, and outcome classification.
 ///
-/// The `mutation_lock` is acquired in THIS one seam — no mutation arm carries its
-/// own lock line, so a new mutation verb cannot forget it: the mutation-executing
-/// primitive (`run_mutation`, nested below) is reachable ONLY from here, and this
-/// function always holds the lock across it. The guard is held across the whole
+/// `mutation_lock` has exactly one acquisition site: this function. Every
+/// mutation arm that calls through this seam carries no lock line of its own, so
+/// the per-arm "forgot to take the lock" mistake is eliminated for those arms —
+/// there is no lock line left to omit. The guard is held across the whole
 /// blocking section so a second mutation waits and `{{seq}}` allocation observes
 /// prior creates.
+///
+/// This does not make a bypass impossible: a hand-rolled arm could still reach
+/// `slot.serve_read` directly and write without ever calling this seam (the
+/// `Probe` arm above proves the shape compiles). That bypass is closed by
+/// `mutation_dispatch_guard`'s test, not by construction — it scans every
+/// mutation-class `ClientFrame` arm and fails if one does not route through
+/// `dispatch_mutation`.
 async fn dispatch_mutation<R: Send + 'static>(
     state: &Arc<OwnerState>,
     verb: &str,
