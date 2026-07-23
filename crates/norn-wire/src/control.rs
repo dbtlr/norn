@@ -18,10 +18,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ApplyParams, ApplyReport, CountParams, CountReport, DeleteParams, DescribeParams,
-    DescribeReport, EditParams, EditReport, FindParams, FindReport, GetParams, GetReport,
-    MoveParams, NewParams, NewReport, RepairParams, RepairReport, RewriteWikilinkParams, SetParams,
-    SetReport, ValidateParams, ValidateReport,
+    ApplyParams, ApplyReport, AuditParams, AuditReport, CountParams, CountReport, DeleteParams,
+    DescribeParams, DescribeReport, EditParams, EditReport, FindParams, FindReport, GetParams,
+    GetReport, MoveParams, NewParams, NewReport, RepairParams, RepairReport, RewriteWikilinkParams,
+    SetParams, SetReport, ValidateParams, ValidateReport,
 };
 
 /// The control-frame protocol version. Under ADR 0012's amendment the socket is
@@ -89,6 +89,11 @@ pub enum ClientFrame {
     /// deterministic `MigrationPlan` — WITHOUT applying it. Read-only (`apply`
     /// executes the plan).
     Repair { params: RepairParams },
+    /// An `audit` request: read the per-vault mutation event stream (the durable
+    /// JSONL store), filter, and return the newest-first matches. Read-only —
+    /// the OWNER reads the store (it is co-located with the vault's state home;
+    /// an off-filesystem client could not), like `get --format markdown`.
+    Audit { params: AuditParams },
     /// A `set` request: mutate a document's frontmatter fields. Applies when
     /// `confirm` is set, else forecasts. The owner serializes writes under its
     /// single-writer lock.
@@ -147,6 +152,9 @@ pub enum OwnerFrame {
     /// The answer to `Repair`: the deterministic `MigrationPlan` (as its
     /// pretty-JSON string) plus the bare-summary finding tally and exit signal.
     Repair { report: RepairReport },
+    /// The answer to `Audit`: the newest-first matched events from the mutation
+    /// stream (empty when the stream is absent or nothing matched).
+    Audit { report: AuditReport },
     /// The answer to `Set`: the frontmatter change report (applied or forecast,
     /// or a coded `outcome = refused` on a clean pre-write decline).
     Set { report: SetReport },
