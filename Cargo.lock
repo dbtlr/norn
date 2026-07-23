@@ -773,6 +773,7 @@ dependencies = [
  "camino",
  "chrono",
  "globset",
+ "norn-fixtures",
  "norn-frontmatter",
  "norn-wire",
  "percent-encoding",

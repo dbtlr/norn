@@ -30,6 +30,8 @@
 //!   the two-class writer queue, generational read pool, and the owner-facing
 //!   [`VaultCacheSlot`](slot::VaultCacheSlot).
 
+#[cfg(test)]
+mod apply_size_independence;
 pub(crate) mod canonical;
 mod change_detection;
 pub(crate) mod engine;
