@@ -1139,6 +1139,62 @@ const READ_CASES: &[Case] = &[
         normalize: NO_NORM,
         plan: None,
     },
+    Case {
+        // NRN-44 (PD-140): the `--col` "not present in any matching document"
+        // warning is guarded to the FULL, non-empty result set — the same guard
+        // `--sort` already carries. A `--limit 1` truncated page returns ONE doc
+        // that lacks `nosuchfield`, but the field could live on any of the docs
+        // beyond the page boundary, so the rewrite SUPPRESSES the warning; the
+        // oracle emits it (the pre-fix false positive). Identical stdout (the
+        // one returned doc's projection) and exit 0 on both — the sole divergence
+        // is the stderr warning. Gated by PD-140.
+        id: "read-find-col-truncated-page-suppressed-zoo",
+        argv: &[
+            "find",
+            "--all",
+            "--col",
+            "nosuchfield",
+            "--limit",
+            "1",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // NRN-44 (PD-140): the zero-match arm of the same guard. A predicate that
+        // matches no document makes every `--col` field trivially absent, which
+        // is redundant with the `total: 0` signal rather than informative about
+        // the field. The rewrite suppresses the warning; the oracle emits it.
+        // Identical empty-result stdout and exit 0 on both. Gated by PD-140.
+        id: "read-find-col-zero-match-suppressed-zoo",
+        argv: &[
+            "find",
+            "--eq",
+            "type:zzz-nonexistent",
+            "--col",
+            "nosuchfield",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
 ];
 
 /// describe ports for real (NRN-347): the structure view (folders + declared
@@ -2373,6 +2429,28 @@ const MUTATE_CASES: &[Case] = &[
         ported: true,
         expect_oracle_exit: 2,
         requires_doc: Some("notes/cycle-b.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    // delete: an ambiguous-stem refusal (PD-139/NRN-402). `duplicate` resolves to
+    // both `notes/duplicate.md` and `archive2/duplicate.md`, so both binaries
+    // refuse `target-ambiguous` (exit 2), write-free. The refusal message diverges
+    // on the candidate list: the oracle renders `→ []` (the candidates were
+    // dropped before the message was built), the rewrite the REAL sorted candidate
+    // paths `→ ["archive2/duplicate.md", "notes/duplicate.md"]`. Records format so
+    // the divergence is purely that list (the `error: <msg>` framing is identical
+    // on both); the json refusal envelope difference is PD-135's territory, kept
+    // out of this case. Gated by PD-139.
+    Case {
+        id: "mutate-delete-ambiguous-refusal-zoo",
+        argv: &["delete", "duplicate"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/duplicate.md"),
         requires_code: None,
         normalize: NO_NORM,
         plan: None,

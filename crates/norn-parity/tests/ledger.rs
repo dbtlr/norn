@@ -333,6 +333,43 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         norn_parity::ledger::Reason::DecidedBetter,
         "PD-136 is decided-better"
     );
+
+    // NRN-402 (ADR 0018) diagnostics sweep: the `delete` ambiguous-stem refusal
+    // message (PD-139, one case) and the --col unknown-field truncation/empty
+    // guard (PD-140, two cases), both discovered-inconsistency.
+    assert_eq!(
+        ledger
+            .entry_for_case("mutate-delete-ambiguous-refusal-zoo")
+            .map(|e| e.id.as_str()),
+        Some("PD-139"),
+        "mutate-delete-ambiguous-refusal-zoo is gated by PD-139"
+    );
+    assert_eq!(
+        ledger
+            .entry_for_case("mutate-delete-ambiguous-refusal-zoo")
+            .unwrap()
+            .reason,
+        norn_parity::ledger::Reason::DiscoveredInconsistency,
+        "PD-139 is discovered-inconsistency"
+    );
+    for case in [
+        "read-find-col-truncated-page-suppressed-zoo",
+        "read-find-col-zero-match-suppressed-zoo",
+    ] {
+        assert_eq!(
+            ledger.entry_for_case(case).map(|e| e.id.as_str()),
+            Some("PD-140"),
+            "{case} is gated by PD-140"
+        );
+    }
+    assert_eq!(
+        ledger
+            .entry_for_case("read-find-col-truncated-page-suppressed-zoo")
+            .unwrap()
+            .reason,
+        norn_parity::ledger::Reason::DiscoveredInconsistency,
+        "PD-140 is discovered-inconsistency"
+    );
 }
 
 #[test]
