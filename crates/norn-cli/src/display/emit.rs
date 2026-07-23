@@ -334,7 +334,7 @@ mod tests {
                     message: "refused".into(),
                     path: None,
                 }),
-                MutationOutcome::Applied => None,
+                MutationOutcome::Applied | MutationOutcome::Forecast => None,
             },
             warnings: vec![],
         }
@@ -353,11 +353,11 @@ mod tests {
         }))
     }
 
-    /// A clean, unrefused forecast: `applied: false`, `outcome: Applied` — the
+    /// A clean, unrefused forecast: `applied: false`, `outcome: Forecast` — the
     /// shape every mutation verb's first render produces when the ladder
     /// decided `confirm: false` and nothing was refused. Renders at exit 0.
     fn forecast_output() -> Result<Output, Diagnostic> {
-        set_output(false, MutationOutcome::Applied)
+        set_output(false, MutationOutcome::Forecast)
     }
 
     /// A refused report — renders at exit 2 (`EXIT_USAGE`), so a test that
