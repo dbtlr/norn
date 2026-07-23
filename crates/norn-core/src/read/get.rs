@@ -10,8 +10,9 @@
 //! # Error model
 //!
 //! Unlike `find`/`count`, target resolution failures are NOT request-rejecting
-//! user errors — a missing or ambiguous target becomes a NOTE and the report
-//! still returns (the CLI derives its exit-1 from an `error:`-prefixed note).
+//! user errors — a missing or ambiguous target becomes a typed
+//! [`Note`](norn_wire::Note) and the report still returns (the CLI derives its
+//! exit-1 from an `error`-severity note, never from message text).
 //! So [`execute`] returns `Ok(Ok(report))` on every well-formed request; only a
 //! cache read failure is `Err(_)` (exit-to-heal, ADR 0017).
 //!
@@ -28,7 +29,7 @@ use anyhow::Result;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use norn_frontmatter::section::{resolve_section, SectionError};
-use norn_wire::{GetParams, GetRecord, GetReport};
+use norn_wire::{GetParams, GetRecord, GetReport, Note};
 
 use crate::cache::Cache;
 use crate::query::DocumentQuery;
@@ -42,7 +43,7 @@ pub fn execute(
     _today: &str,
 ) -> Result<Result<GetReport, String>> {
     let mut records: Vec<GetRecord> = Vec::new();
-    let mut notes: Vec<String> = Vec::new();
+    let mut notes: Vec<Note> = Vec::new();
 
     // `--section` headings, deduped preserving first-occurrence order — a user
     // can repeat `--section X`, and without dedup the keyed JSON object collapses
@@ -60,17 +61,24 @@ pub fn execute(
     for raw in &params.targets {
         let resolved = resolve_target(cache, raw)?;
         if resolved.is_empty() {
-            notes.push(format!("error: '{raw}' did not resolve to any doc"));
+            notes.push(Note::error(
+                "target-not-found",
+                format!("'{raw}' did not resolve to any doc"),
+            ));
             continue;
         }
         if resolved.len() > 1 {
-            notes.push(format!("note: '{raw}' resolved to {} docs", resolved.len()));
+            notes.push(Note::warning(
+                "target-ambiguous",
+                format!("'{raw}' resolved to {} docs", resolved.len()),
+            ));
         }
         for path in &resolved {
             let Some(deep) = cache.document_with_connections(path.as_path(), wants_body_load)?
             else {
-                notes.push(format!(
-                    "error: '{path}' missing from cache after resolution"
+                notes.push(Note::error(
+                    "cache-missing",
+                    format!("'{path}' missing from cache after resolution"),
                 ));
                 continue;
             };
@@ -196,14 +204,15 @@ fn resolve_target(cache: &Cache, raw: &str) -> Result<Vec<Utf8PathBuf>> {
 /// Resolve every requested `--section` heading against one document's body,
 /// reusing the shared `resolve_section` primitive so a section READ mirrors a
 /// section WRITE (identical spans + missing/ambiguous failure modes). A heading
-/// that fails to resolve is warned and omitted; if NONE resolve, one `error:`
-/// note is pushed (so this target counts toward the nonzero-exit contract) but
-/// the record is still returned with an empty `sections`.
+/// that fails to resolve is warned and omitted; if NONE resolve, one
+/// `error`-severity note is pushed (so this target counts toward the
+/// nonzero-exit contract) but the record is still returned with an empty
+/// `sections`.
 fn resolve_requested_sections(
     body: &str,
     headings: &[String],
     path: &Utf8Path,
-    notes: &mut Vec<String>,
+    notes: &mut Vec<Note>,
 ) -> Vec<(String, String)> {
     let mut resolved = Vec::with_capacity(headings.len());
     for heading in headings {
@@ -215,20 +224,25 @@ fn resolve_requested_sections(
                 ));
             }
             Err(SectionError::HeadingNotFound { .. }) => {
-                notes.push(format!(
-                    "warning: --section heading '{heading}' not found in '{path}'"
+                notes.push(Note::warning(
+                    "section-not-found",
+                    format!("--section heading '{heading}' not found in '{path}'"),
                 ));
             }
             Err(SectionError::HeadingAmbiguous { count, .. }) => {
-                notes.push(format!(
-                    "warning: --section heading '{heading}' is ambiguous ({count} matches) in '{path}'"
+                notes.push(Note::warning(
+                    "section-ambiguous",
+                    format!(
+                        "--section heading '{heading}' is ambiguous ({count} matches) in '{path}'"
+                    ),
                 ));
             }
         }
     }
     if resolved.is_empty() {
-        notes.push(format!(
-            "error: none of the requested --section headings resolved for '{path}'"
+        notes.push(Note::error(
+            "section-unresolved",
+            format!("none of the requested --section headings resolved for '{path}'"),
         ));
     }
     resolved
@@ -405,7 +419,7 @@ mod tests {
         assert!(report
             .notes
             .iter()
-            .any(|n| n.starts_with("error:") && n.contains("nope")));
+            .any(|n| n.is_error() && n.code == "target-not-found" && n.message.contains("nope")));
     }
 
     #[test]
@@ -435,10 +449,9 @@ mod tests {
         };
         let report = execute(&cache, &p, TODAY).unwrap().unwrap();
         assert!(report.records[0].sections.as_ref().unwrap().is_empty());
-        assert!(report
-            .notes
-            .iter()
-            .any(|n| n.starts_with("error:") && n.contains("none of the requested")));
+        assert!(report.notes.iter().any(|n| n.is_error()
+            && n.code == "section-unresolved"
+            && n.message.contains("none of the requested")));
     }
 
     #[test]

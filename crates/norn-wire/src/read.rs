@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use crate::{FilterParams, Finding, MigrationPlan, SortPaginateParams};
+use crate::{FilterParams, Finding, MigrationPlan, Note, SortPaginateParams};
 
 /// A `find` request: the shared filter + sort/paging vocabulary. The find-only
 /// `--limit` default (10) and the `--all` help-gate are applied CLI-side and
@@ -137,16 +137,19 @@ pub struct GetParams {
     pub markdown: bool,
 }
 
-/// A `get` response: the resolved records plus non-fatal notes (ambiguity
-/// warnings, missing-target errors — routed to stderr; an `error:`-prefixed note
-/// drives the exit-1 signal). For `--format markdown`, `records` carries the
+/// A `get` response: the resolved records plus non-fatal typed notes (ambiguity
+/// warnings, missing-target errors). Each [`Note`] carries its own
+/// [`Severity`](crate::Severity); an `error`-severity note drives the exit-1 /
+/// `isError` signal, decided from the typed field, never from message text
+/// (ADR 0022). The CLI renders each note as a POSIX-shaped stderr line and MCP
+/// passes the typed notes through. For `--format markdown`, `records` carries the
 /// resolved paths (for the CLI's count/warnings) and `markdown_content` carries
 /// the single doc's exact source bytes when exactly one resolved.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct GetReport {
     pub records: Vec<GetRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notes: Vec<String>,
+    pub notes: Vec<Note>,
     /// The exact source bytes for a single-doc `--format markdown` request.
     /// `None` for structured formats, or when markdown resolved zero / more than
     /// one doc (the CLI derives the error from `records.len()`), or when the
