@@ -111,18 +111,63 @@ impl MigrationPlan {
     /// same hash — the hash identifies the plan's content, not its on-disk
     /// representation.
     ///
-    /// `generated_at` is excluded: it is a wall-clock provenance stamp (set by
-    /// the repair generator, `None` for hand-authored/verb-synthesized plans),
-    /// never semantic content, so two otherwise-identical plans stamped at
-    /// different instants must hash identically — the CAS/plan-identity
-    /// contract (ADR 0015/0024) depends on that determinism. Every other field
-    /// (including `generator`, which is a fixed literal per producer) hashes as
-    /// authored.
+    /// Classification rule, enforced at compile time by the destructure below:
+    /// a field that changes what the plan DOES is semantic and is hashed; a
+    /// field that only records when/how the plan was produced, without
+    /// changing its effect, is provenance and is excluded. A new
+    /// `MigrationPlan` field breaks this destructure until it is named on one
+    /// side or the other, so classification can't be forgotten by omission.
+    ///
+    /// - `generated_at` is EXCLUDED: a wall-clock provenance stamp (set by the
+    ///   repair generator, `None` for hand-authored/verb-synthesized plans),
+    ///   never semantic content, so two otherwise-identical plans stamped at
+    ///   different instants must hash identically — the CAS/plan-identity
+    ///   contract (ADR 0015/0024) depends on that determinism.
+    /// - `generator` IS provenance too (it names the producer, not the plan's
+    ///   effect) but is hashed anyway — an explicit, current contract choice,
+    ///   not an oversight. It is a fixed literal per producer, so it doesn't
+    ///   reintroduce non-determinism the way a timestamp would; changing this
+    ///   to exclude `generator` would be a hash-contract change, not a bugfix.
+    /// - Every other field is semantic plan content and is hashed.
     pub fn canonical_hash(&self) -> String {
-        let mut for_hash = self.clone();
-        for_hash.generated_at = None;
-        let canonical =
-            serde_json::to_string(&for_hash).expect("MigrationPlan must always serialize");
+        let MigrationPlan {
+            schema_version,
+            vault_root,
+            generator,
+            generated_at: _,
+            preconditions,
+            operations,
+            skipped,
+            plan_footnote,
+        } = self;
+
+        /// The hashed projection of a [`MigrationPlan`] — every field named
+        /// explicitly, per the classification rule on [`MigrationPlan::canonical_hash`].
+        #[derive(Serialize)]
+        struct HashView<'a> {
+            schema_version: &'a u32,
+            vault_root: &'a String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            generator: &'a Option<String>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            preconditions: &'a Vec<PlanPrecondition>,
+            operations: &'a Vec<MigrationOp>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            skipped: &'a Vec<SkippedFinding>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            plan_footnote: &'a Option<String>,
+        }
+
+        let view = HashView {
+            schema_version,
+            vault_root,
+            generator,
+            preconditions,
+            operations,
+            skipped,
+            plan_footnote,
+        };
+        let canonical = serde_json::to_string(&view).expect("MigrationPlan must always serialize");
         blake3::hash(canonical.as_bytes()).to_hex().to_string()
     }
 }
@@ -617,6 +662,41 @@ operations:
         );
         // Also matches the unstamped (`None`) plan the existing tests cover.
         assert_eq!(base.canonical_hash(), stamped_early.canonical_hash());
+    }
+
+    #[test]
+    fn canonical_hash_differs_on_semantic_change() {
+        // Closes the contract's other direction: two plans differing only in
+        // one operation's `fields` (semantic content, unlike `generated_at`)
+        // must hash DIFFERENTLY — the hash must not collapse a real content
+        // change the way it deliberately collapses a provenance-only one.
+        let base = MigrationPlan {
+            schema_version: MIGRATION_PLAN_SCHEMA_VERSION,
+            vault_root: "/abs/vault".into(),
+            generator: Some("norn-repair".into()),
+            generated_at: None,
+            preconditions: vec![],
+            operations: vec![MigrationOp {
+                kind: "move_document".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({"src": "a.md", "dst": "b.md"}),
+                footnote: None,
+            }],
+            skipped: vec![],
+            plan_footnote: None,
+        };
+        let changed = MigrationPlan {
+            operations: vec![MigrationOp {
+                kind: "move_document".into(),
+                id: None,
+                requires: vec![],
+                fields: serde_json::json!({"src": "a.md", "dst": "c.md"}),
+                footnote: None,
+            }],
+            ..base.clone()
+        };
+        assert_ne!(base.canonical_hash(), changed.canonical_hash());
     }
 
     #[test]
