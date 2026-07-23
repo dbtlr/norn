@@ -12,7 +12,8 @@
 
 use serde_json::{Map, Value};
 use std::collections::HashSet;
-use std::io::Write;
+
+use crate::display::Conversation;
 
 /// The structural facets addressable via `--col` (dot-prefixed; dot stripped
 /// here). Bare `--col` names are frontmatter field names instead.
@@ -181,11 +182,11 @@ pub fn frontmatter_to_display(fm: &Value) -> String {
 pub fn warn_col_ignored(
     cols: &[String],
     inert_format: Option<&str>,
-    stderr: &mut dyn Write,
+    conv: &mut Conversation<'_>,
 ) -> std::io::Result<()> {
     if let Some(fmt) = inert_format {
         if !cols.is_empty() {
-            writeln!(stderr, "warning: --col is ignored with --format {fmt}")?;
+            conv.warning(&format!("--col is ignored with --format {fmt}"))?;
         }
     }
     Ok(())
@@ -196,11 +197,11 @@ pub fn warn_col_ignored(
 pub fn warn_section_ignored(
     sections: &[String],
     inert_format: Option<&str>,
-    stderr: &mut dyn Write,
+    conv: &mut Conversation<'_>,
 ) -> std::io::Result<()> {
     if let Some(fmt) = inert_format {
         if !sections.is_empty() {
-            writeln!(stderr, "warning: --section is ignored with --format {fmt}")?;
+            conv.warning(&format!("--section is ignored with --format {fmt}"))?;
         }
     }
     Ok(())

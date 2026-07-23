@@ -1,7 +1,7 @@
 //! `count` (NRN-409).
 
 use std::fmt::Write as _;
-use std::io::{self, Write};
+use std::io;
 
 use norn_wire::{CountReport, GroupNode};
 
@@ -28,7 +28,7 @@ pub(crate) fn render_count(
         } else {
             writeln!(sink.writer(), "{text}")?;
         }
-        warn_unknown_by_count(&view.report, conv.writer())?;
+        warn_unknown_by_count(&view.report, conv)?;
         Ok(EXIT_OK)
     })();
     render_outcome(result, conv.writer())
@@ -49,7 +49,7 @@ const MISSING_BUCKET: &str = "(missing)";
 /// the common case).
 /// A zero-match count naturally produces an EMPTY `groups` map (not an
 /// all-`(missing)` one), so this never fires spuriously on `total: 0`.
-fn warn_unknown_by_count(report: &CountReport, err: &mut dyn Write) -> io::Result<()> {
+fn warn_unknown_by_count(report: &CountReport, conv: &mut Conversation<'_>) -> io::Result<()> {
     let (field, all_missing) = match report {
         CountReport::Total { .. } => return Ok(()),
         CountReport::Grouped { by, groups, .. } => (
@@ -67,10 +67,9 @@ fn warn_unknown_by_count(report: &CountReport, err: &mut dyn Write) -> io::Resul
         }
     };
     if all_missing {
-        writeln!(
-            err,
-            "warning: --by field `{field}` not present in any matching document"
-        )?;
+        conv.warning(&format!(
+            "--by field `{field}` not present in any matching document"
+        ))?;
     }
     Ok(())
 }
@@ -140,6 +139,7 @@ mod tests {
     use crate::output::palette::Palette;
     use crate::test_support::FailingWriter;
     use std::collections::BTreeMap;
+    use std::io::Write;
 
     /// Drive `render_count` through the same resolution `emit` performs — count
     /// is unstyled, so a no-op palette sink.
@@ -241,7 +241,8 @@ mod tests {
             groups,
         };
         let mut err = Vec::new();
-        warn_unknown_by_count(&report, &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_by_count(&report, &mut conv).unwrap();
         assert_eq!(
             String::from_utf8(err).unwrap(),
             "warning: --by field `priorty` not present in any matching document\n"
@@ -259,7 +260,8 @@ mod tests {
             groups,
         };
         let mut err = Vec::new();
-        warn_unknown_by_count(&report, &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_by_count(&report, &mut conv).unwrap();
         assert!(
             err.is_empty(),
             "a partially-missing field is known, not unknown: {err:?}"
@@ -270,7 +272,8 @@ mod tests {
     fn warn_unknown_by_count_silent_for_the_bare_total_variant() {
         let report = CountReport::Total { total: 3 };
         let mut err = Vec::new();
-        warn_unknown_by_count(&report, &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_by_count(&report, &mut conv).unwrap();
         assert!(err.is_empty(), "no --by field was requested: {err:?}");
     }
 
@@ -286,7 +289,8 @@ mod tests {
             groups: outer,
         };
         let mut err = Vec::new();
-        warn_unknown_by_count(&report, &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_by_count(&report, &mut conv).unwrap();
         assert_eq!(
             String::from_utf8(err).unwrap(),
             "warning: --by field `priorty` not present in any matching document\n",

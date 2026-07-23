@@ -53,10 +53,16 @@ pub use sink::Sink;
 /// [`OpStatus`]: norn_wire::OpStatus
 /// [`PreconditionStatus`]: norn_wire::PreconditionStatus
 pub(crate) fn serde_label<T: serde::Serialize>(value: &T) -> String {
-    serde_json::to_value(value)
+    let label = serde_json::to_value(value)
         .ok()
         .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    debug_assert!(
+        !label.is_empty(),
+        "serde_label is for a unit-variant enum serializing to a bare string; \
+         got a value that did not (empty label)"
+    );
+    label
 }
 
 /// Clean success: every operation applied (or a dry-run forecast). Produced by

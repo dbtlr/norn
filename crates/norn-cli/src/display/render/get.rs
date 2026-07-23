@@ -50,10 +50,10 @@ pub(crate) fn render_get(
         }
 
         let paths_inert = (format == Format::Paths).then_some("paths");
-        warn_col_ignored(&view.cols, paths_inert, conv.writer())?;
-        warn_section_ignored(&view.sections, paths_inert, conv.writer())?;
-        warn_unknown_cols_get(&view.cols, &view.report, conv.writer())?;
-        warn_unknown_sort_get(&view.report, view.sort_field.as_deref(), conv.writer())?;
+        warn_col_ignored(&view.cols, paths_inert, conv)?;
+        warn_section_ignored(&view.sections, paths_inert, conv)?;
+        warn_unknown_cols_get(&view.cols, &view.report, conv)?;
+        warn_unknown_sort_get(&view.report, view.sort_field.as_deref(), conv)?;
         for note in &view.report.notes {
             conv.report_note(note)?;
         }
@@ -72,8 +72,8 @@ pub(crate) fn render_get(
 /// unless exactly one document resolved; `--col`/`--section` are ignored (warned).
 fn render_get_markdown(view: &GetView, out: &mut dyn Write, conv: &mut Conversation<'_>) -> i32 {
     let result: io::Result<i32> = (|| {
-        warn_col_ignored(&view.cols, Some("markdown"), conv.writer())?;
-        warn_section_ignored(&view.sections, Some("markdown"), conv.writer())?;
+        warn_col_ignored(&view.cols, Some("markdown"), conv)?;
+        warn_section_ignored(&view.sections, Some("markdown"), conv)?;
         for note in &view.report.notes {
             conv.report_note(note)?;
         }
@@ -180,12 +180,12 @@ fn render_get_records(
 fn warn_unknown_cols_get(
     cols: &[String],
     report: &GetReport,
-    err: &mut dyn Write,
+    conv: &mut Conversation<'_>,
 ) -> io::Result<()> {
     let (facets, fields) = split_cols(cols);
     for facet in &facets {
         if !KNOWN_FACETS.contains(&facet.as_str()) {
-            writeln!(err, "warning: {}", unknown_facet_message(facet))?;
+            conv.warning(&unknown_facet_message(facet))?;
         }
     }
     for field in &fields {
@@ -196,10 +196,9 @@ fn warn_unknown_cols_get(
                 .is_some_and(|obj| obj.contains_key(field))
         });
         if !present_in_any {
-            writeln!(
-                err,
-                "warning: --col field '{field}' not present in document (bare names select frontmatter fields; use '.{field}' for a structural facet)"
-            )?;
+            conv.warning(&format!(
+                "--col field '{field}' not present in document (bare names select frontmatter fields; use '.{field}' for a structural facet)"
+            ))?;
         }
     }
     Ok(())
@@ -211,7 +210,7 @@ fn warn_unknown_cols_get(
 fn warn_unknown_sort_get(
     report: &GetReport,
     sort_field: Option<&str>,
-    err: &mut dyn Write,
+    conv: &mut Conversation<'_>,
 ) -> io::Result<()> {
     let Some(field) = sort_field else {
         return Ok(());
@@ -226,10 +225,7 @@ fn warn_unknown_sort_get(
             .is_some_and(|obj| obj.contains_key(field))
     });
     if !present_in_any {
-        writeln!(
-            err,
-            "warning: --sort field '{field}' not present in document"
-        )?;
+        conv.warning(&format!("--sort field '{field}' not present in document"))?;
     }
     Ok(())
 }
@@ -435,7 +431,8 @@ mod tests {
             markdown_content: None,
         };
         let mut err = Vec::new();
-        warn_unknown_sort_get(&report, Some("priorty"), &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_sort_get(&report, Some("priorty"), &mut conv).unwrap();
         assert_eq!(
             String::from_utf8(err).unwrap(),
             "warning: --sort field 'priorty' not present in document\n"
@@ -450,7 +447,8 @@ mod tests {
             markdown_content: None,
         };
         let mut err = Vec::new();
-        warn_unknown_sort_get(&report, Some("title"), &mut err).unwrap();
+        let mut conv = Conversation::new(&mut err);
+        warn_unknown_sort_get(&report, Some("title"), &mut conv).unwrap();
         assert!(err.is_empty());
     }
 }
