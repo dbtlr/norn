@@ -87,10 +87,16 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // fossil, which collided with the global `--vault <NAME>` selector and
     // PANICKED the rewrite, is deleted — both collision orderings now parse
     // clean through to the uniform not-yet-ported outcome instead, two cases).
+    // NRN-408 (ADR 0016) added PD-135 (decided-better: the one mutation-report
+    // JSON serializer policy — every mutation verb's `--format json` emits the
+    // full report envelope, pretty in struct order with one trailing newline, on
+    // every outcome path, five cases) and PD-136 (decided-better:
+    // `MutationOutcome::Forecast` — a `set`/`new`/`edit` dry-run reports
+    // `outcome: forecast`, two cases).
     assert_eq!(
         ledger.entries.len(),
-        34,
-        "expected exactly PD-101..PD-134, found {}",
+        36,
+        "expected exactly PD-101..PD-136, found {}",
         ledger.entries.len()
     );
 
@@ -344,6 +350,49 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         .expect("the ATX-prefixed heading anchor case must resolve to an entry");
     assert_eq!(pd130.id, "PD-130");
     assert_eq!(pd130.reason, norn_parity::ledger::Reason::DecidedBetter);
+
+    // NRN-408 (ADR 0016) mutation-report JSON policy: the serializer policy
+    // (PD-135, five cases) and the Forecast outcome (PD-136, two cases), both
+    // decided-better.
+    for case in [
+        "mutate-set-push-apply-json-zoo",
+        "mutate-set-refusal-json-zoo",
+        "mutate-new-refusal-json-zoo",
+        "edit-refusal-json-zoo",
+        "mutate-move-refusal-json-zoo",
+    ] {
+        assert_eq!(
+            ledger.entry_for_case(case).map(|e| e.id.as_str()),
+            Some("PD-135"),
+            "{case} is gated by PD-135"
+        );
+    }
+    assert_eq!(
+        ledger
+            .entry_for_case("mutate-set-refusal-json-zoo")
+            .unwrap()
+            .reason,
+        norn_parity::ledger::Reason::DecidedBetter,
+        "PD-135 is decided-better"
+    );
+    for case in [
+        "edit-json-ops-forecast-zoo",
+        "mcp-tools-call-set-forecast-zoo",
+    ] {
+        assert_eq!(
+            ledger.entry_for_case(case).map(|e| e.id.as_str()),
+            Some("PD-136"),
+            "{case} is gated by PD-136"
+        );
+    }
+    assert_eq!(
+        ledger
+            .entry_for_case("edit-json-ops-forecast-zoo")
+            .unwrap()
+            .reason,
+        norn_parity::ledger::Reason::DecidedBetter,
+        "PD-136 is decided-better"
+    );
 }
 
 #[test]

@@ -1936,6 +1936,48 @@ const MUTATE_CASES: &[Case] = &[
         normalize: TRACE_NORM,
         plan: None,
     },
+    // set: a nonexistent-target refusal under `--format json` (NRN-408). The one
+    // serializer policy: every mutation verb's JSON refusal carries the FULL
+    // report envelope (`outcome: refused` + the coded error), pretty-printed in
+    // struct order with one trailing newline. The oracle emits a bare
+    // `{code,message}` fragment stripped of the envelope. Write-free, exit 2 on
+    // both. Pinned by PD-135.
+    Case {
+        id: "mutate-set-refusal-json-zoo",
+        argv: &[
+            "set",
+            "no-such-doc-xyzzy",
+            "status:done",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    // new: an existing-destination refusal under `--format json` (NRN-408). The
+    // rewrite emits the full `NewReport` envelope (`outcome: refused` + coded
+    // error); the oracle refuses `edit`-style as bare `error: <message>` prose
+    // even under `--format json`. Write-free, exit 2 on both. Pinned by PD-135.
+    Case {
+        id: "mutate-new-refusal-json-zoo",
+        argv: &["new", "notes/alpha.md", "--format", "json"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
     // new with an unknown field under --force, --format json (forecast): the one
     // DECIDED warning-shape divergence (PD-111). The donor emits an inconsistent
     // per-kind warning object (`{field, kind}` for new); the rewrite emits its
@@ -2098,6 +2140,31 @@ const MUTATE_CASES: &[Case] = &[
         requires_doc: Some("notes/cycle-b.md"),
         requires_code: None,
         normalize: PLAN_HASH_NORM,
+        plan: None,
+    },
+    // move: a nonexistent-source refusal under `--format json` (NRN-408). The
+    // rewrite emits the full `ApplyReport` envelope (`outcome: refused` + the
+    // failed op's coded error); the oracle emits a bare `{code,message}` fragment.
+    // The cascade verbs previously refused as this bare envelope too — now every
+    // refusal path speaks the same full envelope. Write-free, exit 2 on both.
+    // Pinned by PD-135.
+    Case {
+        id: "mutate-move-refusal-json-zoo",
+        argv: &[
+            "move",
+            "no-such-doc-xyzzy",
+            "notes/dest.md",
+            "--format",
+            "json",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
         plan: None,
     },
     // delete: a confirmed apply with `--rewrite-to`, redirecting the one incoming
@@ -2407,6 +2474,31 @@ const EDIT_CASES: &[Case] = &[
             "no-such-doc-xyzzy",
             "--edits-json",
             "[{\"op\":\"str_replace\",\"old\":\"a\",\"new\":\"b\"}]",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 2,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    // The same bad-target refusal under `--format json` (NRN-408). `edit`
+    // previously refused as bare `error: <message>` prose even under `--format
+    // json`; it now carries the full `EditReport` envelope (`outcome: refused` +
+    // coded error) like every other mutation verb, while the oracle stays on the
+    // bare prose. Write-free, exit 2 on both. Pinned by PD-135.
+    Case {
+        id: "edit-refusal-json-zoo",
+        argv: &[
+            "edit",
+            "no-such-doc-xyzzy",
+            "--edits-json",
+            "[{\"op\":\"str_replace\",\"old\":\"a\",\"new\":\"b\"}]",
+            "--format",
+            "json",
         ],
         fixture: ZOO_1,
         stdin: None,
