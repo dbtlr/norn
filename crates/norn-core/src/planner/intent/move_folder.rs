@@ -11,6 +11,8 @@ pub(crate) struct MoveFolderOp {
     pub src: String,
     pub dst: String,
     pub parents: bool,
+    pub force: bool,
+    pub no_link_rewrite: bool,
 }
 
 /// Walk the vault index for `.md` files whose path starts with `op.src/`,
@@ -48,7 +50,18 @@ pub(crate) fn expand_move_folder(op: &MoveFolderOp, index: &GraphIndex) -> Resul
         let old_rel = doc.path.clone();
         let new_rel: camino::Utf8PathBuf = new_rel_str.into();
 
-        let link_risk = classify_link_risk(&old_rel, &new_rel, &index.documents, &index.files);
+        // `no_link_rewrite` suppresses the backlink cascade for every expanded
+        // op, matching the single-document move dispatch (`intent::expand`).
+        let link_risk = if op.no_link_rewrite {
+            None
+        } else {
+            Some(classify_link_risk(
+                &old_rel,
+                &new_rel,
+                &index.documents,
+                &index.files,
+            ))
+        };
 
         let change = ApplyOp {
             change_id: format!("move-{}", old_rel),
@@ -62,9 +75,9 @@ pub(crate) fn expand_move_folder(op: &MoveFolderOp, index: &GraphIndex) -> Resul
             expected_old_value: None,
             new_value: None,
             destination: Some(new_rel),
-            link_risk: Some(link_risk),
+            link_risk,
             warnings: Vec::new(),
-            force: false,
+            force: op.force,
             parents: op.parents,
         };
 
@@ -106,6 +119,8 @@ mod tests {
             src: "src_dir".into(),
             dst: "dst_dir".into(),
             parents: true,
+            force: false,
+            no_link_rewrite: false,
         };
         let expanded = expand_move_folder(&op, &index).unwrap();
         assert_eq!(
@@ -131,6 +146,7 @@ mod tests {
                 "link_risk must be populated by planner"
             );
             assert!(change.parents, "parents flag must propagate");
+            assert!(!change.force, "force defaults off when the flag is unset");
         }
 
         // Verify structure-preserving move: src_dir/sub/b.md → dst_dir/sub/b.md
@@ -142,5 +158,29 @@ mod tests {
             b_op.destination.as_deref().map(|p| p.as_str()),
             Some("dst_dir/sub/b.md")
         );
+    }
+
+    #[test]
+    fn expand_move_folder_threads_force_and_no_link_rewrite_to_every_op() {
+        let tmp = synth_vault();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let index = crate::graph::build_index(root).unwrap();
+
+        let op = MoveFolderOp {
+            src: "src_dir".into(),
+            dst: "dst_dir".into(),
+            parents: true,
+            force: true,
+            no_link_rewrite: true,
+        };
+        let expanded = expand_move_folder(&op, &index).unwrap();
+        assert_eq!(expanded.len(), 2);
+        for change in &expanded {
+            assert!(change.force, "force must propagate to every expanded op");
+            assert!(
+                change.link_risk.is_none(),
+                "no_link_rewrite must suppress the backlink cascade on every op"
+            );
+        }
     }
 }

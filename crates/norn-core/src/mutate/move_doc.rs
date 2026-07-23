@@ -15,7 +15,7 @@ use crate::domain::GraphIndex;
 use camino::Utf8PathBuf;
 use norn_wire::{ApplyError, ApplyOutcome, ApplyReport};
 use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 /// Execute a `move`: forecast (`confirm == false`) or apply (`confirm == true`).
 pub fn execute(
@@ -40,11 +40,7 @@ pub fn execute(
             kind: "move_folder".into(),
             id: None,
             requires: Vec::new(),
-            fields: json!({
-                "src": params.from,
-                "dst": params.to,
-                "parents": params.parents,
-            }),
+            fields: folder_move_fields(params),
             footnote: None,
         };
         one_op_plan(vault_root.to_string(), op)
@@ -119,6 +115,26 @@ fn single_move_fields(
     }
     if let Some(hash) = document_hash {
         fields.insert("document_hash".into(), Value::String(hash.to_string()));
+    }
+    Value::Object(fields)
+}
+
+/// Build the `move_folder` op fields. `src` / `dst` / `parents` are ALWAYS
+/// present; `force` and `no_link_rewrite` are added ONLY when set — mirroring
+/// `single_move_fields` so a flagless folder move hashes identically to before
+/// the flags were threaded (ADR 0024). The planner reads both off the decoded
+/// [`MoveFolderFields`](norn_wire::MoveFolderFields) and propagates them to every
+/// expanded per-document op.
+fn folder_move_fields(params: &norn_wire::MoveParams) -> Value {
+    let mut fields = serde_json::Map::new();
+    fields.insert("src".into(), Value::String(params.from.clone()));
+    fields.insert("dst".into(), Value::String(params.to.clone()));
+    fields.insert("parents".into(), Value::Bool(params.parents));
+    if params.force {
+        fields.insert("force".into(), Value::Bool(true));
+    }
+    if params.no_link_rewrite {
+        fields.insert("no_link_rewrite".into(), Value::Bool(true));
     }
     Value::Object(fields)
 }

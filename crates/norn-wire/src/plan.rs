@@ -191,11 +191,19 @@ impl MigrationPlan {
 use serde_json::{Map, Value};
 
 /// `move_folder` payload: relocate a folder, cascading its documents.
+///
+/// `force` and `no_link_rewrite` carry the same semantics as the single-document
+/// [`MoveDocumentFields`] flags and propagate to every expanded per-document op:
+/// `force` overwrites an existing destination, `no_link_rewrite` suppresses the
+/// backlink cascade. Both decode strictly (`bool_field`): absent/`null` → the
+/// historical `false`, present-but-wrong-typed refuses.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MoveFolderFields {
     pub src: String,
     pub dst: String,
     pub parents: bool,
+    pub force: bool,
+    pub no_link_rewrite: bool,
 }
 
 /// `rewrite_wikilink` payload: rewrite every `[[old]]` reference to `[[new]]`.
@@ -462,6 +470,8 @@ impl TryFrom<&MigrationOp> for TypedOp {
                 src: str_field("src")?,
                 dst: str_field("dst")?,
                 parents: bool_field("parents")?,
+                force: bool_field("force")?,
+                no_link_rewrite: bool_field("no_link_rewrite")?,
             }),
             "rewrite_wikilink" => TypedOp::RewriteWikilink(RewriteWikilinkFields {
                 old: str_field("old")?,
