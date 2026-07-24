@@ -100,23 +100,25 @@ pub struct UnregisterArgs {
 #[derive(Args, Debug)]
 pub struct ListArgs {
     /// Output format.
-    #[arg(long, value_name = "FORMAT", default_value = "human")]
+    #[arg(long, value_name = "FORMAT", default_value = "records")]
     pub format: VaultListFormat,
 }
 
 /// The `vault list` output subset — its truthful `--help` declaration, mapped
-/// into the shared display [`Format`]. `human` is the bespoke name/root listing;
-/// `json` is the stable machine array.
+/// into the shared display [`Format`]. `records` is the bespoke name/root
+/// listing (hidden legacy alias `human`); `json` is the stable machine array.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VaultListFormat {
-    Human,
+    /// Name/root listing (records block). Accepts the hidden legacy alias `human`.
+    #[value(alias = "human")]
+    Records,
     Json,
 }
 
 impl From<VaultListFormat> for Format {
     fn from(f: VaultListFormat) -> Self {
         match f {
-            VaultListFormat::Human => Format::Records,
+            VaultListFormat::Records => Format::Records,
             VaultListFormat::Json => Format::Json,
         }
     }
@@ -392,13 +394,18 @@ mod tests {
     }
 
     #[test]
-    fn list_format_defaults_to_human_and_parses_json() {
+    fn list_format_defaults_to_records_and_parses_json() {
         match vault_cmd(&["norn", "vault", "list"]) {
-            VaultCmd::List(a) => assert_eq!(a.format, VaultListFormat::Human),
+            VaultCmd::List(a) => assert_eq!(a.format, VaultListFormat::Records),
             other => panic!("expected list, got {other:?}"),
         }
         match vault_cmd(&["norn", "vault", "list", "--format", "json"]) {
             VaultCmd::List(a) => assert_eq!(a.format, VaultListFormat::Json),
+            other => panic!("expected list, got {other:?}"),
+        }
+        // The legacy `human` name still parses as a hidden alias for `records`.
+        match vault_cmd(&["norn", "vault", "list", "--format", "human"]) {
+            VaultCmd::List(a) => assert_eq!(a.format, VaultListFormat::Records),
             other => panic!("expected list, got {other:?}"),
         }
     }

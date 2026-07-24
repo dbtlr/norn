@@ -297,14 +297,16 @@ pub struct CountArgs {
     #[command(flatten)]
     pub filters: crate::commands::args::FilterArgs,
 
-    /// Output format. Default text (records-block).
-    #[arg(long, value_enum, default_value_t = CountFormat::Text, help_heading = "Output")]
+    /// Output format. Default records (records-block).
+    #[arg(long, value_enum, default_value_t = CountFormat::Records, help_heading = "Output")]
     pub format: CountFormat,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CountFormat {
-    Text,
+    /// Human-legible records block. Accepts the hidden legacy alias `text`.
+    #[value(alias = "text")]
+    Records,
     Json,
 }
 
@@ -335,14 +337,16 @@ pub struct DescribeArgs {
     #[command(flatten)]
     pub filters: crate::commands::args::FilterArgs,
 
-    /// Output format. Default text.
+    /// Output format. Default records.
     #[arg(long, value_enum, help_heading = "Output")]
     pub format: Option<DescribeFormat>,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DescribeFormat {
-    Text,
+    /// Human-legible records block. Accepts the hidden legacy alias `text`.
+    #[value(alias = "text")]
+    Records,
     Json,
 }
 
@@ -425,8 +429,8 @@ pub struct RepairArgs {
     pub plan: bool,
     #[arg(
         long,
-        value_parser = parse_repair_plan_format,
-        help = "Output format for --plan (default: report when TTY, json when piped)"
+        value_enum,
+        help = "Output format. Bare repair: `records` summary or `json` report envelope. --plan: records/json/paths (default: records on TTY, json when piped)"
     )]
     pub format: Option<RepairPlanFormat>,
     #[arg(
@@ -448,22 +452,17 @@ pub struct RepairArgs {
     pub triage: ValidateTriageArgs,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RepairPlanFormat {
-    Report,
+    /// Human decision-support view: the bare findings summary, or the `--plan`
+    /// report. Accepts the hidden legacy alias `report`.
+    #[value(alias = "report")]
+    Records,
+    /// JSON: the report envelope for bare `repair`, or the MigrationPlan for
+    /// `--plan`.
     Json,
+    /// One affected vault-relative path per line (`--plan` only).
     Paths,
-}
-
-fn parse_repair_plan_format(s: &str) -> Result<RepairPlanFormat, String> {
-    match s {
-        "report" => Ok(RepairPlanFormat::Report),
-        "json" => Ok(RepairPlanFormat::Json),
-        "paths" => Ok(RepairPlanFormat::Paths),
-        "jsonl" => Err("jsonl was removed — use --format json".into()),
-        "table" => Err("table was removed — use --format report".into()),
-        _ => Err("possible values: report, json, paths".into()),
-    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -499,7 +498,7 @@ pub struct MutationModeArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Output format.
+    /// Output format; `json` emits the mutation-report envelope.
     #[arg(long, value_enum, default_value_t = MutationFormat::Records)]
     pub format: MutationFormat,
 }
@@ -868,14 +867,16 @@ pub struct SelfUpdateArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Output format. Default: `text` on TTY, `json` when piped.
+    /// Output format. Default: `records` on TTY, `json` when piped.
     #[arg(long, value_enum, help_heading = "Output")]
     pub format: Option<SelfUpdateFormat>,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelfUpdateFormat {
-    Text,
+    /// Human-legible output. Accepts the hidden legacy alias `text`.
+    #[value(alias = "text")]
+    Records,
     Json,
 }
 
@@ -929,8 +930,8 @@ pub enum ServiceSubcommand {
 
 #[derive(Debug, Args)]
 pub struct ServiceActionArgs {
-    /// Output format. Default text; `json` emits a machine-readable object.
-    #[arg(long, value_enum, default_value_t = ServiceFormat::Text, help_heading = "Output")]
+    /// Output format. Default records; `json` emits a machine-readable object.
+    #[arg(long, value_enum, default_value_t = ServiceFormat::Records, help_heading = "Output")]
     pub format: ServiceFormat,
 }
 
@@ -946,14 +947,16 @@ pub struct ServiceStatusArgs {
     // tests below. Vault selection is the global selectors' job (`-C`,
     // `--vault NAME`) on every verb; a second, differently-shaped `--vault`
     // on one subcommand was a fossil, not a feature to rename.
-    /// Output format. Default text; `json` emits a machine-readable object.
-    #[arg(long, value_enum, default_value_t = ServiceFormat::Text, help_heading = "Output")]
+    /// Output format. Default records; `json` emits a machine-readable object.
+    #[arg(long, value_enum, default_value_t = ServiceFormat::Records, help_heading = "Output")]
     pub format: ServiceFormat,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceFormat {
-    Text,
+    /// Human-legible output. Accepts the hidden legacy alias `text`.
+    #[value(alias = "text")]
+    Records,
     Json,
 }
 
@@ -1009,13 +1012,15 @@ pub struct CacheIndexArgs {
 
 #[derive(Debug, Args)]
 pub struct CacheStatusArgs {
-    #[arg(long, value_enum, default_value_t = CacheOutputFormat::Text, help = "Stdout format")]
+    #[arg(long, value_enum, default_value_t = CacheOutputFormat::Records, help = "Stdout format")]
     pub format: CacheOutputFormat,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CacheOutputFormat {
-    Text,
+    /// Human-legible output. Accepts the hidden legacy alias `text`.
+    #[value(alias = "text")]
+    Records,
     Json,
 }
 
@@ -1029,7 +1034,7 @@ pub struct CachePruneArgs {
         help = "Age-eviction window override (e.g. 90d, 12w, 24h)"
     )]
     pub retention: Option<String>,
-    #[arg(long, value_enum, default_value_t = CacheOutputFormat::Text, help = "Stdout format")]
+    #[arg(long, value_enum, default_value_t = CacheOutputFormat::Records, help = "Stdout format")]
     pub format: CacheOutputFormat,
 }
 
@@ -1146,6 +1151,56 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use clap::Parser;
+
+    /// G3 (NRN-416): every verb's `--format` value names are drawn from the one
+    /// canonical vocabulary, so a future verb cannot reintroduce a divergent
+    /// human name (`text` / `human` / `report`). The walk covers the whole clap
+    /// tree — every subcommand and nested group — so a new verb is checked the
+    /// moment it is added. Hidden legacy aliases are exempt by construction: an
+    /// alias is carried ON a canonical `PossibleValue`, so `get_name()` returns
+    /// the canonical spelling and the one-release deprecation window never trips
+    /// this guard.
+    #[test]
+    fn every_format_value_name_is_canonical() {
+        const CANONICAL: &[&str] = &["records", "paths", "json", "jsonl", "markdown"];
+
+        fn walk(cmd: &clap::Command, path: &str, seen: &mut usize) {
+            for arg in cmd.get_arguments() {
+                // Only the output `--format` selector; `apply --input-format`
+                // (json/yaml) is a distinct input-plan vocabulary, not this one.
+                if arg.get_id().as_str() != "format" {
+                    continue;
+                }
+                for pv in arg.get_possible_values() {
+                    let name = pv.get_name();
+                    assert!(
+                        CANONICAL.contains(&name),
+                        "`{path} --format` exposes the non-canonical value `{name}`; the \
+                         canonical vocabulary is {CANONICAL:?} (a legacy name must be a hidden \
+                         `#[value(alias = ...)]` alias, never a visible value)"
+                    );
+                    *seen += 1;
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                let child = if path.is_empty() {
+                    sub.get_name().to_string()
+                } else {
+                    format!("{path} {}", sub.get_name())
+                };
+                walk(sub, &child, seen);
+            }
+        }
+
+        let cmd = Cli::command();
+        let mut seen = 0usize;
+        walk(&cmd, "", &mut seen);
+        // A walk that found no `--format` values is broken, not clean.
+        assert!(
+            seen >= 20,
+            "expected to inspect many `--format` values across the verb tree, saw {seen}"
+        );
+    }
 
     #[test]
     fn global_cwd_accepted_before_subcommand() {

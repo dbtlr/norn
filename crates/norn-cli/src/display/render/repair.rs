@@ -1,7 +1,8 @@
 //! `repair` (findings → plan; read-only) (NRN-409).
 //!
-//! Bare `norn repair` prints the findings summary; `--plan` emits the
-//! `MigrationPlan` (report / json / paths) and/or writes it to `--out`. The exit
+//! Bare `norn repair` prints the findings summary (or, with `--format json`, the
+//! report-envelope JSON of that same summary); `--plan` emits the
+//! `MigrationPlan` (records / json / paths) and/or writes it to `--out`. The exit
 //! code is `has_diagnostic_errors` for both, independent of the triage filters
 //! (a `--code` narrow never masks a vault error).
 
@@ -32,6 +33,10 @@ pub(crate) fn render_repair(
     let result: io::Result<i32> = (|| {
         if view.plan {
             emit_repair_plan(sink, plan, &view, ascii, is_tty)?;
+        } else if matches!(view.format, Some(RepairPlanFormat::Json)) {
+            // `--format json` returns the JSON of what bare `repair` prints
+            // WITHOUT it: the findings-summary envelope, never the plan.
+            write_repair_summary_json(sink.writer(), &view.report, plan)?;
         } else {
             write_repair_summary(sink.writer(), &view.report, plan)?;
         }
@@ -73,8 +78,30 @@ fn write_repair_summary(
     Ok(())
 }
 
+/// Bare `norn repair --format json`: the JSON representation of the same
+/// findings summary the prose form prints — the report envelope (findings total,
+/// documents scanned, the per-code tally, and the planner's repairable/skipped
+/// counts). Never the `MigrationPlan` (that is `--plan --format json`).
+fn write_repair_summary_json(
+    out: &mut dyn Write,
+    report: &norn_wire::RepairReport,
+    plan: &MigrationPlan,
+) -> io::Result<()> {
+    let envelope = serde_json::json!({
+        "findings_total": report.findings_total,
+        "total_docs": report.total_docs,
+        "findings_by_code": report.findings_by_code,
+        "operations": plan.operations.len(),
+        "skipped": plan.skipped.len(),
+    });
+    // A summary envelope of scalars and a small tally always serializes.
+    let json = serde_json::to_string_pretty(&envelope)
+        .expect("repair summary envelope must always serialize");
+    writeln!(out, "{json}")
+}
+
 /// `norn repair --plan`: `--out` writes the JSON plan to a file (independent of
-/// `--format`); `--format` governs stdout (report / json / paths), silent when
+/// `--format`); `--format` governs stdout (records / json / paths), silent when
 /// `--out` is set without `--format`.
 fn emit_repair_plan(
     sink: &mut Sink<'_>,
@@ -100,7 +127,7 @@ fn emit_repair_plan(
     } else {
         Some(view.format.unwrap_or({
             if is_tty {
-                RepairPlanFormat::Report
+                RepairPlanFormat::Records
             } else {
                 RepairPlanFormat::Json
             }
@@ -108,7 +135,7 @@ fn emit_repair_plan(
     };
 
     match stdout_format {
-        Some(RepairPlanFormat::Report) => {
+        Some(RepairPlanFormat::Records) => {
             write_repair_report(sink, plan, &view.filter_flags, ascii)?
         }
         Some(RepairPlanFormat::Json) => {
@@ -146,7 +173,7 @@ fn write_repair_paths(out: &mut dyn Write, plan: &MigrationPlan) -> io::Result<(
     Ok(())
 }
 
-/// `--format report`: the human decision-support summary — a headline, an
+/// `--format records`: the human decision-support summary — a headline, an
 /// operations-by-kind tally, footnotes, a skipped-by-reason tally, top affected
 /// files, and filter-aware apply guidance.
 fn write_repair_report(

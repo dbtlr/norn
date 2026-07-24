@@ -16,7 +16,7 @@ impl From<CountFormat> for Format {
         match f {
             // `count`'s bespoke padded text is rendered in the records slot; it
             // never composed the record primitives, so it stays unstyled.
-            CountFormat::Text => Format::Records,
+            CountFormat::Records => Format::Records,
             CountFormat::Json => Format::Json,
         }
     }

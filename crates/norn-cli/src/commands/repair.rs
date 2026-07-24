@@ -7,7 +7,7 @@
 //! [`RepairParams`], the owner answers with the [`RepairReport`] (the plan as its
 //! JSON string plus the bare-summary tally + exit signal), and `run` returns it
 //! as an [`Output`]; the display layer projects bare-summary vs `--plan`
-//! (report / json / paths) and honors `--out`.
+//! (records / json / paths) and honors `--out`.
 
 use crate::cli::{ConfidenceArg, GlobalArgs, RepairArgs};
 use crate::display::{Diagnostic, Output, RepairView};
@@ -44,7 +44,7 @@ pub fn run(args: &RepairArgs, global: &GlobalArgs) -> Result<Output, Diagnostic>
 }
 
 /// The active triage/confidence/skip-reason flags, reconstructed as an argv
-/// fragment for the `--format report` apply-guidance lines. Glob-shaped values
+/// fragment for the `--format records` apply-guidance lines. Glob-shaped values
 /// are single-quoted so the
 /// printed command copy-pastes safely.
 fn active_filter_flags(args: &RepairArgs) -> Vec<String> {

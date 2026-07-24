@@ -904,3 +904,23 @@ old = "a cascade-verb (`move` / `delete` / `rewrite-wikilink` / `apply`) dry-run
 new = "a clean cascade dry-run reports `outcome: forecast` (present-tense honest, distinct from a confirmed `applied`), on both the CLI `--dry-run --format json` `ApplyReport` and the MCP `vault.move` / `vault.delete` forecast result; the `dry_run: true` flag is retained and now consistent with `outcome`, so `outcome == \"forecast\"` is one preview signal across all seven mutation verbs. Exit codes and the applied/skipped/failed counts are unchanged"
 reason = "decided-better"
 decision = "docs/decisions/0016-surface-neutral-command-core.md"
+
+# NRN-416 (format vocabulary convergence). The RULING (2026-07-23): `--format
+# json` returns the JSON representation of whatever the invocation prints WITHOUT
+# it. Bare `norn repair` (no `--plan`) prints the findings summary, so bare
+# `repair --format json` now emits that summary as a report envelope —
+# findings_total, total_docs, the sorted per-code tally, and the planner's
+# repairable/skipped counts — never the MigrationPlan (the plan stays the
+# `--plan --format json` payload the `norn apply -` pipe consumes). The pinned
+# oracle IGNORES `--format` on the bare path and prints the same prose summary as
+# a bare invocation, so this is a rewrite-only, decided-better divergence. Only
+# the bare path changes; `--plan --format json` is unaffected. See
+# `crates/norn-cli/src/display/render/repair.rs` (`write_repair_summary_json`).
+[[entry]]
+id = "PD-144"
+surface = "repair --format json (bare, no --plan — findings-summary report envelope)"
+cases = ["repair-summary-json-zoo"]
+old = "bare `repair --format json` ignores `--format` and prints the human prose findings summary (`N findings across M documents`, the per-code tally, the repairable/skipped line, and the apply-guidance lines) — identical bytes to a bare `repair` with no `--format`"
+new = "bare `repair --format json` emits the findings-summary report envelope as JSON — `findings_total`, `total_docs`, the sorted `findings_by_code` tally, and the `operations`/`skipped` counts — the JSON of what the bare invocation prints without `--format`, never the MigrationPlan (that stays `--plan --format json`)"
+reason = "decided-better"
+decision = "docs/decisions/0021-verbs-return-one-layer-renders.md"

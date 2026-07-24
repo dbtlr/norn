@@ -109,16 +109,17 @@ pub struct ValidateView {
 }
 
 /// `repair`'s renderable report plus the surface knobs. Bare `norn repair`
-/// prints the findings summary; `--plan` emits the `MigrationPlan` in the
-/// requested `format` (report / json / paths) and/or writes it to `--out`. The
-/// exit code is `report.has_diagnostic_errors` for both, independent of the
-/// triage filters.
+/// prints the findings summary (`--format json` renders it as the report
+/// envelope); `--plan` emits the `MigrationPlan` in the requested `format`
+/// (records / json / paths) and/or writes it to `--out`. The exit code is
+/// `report.has_diagnostic_errors` for both, independent of the triage filters.
 pub struct RepairView {
     pub report: norn_wire::RepairReport,
     /// `--plan`: emit the `MigrationPlan` instead of the bare findings summary.
     pub plan: bool,
-    /// `--format` for `--plan` (report / json / paths); `None` defaults to report
-    /// on a tty, json when piped.
+    /// `--format` for `--plan` (records / json / paths); `None` defaults to
+    /// records on a tty, json when piped. `Some(Json)` on bare `repair` (no
+    /// `--plan`) renders the findings-summary report envelope.
     pub format: Option<crate::cli::RepairPlanFormat>,
     /// `--out`: write the JSON plan to this path (independent of `--format`;
     /// stdout stays silent when `--out` is set without `--format`).
