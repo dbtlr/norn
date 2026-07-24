@@ -1004,19 +1004,19 @@ decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 
 [[entry]]
 id = "PD-149"
-surface = "validate (alias-only wikilink now dangling — clean + zoo fixtures)"
-cases = ["validate-summary-clean", "validate-summary-zoo", "validate-summary-records-zoo", "validate-paths-zoo", "validate-severity-summary-zoo"]
-old = "`notes/gamma.md`'s `[[bee]]` resolves via `notes/beta.md`'s alias, so it is not a finding; the link-target-missing set and warning tally exclude it (both the clean and zoo fixtures carry the `beta`/`gamma` alias pair)"
-new = "aliases do not participate in resolution (NRN-455), so `[[bee]]` is `link-target-missing` on `notes/gamma.md` — one more warning-severity finding, one more affected path, and a higher warning tally than the oracle reports (the clean fixture is no longer finding-free under the rewrite)"
+surface = "validate (alias-only wikilink now dangling — zoo fixture)"
+cases = ["validate-summary-zoo", "validate-summary-records-zoo", "validate-paths-zoo", "validate-severity-summary-zoo"]
+old = "`notes/gamma.md`'s `[[bee]]` resolves via `notes/beta.md`'s alias, so it is not a finding; the link-target-missing set and warning tally exclude it (the zoo fixture carries the `beta`/`gamma` alias pair; `Profile::alias_link`, `crate::zoo::valid_docs`)"
+new = "aliases do not participate in resolution (NRN-455), so `[[bee]]` is `link-target-missing` on `notes/gamma.md` — one more warning-severity finding, one more affected path, and a higher warning tally than the oracle reports. The `clean` profile omits the alias pair entirely (`Profile::alias_link` is false there) so its finding-free invariant holds under the rewrite too — only the zoo fixture demonstrates this divergence"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 
 [[entry]]
 id = "PD-150"
-surface = "repair (alias-only dangling link + deterministic alias-hint — clean + zoo fixtures)"
-cases = ["repair-summary-clean", "repair-summary-zoo", "repair-plan-paths-zoo", "repair-plan-report-zoo"]
-old = "the oracle resolves `notes/gamma.md`'s `[[bee]]` via alias, so repair sees no finding for it and proposes no operation (clean fixture: 0 findings, 0 operations)"
-new = "`[[bee]]` is dangling and uniquely matches `notes/beta.md`'s alias, so repair plans a built-in `rewrite_link` op (`bee` → the `beta` stem, `built-in:alias-stem`, alias-suggestion footnote) — one more finding, one more planned operation, and `notes/gamma.md` in the affected paths (NRN-455)"
+surface = "repair (alias-only dangling link + deterministic alias-hint — zoo fixture)"
+cases = ["repair-summary-zoo", "repair-plan-paths-zoo", "repair-plan-report-zoo"]
+old = "the oracle resolves `notes/gamma.md`'s `[[bee]]` via alias, so repair sees no finding for it and proposes no operation"
+new = "`[[bee]]` is dangling and uniquely matches `notes/beta.md`'s alias, so repair plans a built-in `rewrite_link` op (`bee` → the `beta` stem, `built-in:alias-stem`, alias-suggestion footnote) — one more finding, one more planned operation, and `notes/gamma.md` in the affected paths (NRN-455). The `clean` profile omits the alias pair (`Profile::alias_link` is false there), so it stays finding-free and this entry no longer needs to cover it"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 

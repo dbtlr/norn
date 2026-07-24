@@ -87,13 +87,22 @@ const fn viol(
 }
 
 /// The always-valid zoo, in fixed emission order.
-pub fn valid_docs() -> Vec<ZooDoc> {
+///
+/// `notes/beta.md` and `notes/gamma.md` carry the NRN-455 alias-hint
+/// divergence demonstration (`aliases: [bee]` / a `[[bee]]` link) only when
+/// `alias_link` is set (`Profile::alias_link` — true on every profile except
+/// `clean`, whose finding-free invariant would otherwise be broken by the
+/// now-dangling `[[bee]]` link). Every other document is unaffected by the
+/// flag.
+pub fn valid_docs(alias_link: bool) -> Vec<ZooDoc> {
+    let beta = if alias_link { BETA_ALIAS } else { BETA_CLEAN };
+    let gamma = if alias_link { GAMMA_ALIAS } else { GAMMA_CLEAN };
     vec![
         valid("index.md", INDEX),
         valid("notes/alpha.md", ALPHA),
-        valid("notes/beta.md", BETA),
+        valid("notes/beta.md", beta),
         valid("notes/keep/kept.md", KEPT),
-        valid("notes/gamma.md", GAMMA),
+        valid("notes/gamma.md", gamma),
         valid("phases/phase-one.md", PHASE_ONE),
         valid("tasks/task-001.md", TASK_001),
         valid("tasks/task-002.md", TASK_002),
@@ -385,7 +394,29 @@ Content belonging to section two.
 Content belonging to section three.
 "#;
 
-const BETA: &str = r#"---
+/// `notes/beta.md` without the `aliases` entry — the content every profile
+/// but `zoo` carries (see [`valid_docs`]).
+const BETA_CLEAN: &str = r#"---
+title: Beta
+type: note
+kind: note
+---
+
+# Beta
+
+Every link shape, exercised once each:
+
+- Stem: [[alpha]]
+- Path-qualified: [[notes/alpha]]
+- Aliased: [[alpha|the first note]]
+- Heading anchor: [[alpha#Section One]]
+- Markdown relative: [alpha](alpha.md)
+- Attachment embed: ![pic](../Assets/pic.png)
+"#;
+
+/// `notes/beta.md` declaring `aliases: [bee]` — the NRN-455 alias-hint
+/// divergence demonstration ([`valid_docs`], gated by `Profile::alias_link`).
+const BETA_ALIAS: &str = r#"---
 title: Beta
 type: note
 kind: note
@@ -414,7 +445,20 @@ legacy: true
 Carries `legacy: true` legally — inside the `notes/keep/**` carve-out.
 "#;
 
-const GAMMA: &str = r#"---
+/// `notes/gamma.md` without the `[[bee]]` alias link — the content every
+/// profile but `zoo` carries (see [`valid_docs`]).
+const GAMMA_CLEAN: &str = r#"---
+title: Gamma
+type: note
+kind: note
+---
+
+Alias resolution: [[beta]] resolves here. Self-link: [[gamma]].
+"#;
+
+/// `notes/gamma.md` linking `[[bee]]` — the NRN-455 alias-hint divergence
+/// demonstration ([`valid_docs`], gated by `Profile::alias_link`).
+const GAMMA_ALIAS: &str = r#"---
 title: Gamma
 type: note
 kind: note
