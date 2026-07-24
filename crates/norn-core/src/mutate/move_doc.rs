@@ -12,7 +12,7 @@
 use super::{owner_index_options, MutationExecution};
 use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::domain::GraphIndex;
-use crate::target::{resolve_target, TargetResolution};
+use crate::target::{resolve_target, target_refusal, TargetRefusalFamily, TargetResolution};
 use camino::Utf8PathBuf;
 use norn_wire::{ApplyError, ApplyOutcome, ApplyReport};
 use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
@@ -159,19 +159,27 @@ fn preflight_single(
     let src_rel = match resolve_target(index, &params.from) {
         TargetResolution::Resolved(path) => path,
         TargetResolution::NotFound => {
+            let (code, message) = target_refusal(
+                TargetRefusalFamily::NotFound,
+                format!("source does not exist: {}", params.from),
+            );
             return Err(MoveRefusal {
-                code: "target-not-found",
-                message: format!("source does not exist: {}", params.from),
+                code,
+                message,
                 path: None,
             });
         }
         TargetResolution::Ambiguous(candidates) => {
-            return Err(MoveRefusal {
-                code: "target-ambiguous",
-                message: format!(
+            let (code, message) = target_refusal(
+                TargetRefusalFamily::Ambiguous,
+                format!(
                     "source resolves ambiguously by stem: {} → {candidates:?}",
                     params.from
                 ),
+            );
+            return Err(MoveRefusal {
+                code,
+                message,
                 path: None,
             });
         }

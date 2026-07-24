@@ -30,6 +30,34 @@ pub enum TargetResolution {
     Ambiguous(Vec<Utf8PathBuf>),
 }
 
+/// The two refusal families a failed [`TargetResolution`] produces. Every
+/// mutating verb (`set`, `edit`, `delete`, `move`) hits one of exactly these
+/// two arms when its target/source fails to resolve, each with its own stable
+/// `code`.
+pub enum TargetRefusalFamily {
+    NotFound,
+    Ambiguous,
+}
+
+impl TargetRefusalFamily {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound => "target-not-found",
+            Self::Ambiguous => "target-ambiguous",
+        }
+    }
+}
+
+/// Build the `(code, message)` pair for a target-resolution refusal — the one
+/// constructor every mutating verb's resolve-failure branch calls, keyed on
+/// which refusal family fired (NRN-419). Each verb keeps its own wording for
+/// `message` (the phrasing for what didn't resolve has always differed
+/// between verbs and is passed in verbatim); this centralizes the `code`
+/// string so it is declared once instead of re-typed at each call site.
+pub fn target_refusal(family: TargetRefusalFamily, message: String) -> (&'static str, String) {
+    (family.code(), message)
+}
+
 /// Resolve a target (exact path first, then a case-insensitive stem match) to a
 /// structured outcome. The mutation refusal paths (`delete`) branch on this to
 /// surface the real ambiguous candidates; [`resolve_target_path`] wraps it for
