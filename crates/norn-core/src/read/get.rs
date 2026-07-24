@@ -20,10 +20,13 @@
 //!
 //! ADR 0014: markdown is the exact source file, straight from disk, and does NOT
 //! participate in the relational snapshot. [`execute`] still resolves the
-//! target(s) (so the caller can count them), but the file read itself is the
-//! owner's job (it holds the vault root and is co-located with the vault — a
-//! future off-filesystem client could not read it). `markdown_content` is left
-//! `None` here and filled by the owner.
+//! target(s) and gates the selection count here (NRN-460): more than one
+//! resolved record pushes an `error`-severity `format-markdown-multi-selection`
+//! note so no surface routed through this seam can silently skip the read. The
+//! file read itself stays the owner's job (it holds the vault root and is
+//! co-located with the vault — a future off-filesystem client could not read
+//! it); `markdown_content` is left `None` here and filled by the owner only
+//! when exactly one record resolved.
 
 use anyhow::Result;
 
@@ -121,6 +124,22 @@ pub fn execute(
             params.paging.desc,
         );
         apply_paging(&mut records, params.paging.starts_at, params.paging.limit);
+    } else if records.len() > 1 {
+        // `--format markdown` is a single-document passthrough (ADR 0014): more
+        // than one resolved record refuses rather than silently reading none of
+        // them. Pushed last (after the per-target resolution notes above) so the
+        // wire's note order stays `target-ambiguous` (if any) before this error —
+        // every routed surface (CLI, MCP) sees the same note set in the same
+        // order. The owner still performs the actual single-doc byte read; this
+        // gate is what stops it from running on more than one record.
+        notes.push(Note::error(
+            "format-markdown-multi-selection",
+            format!(
+                "--format markdown returns a single document; {} selected \
+                 — request one target at a time",
+                records.len()
+            ),
+        ));
     }
 
     Ok(Ok(GetReport {
@@ -464,5 +483,53 @@ mod tests {
         let report = execute(&cache, &p, TODAY).unwrap().unwrap();
         let paths: Vec<&str> = report.records.iter().map(|r| r.path.as_str()).collect();
         assert_eq!(paths, vec!["b.md", "a.md"]);
+    }
+
+    #[test]
+    fn markdown_multi_selection_pushes_error_note() {
+        let (_t, root) = synth();
+        let cache = built(&root);
+        let mut p = params(&["a.md", "b.md"]);
+        p.markdown = true;
+        let report = execute(&cache, &p, TODAY).unwrap().unwrap();
+        assert_eq!(report.records.len(), 2);
+        assert!(report.markdown_content.is_none());
+        assert!(report.notes.iter().any(|n| n.is_error()
+            && n.code == "format-markdown-multi-selection"
+            && n.message.contains("2 selected")));
+    }
+
+    #[test]
+    fn markdown_single_selection_pushes_no_note() {
+        let (_t, root) = synth();
+        let cache = built(&root);
+        let mut p = params(&["a.md"]);
+        p.markdown = true;
+        let report = execute(&cache, &p, TODAY).unwrap().unwrap();
+        assert_eq!(report.records.len(), 1);
+        assert!(report
+            .notes
+            .iter()
+            .all(|n| n.code != "format-markdown-multi-selection"));
+    }
+
+    #[test]
+    fn markdown_multi_selection_still_refuses_under_a_truncating_limit() {
+        // Pins the paging-skip dependency (the `if !params.markdown` branch just
+        // above `apply_sort`/`apply_paging`): a future paging refactor that
+        // truncated `records` to 1 BEFORE this gate ran would silently let a
+        // >1-selected markdown request slip through as a single-doc read. The
+        // gate must see the pre-truncation resolved count.
+        let (_t, root) = synth();
+        let cache = built(&root);
+        let mut p = params(&["a.md", "b.md"]);
+        p.markdown = true;
+        p.paging.limit = Some(1);
+        let report = execute(&cache, &p, TODAY).unwrap().unwrap();
+        assert!(report.markdown_content.is_none());
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.is_error() && n.code == "format-markdown-multi-selection"));
     }
 }

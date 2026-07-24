@@ -8,6 +8,17 @@
 //! Hermetic: TempDir vault + TempDir runtime dir, a raw Unix-socket wire
 //! exchange (no dev-dep on norn-wire/serde_json) — same shape as
 //! `dynamic_field_gate.rs`.
+//!
+//! NRN-462: this file's `idle_ttl` runs slightly longer than the `2`s used
+//! elsewhere in this test shape (`dynamic_field_gate.rs` and others) — a
+//! scheduling stall on a loaded CI runner between the ping-until-ready loop's
+//! last successful ping and this file's own follow-up `UnixStream::connect`
+//! can otherwise land after the owner's idle reaper has already latched
+//! shutdown and torn down the socket, failing the `connect` outright rather
+//! than the assertion it was meant to reach. The wider margin does not remove
+//! the race, only narrows the window; NRN-462 tracks a class fix (an explicit
+//! test-side shutdown/stop path) that would remove it for every test in this
+//! shape, this file included.
 
 #[cfg(unix)]
 #[test]
@@ -40,7 +51,7 @@ fn markdown_format_refuses_a_multi_document_selection() {
     let config = norn_owner::OwnerConfig {
         socket_path,
         vault_root,
-        idle_ttl: Duration::from_secs(2),
+        idle_ttl: Duration::from_secs(3), // NRN-462: wider margin, see module docs
         build: None,
         config_path: None,
         events_dir: None,
@@ -142,7 +153,7 @@ fn markdown_format_reads_a_single_document() {
     let config = norn_owner::OwnerConfig {
         socket_path,
         vault_root,
-        idle_ttl: Duration::from_secs(2),
+        idle_ttl: Duration::from_secs(3), // NRN-462: wider margin, see module docs
         build: None,
         config_path: None,
         events_dir: None,

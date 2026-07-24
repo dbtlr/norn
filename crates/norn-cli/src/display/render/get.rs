@@ -70,10 +70,10 @@ pub(crate) fn render_get(
 
 /// `--format markdown`: the exact source bytes. Refuses unless exactly one
 /// document resolved; `--col`/`--section` are ignored (warned). The refusal
-/// itself is an owner-side `error`-severity [`Note`](norn_wire::Note) (NRN-460,
-/// `crates/norn-owner`'s `read_markdown_source`) — every routed surface refuses
-/// identically, so this renderer only prints the note and derives its exit code
-/// from [`has_error`]; it owns no refusal text of its own.
+/// itself is an `error`-severity [`Note`](norn_wire::Note) pushed by the engine
+/// (NRN-460, `norn_core::read::get::execute`) — every routed surface (CLI, MCP)
+/// carries the same note, so this renderer only prints it and derives its exit
+/// code from [`has_error`]; it owns no refusal text of its own.
 fn render_get_markdown(view: &GetView, out: &mut dyn Write, conv: &mut Conversation<'_>) -> i32 {
     let result: io::Result<i32> = (|| {
         warn_col_ignored(&view.cols, Some("markdown"), conv)?;
