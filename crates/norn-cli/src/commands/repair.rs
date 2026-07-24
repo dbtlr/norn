@@ -123,4 +123,24 @@ mod tests {
                 .collect::<Vec<_>>()
         );
     }
+
+    /// Bare `repair --format paths` (no `--plan`) has no defined projection —
+    /// the bare output is a findings summary, not a document enumeration — so
+    /// clap refuses it at parse time (`requires_if`) rather than silently
+    /// rendering the records summary.
+    #[test]
+    fn bare_format_paths_without_plan_is_a_usage_error() {
+        let err = Cli::try_parse_from(["norn", "repair", "--format", "paths"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn plan_format_paths_parses() {
+        let args = repair_args(&["norn", "repair", "--plan", "--format", "paths"]);
+        assert!(args.plan);
+        assert!(matches!(
+            args.format,
+            Some(crate::cli::RepairPlanFormat::Paths)
+        ));
+    }
 }

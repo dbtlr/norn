@@ -430,7 +430,8 @@ pub struct RepairArgs {
     #[arg(
         long,
         value_enum,
-        help = "Output format. Bare repair: `records` summary or `json` report envelope. --plan: records/json/paths (default: records on TTY, json when piped)"
+        requires_if("paths", "plan"),
+        help = "Output format. Bare repair: `records` summary or `json` report envelope. --plan: records/json/paths (default: records on TTY, json when piped). `paths` requires --plan"
     )]
     pub format: Option<RepairPlanFormat>,
     #[arg(
@@ -1160,6 +1161,11 @@ mod tests {
     /// alias is carried ON a canonical `PossibleValue`, so `get_name()` returns
     /// the canonical spelling and the one-release deprecation window never trips
     /// this guard.
+    ///
+    /// The walk filters on `arg.get_id() == "format"` — the convention this
+    /// guard enforces is that every verb names its output-format selector
+    /// `format` (never a bespoke id). A verb whose selector used a different
+    /// arg id would parse fine but silently skip this check.
     #[test]
     fn every_format_value_name_is_canonical() {
         const CANONICAL: &[&str] = &["records", "paths", "json", "jsonl", "markdown"];

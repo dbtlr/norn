@@ -38,6 +38,11 @@ pub(crate) fn render_repair(
             // WITHOUT it: the findings-summary envelope, never the plan.
             write_repair_summary_json(sink.writer(), &view.report, plan)?;
         } else {
+            // `format` here is `None` or `Some(Records)` only: bare `repair
+            // --format paths` has no defined projection (the bare output is a
+            // findings summary, not a document enumeration) and clap refuses
+            // it at parse time (`requires_if` ties `paths` to `--plan`), so
+            // `view.format` never carries `Paths` when `view.plan` is false.
             write_repair_summary(sink.writer(), &view.report, plan)?;
         }
         Ok(if view.report.has_diagnostic_errors {
