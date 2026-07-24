@@ -230,6 +230,25 @@ const HELP_CASES: &[Case] = &[
         normalize: NO_NORM,
         plan: None,
     },
+    // `edit --help` diverges from the oracle beyond the standard GLOBAL
+    // OPTIONS reshape (PD-102): `--ops-file` is a hidden stdin-redirection
+    // alias, declared `hide = true` on both binaries, but the oracle's help
+    // renderer leaks it into the OPTIONS block anyway. The rewrite's
+    // extractor filters `is_hide_set()` on command-local args (NRN-419), so
+    // `--ops-file` correctly stays out of the rewrite's page. See PD-142.
+    Case {
+        id: "help-edit",
+        argv: &["edit", "--help"],
+        fixture: HELP_FIXTURE,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
 ];
 
 /// validate ports for real (NRN-381): the read-side standards engine + verb.

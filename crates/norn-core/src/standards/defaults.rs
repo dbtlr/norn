@@ -5,7 +5,8 @@
 //! and [`resolve_to_fixpoint`] for the iterative resolver used by `norn new`.
 //!
 //! The `{{…}}` reference-scanning the config checks need
-//! (`collect_path_var_refs` / `collect_transform_refs` / `KNOWN_TRANSFORMS`)
+//! (`collect_path_var_refs` / `collect_transform_refs` / `is_known_transform`,
+//! which derives its answer from [`crate::standards::substitution::TRANSFORMS`])
 //! lives in [`crate::standards::template_refs`]; the `{{…}}` renderer lives in
 //! [`crate::standards::substitution`]. This module is the one match-and-merge
 //! entry point over those two — it does not re-implement either.

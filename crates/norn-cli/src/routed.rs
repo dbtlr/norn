@@ -36,6 +36,15 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
         .map_err(|e| Diagnostic::new(format!("cannot read the current directory: {e}")))?;
     let home = ConfigHome::from_env().map_err(|e| config_error_diagnostic(&e))?;
 
+    // Selector precedence (H3b, ADR 0020 amendment): `-C`/`--cwd` always wins
+    // over `--vault NAME` — the resolver below returns on the explicit-path
+    // branch without ever consulting the name. That precedence is silent
+    // otherwise, so surface it here: a `--vault` the caller expected to route
+    // by name is not silently ignored with no signal.
+    if let Some(warning) = selector_precedence_warning(global) {
+        eprintln!("{warning}");
+    }
+
     let input = ResolveInput {
         explicit_path: global.cwd.clone(),
         explicit_name: global.vault.clone(),
@@ -67,11 +76,10 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
     // A registered vault may carry a `[vaults.<name>].config` override; the
     // summoned owner warms under it (ADR 0017 resolver-derived config). An
     // unregistered cwd (the common ephemeral case) has no override — the owner
-    // loads `<root>/.norn/config.yaml`.
-    let config_override = match &resolved.name {
-        Some(name) => registry.lookup(name).ok().flatten().and_then(|v| v.config),
-        None => None,
-    };
+    // loads `<root>/.norn/config.yaml`. `resolve` already looked the entry up
+    // for a registry via, so the resolved entry itself carries the override —
+    // no second registry lookup here.
+    let config_override = resolved.vault.as_ref().and_then(|v| v.config.clone());
 
     // Registration is what unlocks durable telemetry (NRN-400): a registered
     // vault resolves an events dir (honoring a `logs` override) the owner writes
@@ -121,6 +129,19 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
         .wait_until_ready(MAX_WAIT)
         .map_err(|e| client_error_diagnostic(&e))?;
     Ok(session)
+}
+
+/// The selector-precedence advisory (H3b, ADR 0020 amendment): when both
+/// `-C`/`--cwd` and `--vault NAME` are given, `-C` always wins (the resolver
+/// never even looks the name up). Returns the `warning:`-prefixed line to
+/// print when that override actually happened, or `None` when only one — or
+/// neither — selector was given.
+fn selector_precedence_warning(global: &GlobalArgs) -> Option<String> {
+    let name = global.vault.as_ref()?;
+    global.cwd.as_ref()?;
+    Some(format!(
+        "warning: --vault {name} is overridden by -C/--cwd (the explicit path always wins)"
+    ))
 }
 
 /// The instant, pre-summon vault-root check for the direct-path resolution vias
@@ -186,9 +207,15 @@ pub fn client_error_diagnostic(e: &ClientError) -> Diagnostic {
         // may point at them.
         ClientError::OwnerHealth(_) => Diagnostic::new(e.to_string())
             .with_hint("the vault owner is not responding — re-run the command, or retry"),
-        // The remaining variants (runtime-dir security, foreign owner, spawn,
-        // protocol, raw IO) are self-explanatory headlines with no honest next
-        // step to add — a hint here would be noise.
+        // The computed runtime dir (an `XDG_RUNTIME_DIR`-derived path, or the
+        // world-writable `$TMPDIR/norn-<uid>` fallback) is a symlink or is
+        // owned by another uid — a squatting attempt. The concrete remedy is a
+        // private runtime dir the caller's uid alone controls.
+        ClientError::InsecureRuntimeDir(_) => Diagnostic::new(e.to_string())
+            .with_hint("set XDG_RUNTIME_DIR to a private, per-user directory and re-run"),
+        // The remaining variants (foreign owner, spawn, protocol, raw IO) are
+        // self-explanatory headlines with no honest next step to add — a hint
+        // here would be noise.
         _ => Diagnostic::new(e.to_string()),
     }
 }
@@ -312,6 +339,45 @@ mod tests {
 
         let io = client_error_diagnostic(&ClientError::Io(std::io::Error::other("boom")));
         assert!(io.hints().is_empty(), "a raw IO error adds no filler hint");
+    }
+
+    fn global_args(cwd: Option<&str>, vault: Option<&str>) -> GlobalArgs {
+        GlobalArgs {
+            cwd: cwd.map(PathBuf::from),
+            verbose: false,
+            no_cache_refresh: false,
+            color: crate::cli::ColorWhen::Auto,
+            vault: vault.map(str::to_string),
+            help_short: false,
+            help_long: false,
+            dynamic_fields: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn selector_precedence_warns_only_when_both_selectors_are_given() {
+        // H3b (ADR 0020 amendment): `-C` always wins over `--vault`, silently
+        // — this is the one diagnostic surfacing that override.
+        let both = global_args(Some("/some/vault"), Some("atlas"));
+        let warning = selector_precedence_warning(&both).expect("both given must warn");
+        assert_eq!(
+            warning,
+            "warning: --vault atlas is overridden by -C/--cwd (the explicit path always wins)"
+        );
+
+        assert!(selector_precedence_warning(&global_args(Some("/some/vault"), None)).is_none());
+        assert!(selector_precedence_warning(&global_args(None, Some("atlas"))).is_none());
+        assert!(selector_precedence_warning(&global_args(None, None)).is_none());
+    }
+
+    #[test]
+    fn insecure_runtime_dir_gets_an_xdg_runtime_dir_hint() {
+        let diag = client_error_diagnostic(&ClientError::InsecureRuntimeDir(
+            "/tmp/norn-501 is owned by uid 999 (expected 501)".into(),
+        ));
+        assert!(diag.message().contains("insecure runtime dir"));
+        assert_eq!(diag.hints().len(), 1);
+        assert!(diag.hints()[0].contains("XDG_RUNTIME_DIR"));
     }
 
     #[test]

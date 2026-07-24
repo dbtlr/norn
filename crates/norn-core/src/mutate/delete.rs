@@ -10,7 +10,9 @@
 use super::{owner_index_options, MutationExecution};
 use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::domain::GraphIndex;
-use crate::target::{backlinks, resolve_target, TargetResolution};
+use crate::target::{
+    backlinks, resolve_target, target_refusal, TargetRefusalFamily, TargetResolution,
+};
 use camino::Utf8PathBuf;
 use norn_wire::{ApplyError, ApplyOutcome, ApplyReport};
 use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
@@ -140,19 +142,21 @@ fn preflight(
     let doc_rel = match resolve_target(index, &params.target) {
         TargetResolution::Resolved(path) => path,
         TargetResolution::NotFound => {
-            return Err(DeleteRefusal {
-                code: "target-not-found",
-                message: format!("document does not exist: {}", params.target),
-            });
+            let (code, message) = target_refusal(
+                TargetRefusalFamily::NotFound,
+                format!("document does not exist: {}", params.target),
+            );
+            return Err(DeleteRefusal { code, message });
         }
         TargetResolution::Ambiguous(candidates) => {
-            return Err(DeleteRefusal {
-                code: "target-ambiguous",
-                message: format!(
+            let (code, message) = target_refusal(
+                TargetRefusalFamily::Ambiguous,
+                format!(
                     "document resolves ambiguously by stem: {} → {:?}",
                     params.target, candidates
                 ),
-            });
+            );
+            return Err(DeleteRefusal { code, message });
         }
     };
 

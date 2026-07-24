@@ -825,7 +825,7 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
                 continue;
             };
             for t in crate::standards::template_refs::collect_transform_refs(s) {
-                if !crate::standards::template_refs::KNOWN_TRANSFORMS.contains(&t.as_str()) {
+                if !crate::standards::template_refs::is_known_transform(&t) {
                     return Err(ConfigError::Invalid {
                         source_path: source_path.to_owned(),
                         message: format!(

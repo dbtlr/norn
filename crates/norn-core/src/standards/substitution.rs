@@ -31,16 +31,12 @@
 //!
 //! Inside `{{...}}`, use `{{{{` / `}}}}` (quad-brace) to emit literal `{{` / `}}`.
 //!
-//! ## `KNOWN_TRANSFORMS` sync pin
+//! ## Config-load's transform check
 //!
-//! Config-load validation carries its own accepted-transform vocabulary in
-//! [`crate::standards::template_refs::KNOWN_TRANSFORMS`] so it can reject an
-//! unknown `{{… | t}}` transform without rendering. That declaration list and
-//! the renderer's [`TRANSFORMS`] dispatch table must name exactly the same
-//! transforms — otherwise a config either under-validates (renderer accepts a
-//! transform the checker would reject) or spuriously rejects a valid one. The
-//! `known_transforms_match_renderer_table` test pins the two sets equal; adding
-//! a transform to one without the other trips it.
+//! Config-load validation rejects an unknown `{{… | t}}` transform without
+//! rendering, via [`crate::standards::template_refs::is_known_transform`],
+//! which reads directly off this module's [`TRANSFORMS`] table — one source,
+//! so a transform added or removed here is immediately reflected there.
 
 use chrono::{Datelike, NaiveDateTime, Timelike};
 use std::collections::BTreeMap;
@@ -318,11 +314,13 @@ type TransformFn = fn(&str) -> String;
 
 /// The single source of truth for the renderer's transform vocabulary.
 ///
-/// [`apply_transform`] dispatches through this table, and the
-/// `known_transforms_match_renderer_table` sync-pin test compares its names
-/// against [`crate::standards::template_refs::KNOWN_TRANSFORMS`]. Adding a
-/// transform is a single edit here (plus the matching name in
-/// `KNOWN_TRANSFORMS`, which the pin test enforces).
+/// [`apply_transform`] dispatches through this table, and
+/// [`crate::standards::template_refs::is_known_transform`] derives its
+/// answer directly from it — there is no separate name list to keep in
+/// sync. The `known_transforms_round_trip_through_renderer` test guards the
+/// round trip: every entry here both renders through [`render`] and is
+/// recognized by `is_known_transform`. Adding a transform is a single edit
+/// to this table.
 pub(crate) const TRANSFORMS: &[(&str, TransformFn)] = &[
     ("titlecase", titlecase),
     ("sentencecase", sentencecase),
@@ -474,28 +472,14 @@ fn unknown_var_hint(name: &str, ctx: &Context) -> String {
 #[cfg(test)]
 mod sync_pin_tests {
     use super::*;
-    use crate::standards::template_refs::KNOWN_TRANSFORMS;
-    use std::collections::BTreeSet;
 
-    /// The `KNOWN_TRANSFORMS` sync pin (NRN-376): the config-load declaration
-    /// list and the renderer's `TRANSFORMS` dispatch table must name exactly
-    /// the same transforms. Adding a transform to one without the other — in
-    /// either direction — trips this test.
-    #[test]
-    fn known_transforms_match_renderer_table() {
-        let declared: BTreeSet<&str> = KNOWN_TRANSFORMS.iter().copied().collect();
-        let renderer: BTreeSet<&str> = TRANSFORMS.iter().map(|(name, _)| *name).collect();
-        assert_eq!(
-            declared, renderer,
-            "template_refs::KNOWN_TRANSFORMS and substitution::TRANSFORMS have drifted; \
-             a transform was added/removed on one side only"
-        );
-    }
-
-    /// Every declared transform must actually render (belt-and-suspenders over
-    /// the set-equality pin: proves the table entry is wired, not just named).
+    /// `template_refs::is_known_transform` reads directly off [`TRANSFORMS`]
+    /// (NRN-419), so this proves the derivation actually works end to end:
+    /// every entry in [`TRANSFORMS`] both renders through [`render`] AND is
+    /// recognized by `is_known_transform`, and nothing outside it is.
     #[test]
     fn known_transforms_round_trip_through_renderer() {
+        use crate::standards::template_refs::is_known_transform;
         use chrono::{NaiveDate, NaiveTime};
 
         let ctx = Context {
@@ -507,19 +491,23 @@ mod sync_pin_tests {
             date_format: "YYYY-MM-DD".into(),
             time_format: "HH:mm".into(),
         };
-        for name in KNOWN_TRANSFORMS {
+        for (name, _) in TRANSFORMS {
+            assert!(
+                is_known_transform(name),
+                "`{name}` is in TRANSFORMS but is_known_transform rejects it"
+            );
             let template = format!("{{{{title | {name}}}}}");
             match render(&template, &ctx) {
                 Ok(_) => {}
-                Err(RenderError::UnknownTransform(t)) => panic!(
-                    "KNOWN_TRANSFORMS lists `{name}` but renderer rejects it as unknown ({t}); \
-                     template_refs::KNOWN_TRANSFORMS and substitution::TRANSFORMS have drifted"
-                ),
+                Err(RenderError::UnknownTransform(t)) => {
+                    panic!("TRANSFORMS lists `{name}` but the renderer rejects it as unknown ({t})")
+                }
                 Err(other) => {
                     panic!("unexpected render error for known transform `{name}`: {other:?}")
                 }
             }
         }
+        assert!(!is_known_transform("not-a-real-transform"));
     }
 }
 

@@ -36,20 +36,30 @@ pub fn execute(
     let vault_root = cache.vault_root().to_string();
 
     // ── Target resolution ────────────────────────────────────────────────────
-    let target_path = match crate::target::resolve_target_path(&index, &params.target) {
-        Ok(p) => p,
-        Err(e) => {
-            let raw = e.to_string();
-            // Refusal prose is end-user contract: `doc not found: <target>` for
-            // a miss; the resolver's candidate list for an ambiguous stem.
-            let (code, msg) = if raw.contains("ambiguous") {
-                ("target-ambiguous", raw)
-            } else {
-                (
-                    "target-not-found",
-                    format!("doc not found: {}", params.target),
-                )
-            };
+    // Refusal prose is end-user contract: `doc not found: <target>` for a
+    // miss; the resolver's candidate list for an ambiguous stem.
+    let target_path = match crate::target::resolve_target(&index, &params.target) {
+        crate::target::TargetResolution::Resolved(p) => p,
+        crate::target::TargetResolution::NotFound => {
+            let (code, msg) = crate::target::target_refusal(
+                crate::target::TargetRefusalFamily::NotFound,
+                format!("doc not found: {}", params.target),
+            );
+            return Ok(refused(params.target.clone(), code, msg, None));
+        }
+        crate::target::TargetResolution::Ambiguous(candidates) => {
+            let (code, msg) = crate::target::target_refusal(
+                crate::target::TargetRefusalFamily::Ambiguous,
+                format!(
+                    "ambiguous document stem: {}; candidates: {}",
+                    params.target,
+                    candidates
+                        .iter()
+                        .map(|path| path.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
             return Ok(refused(params.target.clone(), code, msg, None));
         }
     };

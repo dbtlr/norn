@@ -7,9 +7,10 @@
 //! (`applicable_rules` / `merge_defaults` / `resolve_to_fixpoint`) are the
 //! mutation-verb port and are deliberately absent here.
 //!
-//! `KNOWN_TRANSFORMS` must stay in sync with the renderer's `apply_transform`;
-//! the compile-time pin for that (a round-trip test through `render`) travels
-//! with the substitution port, not this declaration-side slice.
+//! [`is_known_transform`] answers "does the renderer recognize this transform
+//! name" directly off [`crate::standards::substitution::TRANSFORMS`] — the
+//! renderer's dispatch table is the single source; this module keeps no
+//! transform-name list of its own to drift out of sync with it.
 
 use std::collections::BTreeSet;
 
@@ -73,21 +74,14 @@ pub(crate) fn collect_transform_refs(template: &str) -> Vec<String> {
     out
 }
 
-/// The canonical list of known transform names.
-///
-/// **Invariant:** must stay in sync with `apply_transform` in the substitution
-/// renderer. Adding a transform there without updating this list silently
-/// under-validates configs; removing one here rejects configs the renderer
-/// would still accept.
-pub(crate) const KNOWN_TRANSFORMS: &[&str] = &[
-    "titlecase",
-    "sentencecase",
-    "lower",
-    "upper",
-    "unsep",
-    "strip_date_prefix",
-    "slugify",
-];
+/// Whether `name` is a transform the renderer recognizes — read straight off
+/// [`crate::standards::substitution::TRANSFORMS`], so a transform added or
+/// removed there is reflected here with no second list to update (NRN-419).
+pub(crate) fn is_known_transform(name: &str) -> bool {
+    super::substitution::TRANSFORMS
+        .iter()
+        .any(|(candidate, _)| *candidate == name)
+}
 
 #[cfg(test)]
 mod tests {

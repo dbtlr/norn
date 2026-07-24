@@ -860,3 +860,21 @@ old = "the full `tools/list` catalog is 14 tools whose `get` `inputSchema` docum
 new = "the catalog is the same 14 tools, but `get`'s published `inputSchema` documents `starts_at` as a zero-indexed default (`default: 0`, NRN-332) — the MCP-surface face of PD-105; the remaining catalog delta is incidental prose (descriptions / typed-note schemas)"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-419: `edit`'s `--ops-file` is declared `hide = true` on both binaries (a
+# stdin-redirection alias, not part of the documented surface), but the
+# oracle's help renderer does not honor `hide()` for a command-local arg — it
+# leaks `--ops-file <PATH>` into the OPTIONS block anyway. The rewrite's help
+# extractor (`crates/norn-cli/src/help/extract.rs`) now filters `is_hide_set()`
+# on command-local args the same way it already did for globals, so
+# `--ops-file` correctly disappears from `edit --help`'s OPTIONS block. This is
+# additional to, not a replacement for, the standard GLOBAL OPTIONS reshape
+# (PD-102) also present on this page.
+[[entry]]
+id = "PD-142"
+surface = "edit --help (OPTIONS block — hidden --ops-file)"
+cases = ["help-edit"]
+old = "the OPTIONS block lists `--ops-file <PATH>` despite the flag being declared `hide = true`"
+new = "the OPTIONS block omits `--ops-file` entirely — a command-local hidden arg is now filtered the same way a hidden global already was"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

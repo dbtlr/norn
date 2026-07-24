@@ -1,9 +1,10 @@
 //! Build a [`HelpModel`] from a [`clap::Command`].
 //!
 //! Two things to note:
-//! - The globals filter drops `is_hide_set()` args. The `--vault` global (ADR
-//!   0017) is marked hidden so it parses but never pollutes the GLOBAL OPTIONS
-//!   block, keeping every command's help output stable.
+//! - Both the globals filter and the command-local args loop drop
+//!   `is_hide_set()` args: the `--vault` global (ADR 0017) and a command-local
+//!   hidden alias like `edit`'s `--ops-file` all parse but never surface in
+//!   help, keeping every command's help output stable.
 //! - The `live_examples_fn` extras hook is gone (see `model.rs`).
 
 use clap::Command;
@@ -73,6 +74,12 @@ pub fn build_model(cmd: &Command, root: &Command, cmd_path: &str, form: HelpForm
             continue;
         }
         if arg.is_global_set() {
+            continue;
+        }
+        if arg.is_hide_set() {
+            // A command-local hidden arg (e.g. `edit`'s `--ops-file`, a
+            // stdin-redirection alias) parses but must not surface in help —
+            // the same rule the globals filter above already applies.
             continue;
         }
         let entry = flag_entry_from_arg(arg, form);
@@ -266,6 +273,29 @@ mod tests {
                 .iter()
                 .all(|g| g.long.as_deref() != Some("vault")),
             "a hidden global must not appear in the model"
+        );
+    }
+
+    #[test]
+    fn hidden_command_local_arg_is_excluded() {
+        // A hidden command-local arg (e.g. `edit`'s `--ops-file`) must not
+        // surface in either the flag groups or the positionals — it parses,
+        // but stays out of help (NRN-419).
+        let cmd = Command::new("edit").about("Edit a document").arg(
+            Arg::new("ops_file")
+                .long("ops-file")
+                .value_name("PATH")
+                .hide(true)
+                .help("Read the ops JSON array from a file"),
+        );
+        let model = build_model(&cmd, &cmd, "norn edit", HelpForm::Short);
+        assert!(
+            model
+                .groups
+                .iter()
+                .flat_map(|g| g.flags.iter())
+                .all(|f| f.long.as_deref() != Some("ops-file")),
+            "a hidden command-local arg must not appear in the model"
         );
     }
 
