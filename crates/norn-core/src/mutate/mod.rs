@@ -6,6 +6,9 @@
 //! [`norn_wire::ApplyReport`], which the owner
 //! serializes onto the wire as an opaque JSON value.
 pub mod apply;
+// `pub(crate)`, not private: the standards side (validate's check_allowed_values
+// and the config-default lint) shares `coerce::value_in_allowed` — the one
+// allowed-values decision — rather than mirroring its element-wise semantics.
 pub(crate) mod coerce;
 pub mod delete;
 pub mod edit;

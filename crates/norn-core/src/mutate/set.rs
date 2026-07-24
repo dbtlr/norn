@@ -1229,4 +1229,40 @@ mod tests {
         assert_eq!(w.field.as_deref(), Some("reviewer"));
         assert_eq!(w.message, "field 'reviewer' not declared in schema");
     }
+
+    #[test]
+    fn nrn429_set_then_validate_list_field_allowed_values_element_wise() {
+        // The reported false positive (NRN-429): `set tags=a` on a
+        // `list_of_strings` field coerces to `tags: [a]` (`coerce::
+        // coerce_value_for_type`'s single-element wrap); validate's
+        // `allowed_values` must match that array element-wise — the same
+        // decision `set` itself already applies via `coerce::value_in_allowed`
+        // — rather than flag the whole array against a set of scalars.
+        let cfg = "validate:\n  rules:\n    - name: r\n      match:\n        path: \"**/*.md\"\n      field_types:\n        tags: list_of_strings\n      allowed_values:\n        tags: [a, b]\n";
+        let (_t, root) = synth_vault(Some(cfg), &[("a.md", "---\ntitle: A\n---\n")]);
+        let mut cache = built(&root);
+        let config = parse_cfg(cfg);
+        let params = SetParams {
+            target: "a.md".into(),
+            fields: vec!["tags=a".into()],
+            confirm: true,
+            ..Default::default()
+        };
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert!(exec.report.applied);
+        let on_disk = std::fs::read_to_string(root.join("a.md").as_std_path()).unwrap();
+        assert!(on_disk.contains("tags:"), "{on_disk}");
+
+        // Rebuild the cache post-write and validate the doc `set` just wrote.
+        cache.full_build(&root).unwrap();
+        let validate_params = norn_wire::ValidateParams::default();
+        let result = crate::read::validate::execute(&cache, Some(&config), &validate_params, TODAY)
+            .unwrap()
+            .unwrap();
+        assert!(
+            result.findings.is_empty(),
+            "the doc set wrote should validate clean: {:?}",
+            result.findings
+        );
+    }
 }
