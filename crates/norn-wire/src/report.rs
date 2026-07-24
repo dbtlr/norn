@@ -45,13 +45,15 @@ pub struct ApplyReport {
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub warnings: Vec<ApplyWarning>,
     /// The single machine-readable outcome of this apply (NRN-183). Collapses the
-    /// process-exit tri-state — `applied` (exit 0) / `failed` (exit 1, a runtime
-    /// op-failure) / `refused` (exit 2, a validation-phase precondition refusal) —
-    /// into ONE field exposed identically by every surface. A consumer keys on
-    /// `outcome`, never on inspecting the `failed` count or the process exit code,
-    /// to distinguish a refused apply (nothing written) from a partially-failed
-    /// one. Defaulted for backward-compatible deserialization of pre-NRN-183
-    /// reports.
+    /// exit states — `applied` (exit 0, a confirmed clean write) / `forecast`
+    /// (exit 0, a dry-run preview that wrote nothing, NRN-161) / `failed` (exit 1,
+    /// a runtime op-failure) / `refused` (exit 2, a validation-phase precondition
+    /// refusal) — into ONE field exposed identically by every surface. A consumer
+    /// keys on `outcome`, never on inspecting the `failed` count or the process
+    /// exit code, to distinguish a refused apply (nothing written) from a
+    /// partially-failed one — and (NRN-161) a preview (`forecast`) from a
+    /// confirmed write (`applied`) without reading the `dry_run` flag. Defaulted
+    /// for backward-compatible deserialization of pre-NRN-183 reports.
     #[serde(default)]
     pub outcome: ApplyOutcome,
     /// Every vault-relative path this apply TOUCHED on disk, populated only on the
@@ -72,9 +74,17 @@ pub struct ApplyReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApplyOutcome {
-    /// Every op applied (or was a no-op), or a dry-run forecast — exit 0.
+    /// Every op applied (or was a no-op) on a CONFIRMED write — exit 0.
     #[default]
     Applied,
+    /// A dry-run preview that writes nothing: the report describes what a
+    /// confirmed apply WOULD do, with the same applied/skipped/failed
+    /// classification a same-snapshot apply would produce (NRN-161) — exit 0.
+    /// Distinct from `Applied` so a consumer keying on `outcome` alone tells a
+    /// preview from a real write; the report's `dry_run: true` flag stays
+    /// alongside as a direct convenience. A dry-run whose plan WOULD refuse still
+    /// reports `Refused` (a forecasted refusal), never `Forecast`.
+    Forecast,
     /// At least one op FAILED at runtime after the apply began — exit 1.
     Failed,
     /// A validation-phase precondition refused the plan before any write; the
@@ -95,7 +105,7 @@ impl ApplyOutcome {
     /// the outcome→exit mapping is defined, shared by every surface.
     pub fn exit_code(self) -> i32 {
         match self {
-            ApplyOutcome::Applied | ApplyOutcome::Rebased => 0,
+            ApplyOutcome::Applied | ApplyOutcome::Forecast | ApplyOutcome::Rebased => 0,
             ApplyOutcome::Failed => 1,
             ApplyOutcome::Refused => 2,
         }

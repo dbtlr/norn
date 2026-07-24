@@ -670,6 +670,10 @@ struct PassEnv<'a> {
     spans: &'a HashMap<String, String>,
     deps: &'a DependencyMap,
     current_hashes: &'a BTreeMap<Utf8PathBuf, String>,
+    /// The graph-index snapshot the plan was built against. The dry-run cascade
+    /// forecast reads backlinker content from it (never the live filesystem) so
+    /// its skip/rewrite classification matches a same-snapshot apply (NRN-161).
+    index: &'a GraphIndex,
 }
 
 /// True (and records `not_run`) when this op is blocked by a failed requirement
@@ -751,6 +755,7 @@ pub(crate) fn run_apply_passes(
         spans,
         deps,
         current_hashes: &current_hashes,
+        index,
     };
 
     let mut outcomes = ApplyOutcomes::default();
@@ -993,28 +998,18 @@ fn delete_pass(
         if change.link_risk.is_some() {
             let planned = count_planned_links(change);
             if env.dry_run {
-                let mut rewritten: Vec<LinkRewriteResult> = Vec::new();
-                if let Some(risk) = &change.link_risk {
-                    for affected in risk
-                        .stem_links
-                        .iter()
-                        .chain(risk.path_qualified_wikilinks.iter())
-                        .chain(risk.markdown_links.iter())
-                    {
-                        rewritten.push(LinkRewriteResult {
-                            file: affected.source_path.clone(),
-                            from: affected.raw.clone(),
-                            to: affected.rewritten.clone(),
-                        });
-                    }
-                }
-                outcomes.rewritten_links.extend(rewritten.clone());
+                // Forecast the redirect cascade against the index snapshot so the
+                // dry-run's rewritten/skipped counts match a same-snapshot apply
+                // (NRN-161) — same per-link classification, never the filesystem.
+                let forecast =
+                    crate::standards::apply::forecast_link_rewrites(&env.index.documents, change);
+                outcomes.rewritten_links.extend(forecast.rewritten.clone());
                 outcomes.cascades.push(CascadeRecord {
                     source_path: change.path.clone(),
                     planned,
-                    rewritten,
-                    skipped: Vec::new(),
-                    failed: Vec::new(),
+                    rewritten: forecast.rewritten,
+                    skipped: forecast.skipped,
+                    failed: forecast.failed,
                 });
             } else {
                 match apply_link_rewrites(env.cwd, change) {
@@ -1303,28 +1298,18 @@ fn cascade_pass(env: &PassEnv, plan: &ApplyBatch, outcomes: &mut ApplyOutcomes) 
         }
         let planned = count_planned_links(change);
         if env.dry_run {
-            let mut rewritten: Vec<LinkRewriteResult> = Vec::new();
-            if let Some(risk) = &change.link_risk {
-                for affected in risk
-                    .stem_links
-                    .iter()
-                    .chain(risk.path_qualified_wikilinks.iter())
-                    .chain(risk.markdown_links.iter())
-                {
-                    rewritten.push(LinkRewriteResult {
-                        file: affected.source_path.clone(),
-                        from: affected.raw.clone(),
-                        to: affected.rewritten.clone(),
-                    });
-                }
-            }
-            outcomes.rewritten_links.extend(rewritten.clone());
+            // Forecast the move's backlink cascade against the index snapshot so
+            // the dry-run's rewritten/skipped counts match a same-snapshot apply
+            // (NRN-161) — same per-link classification, never the filesystem.
+            let forecast =
+                crate::standards::apply::forecast_link_rewrites(&env.index.documents, change);
+            outcomes.rewritten_links.extend(forecast.rewritten.clone());
             outcomes.cascades.push(CascadeRecord {
                 source_path: change.path.clone(),
                 planned,
-                rewritten,
-                skipped: Vec::new(),
-                failed: Vec::new(),
+                rewritten: forecast.rewritten,
+                skipped: forecast.skipped,
+                failed: forecast.failed,
             });
         } else {
             match apply_link_rewrites(env.cwd, change) {

@@ -162,7 +162,7 @@ mod tests {
         let cache = built(&root);
         let plan = move_plan(&root, "b.md", "renamed.md");
         let exec = execute(&cache, None, &params(&plan, false), TODAY, &mut sink()).unwrap();
-        assert_eq!(exec.report.outcome, ApplyOutcome::Applied);
+        assert_eq!(exec.report.outcome, ApplyOutcome::Forecast);
         assert!(exec.report.dry_run);
         assert!(root.join("b.md").as_std_path().exists());
         assert!(!root.join("renamed.md").as_std_path().exists());

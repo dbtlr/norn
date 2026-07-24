@@ -878,3 +878,29 @@ old = "the OPTIONS block lists `--ops-file <PATH>` despite the flag being declar
 new = "the OPTIONS block omits `--ops-file` entirely — a command-local hidden arg is now filtered the same way a hidden global already was"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+# NRN-161 (ADR 0016, decided-better): cascade-verb dry-run reports `outcome:
+# forecast`. This closes the one-cycle split convention PD-136 shipped: `set` /
+# `new` / `edit` previews reported `outcome: forecast`, but the cascade verbs
+# (`move` / `delete` / `rewrite-wikilink` / `apply`) still reported `outcome:
+# applied` alongside `dry_run: true`, so a consumer keying on `outcome` alone read
+# a cascade preview as a completed write and preview detection was per-verb-family.
+# `ApplyReport.outcome` gains `forecast` (exit 0); a clean cascade dry-run now
+# reports it, so `outcome == "forecast"` is the single preview signal across all
+# seven mutation verbs. The `ApplyReport.dry_run: true` flag is retained (the
+# cascade report, unlike the frontmatter verbs' reports, keeps it) — now
+# consistent with `outcome` rather than contradicting it. The pinned oracle emits
+# `outcome: applied` on these previews; exit codes and the applied/skipped/failed
+# counts are unchanged (the forecast counts already matched here — the deeper
+# same-snapshot count-fidelity fix has no pinned corrupting-backlink case).
+# Surfaces on the CLI `move` / `apply --dry-run --format json` and the MCP
+# `vault.move` / `vault.delete` forecast result. See `crates/norn-wire/src/
+# report.rs` (`ApplyOutcome::Forecast`) and `crates/norn-core/src/apply/
+# executor.rs`.
+[[entry]]
+id = "PD-142"
+surface = "move/delete/rewrite-wikilink/apply forecast outcome (ApplyOutcome::Forecast — cascade dry-run reports outcome: forecast)"
+cases = ["mutate-move-dry-run-json-zoo", "apply-authored-add-frontmatter-plan-dry-run-json-zoo", "mcp-tools-call-move-forecast-zoo", "mcp-tools-call-delete-forecast-zoo"]
+old = "a cascade-verb (`move` / `delete` / `rewrite-wikilink` / `apply`) dry-run reports `outcome: applied` alongside `dry_run: true` — a consumer keying on `outcome` sees a preview as a completed write, and preview detection is per-verb-family (`forecast` for `set`/`new`/`edit`, `dry_run` for the cascade verbs)"
+new = "a clean cascade dry-run reports `outcome: forecast` (present-tense honest, distinct from a confirmed `applied`), on both the CLI `--dry-run --format json` `ApplyReport` and the MCP `vault.move` / `vault.delete` forecast result; the `dry_run: true` flag is retained and now consistent with `outcome`, so `outcome == \"forecast\"` is one preview signal across all seven mutation verbs. Exit codes and the applied/skipped/failed counts are unchanged"
+reason = "decided-better"
+decision = "docs/decisions/0016-surface-neutral-command-core.md"

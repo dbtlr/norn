@@ -4,8 +4,10 @@
 //! at apply time. Each expanded op gets `link_risk` populated via classify.
 
 use crate::domain::GraphIndex;
+use crate::standards::apply::ApplyError;
 use crate::standards::{classify_link_risk, ApplyOp};
 use anyhow::Result;
+use std::collections::BTreeSet;
 
 pub(crate) struct MoveFolderOp {
     pub src: String,
@@ -26,6 +28,16 @@ pub(crate) fn expand_move_folder(op: &MoveFolderOp, index: &GraphIndex) -> Resul
     } else {
         format!("{}/", op.src)
     };
+
+    // The set of vault-relative source paths this folder move vacates. A
+    // destination that lands on one of these is not a collision — the occupant is
+    // itself moving out of the way — so it is excluded from the collision check.
+    let sources: BTreeSet<&str> = index
+        .documents
+        .iter()
+        .map(|doc| doc.path.as_str())
+        .filter(|rel| rel.starts_with(&src_prefix))
+        .collect();
 
     let mut changes = Vec::new();
 
@@ -49,6 +61,26 @@ pub(crate) fn expand_move_folder(op: &MoveFolderOp, index: &GraphIndex) -> Resul
 
         let old_rel = doc.path.clone();
         let new_rel: camino::Utf8PathBuf = new_rel_str.into();
+
+        // Destination-collision forecast (NRN-161): a destination already occupied
+        // by a KNOWN vault document (one not itself being vacated by this move) is
+        // a collision the index can see, so refuse it here — at expansion, which
+        // runs on the dry-run forecast too — rather than only when `apply_move`
+        // hits the live file. Consulting the index (never the filesystem) keeps
+        // this a forecastable refusal; a destination occupied by something the
+        // index does not track (a non-vault file, an ignored path) is knowledge
+        // only the live filesystem carries and stays an apply-time refusal
+        // (`apply_move`). `--force` overwrites, so it is not a collision.
+        if !op.force
+            && new_rel != old_rel
+            && !sources.contains(new_rel.as_str())
+            && index.documents.iter().any(|d| d.path == new_rel)
+        {
+            return Err(ApplyError::MoveDestinationExists {
+                destination: new_rel,
+            }
+            .into());
+        }
 
         // `no_link_rewrite` suppresses the backlink cascade for every expanded
         // op, matching the single-document move dispatch (`intent::expand`).

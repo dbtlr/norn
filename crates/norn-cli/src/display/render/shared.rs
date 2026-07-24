@@ -150,6 +150,9 @@ pub(super) fn write_report_to_out_file(path: &str, report: &ApplyReport) -> io::
 /// real failure from a success).
 pub(super) fn apply_status_label(report: &ApplyReport) -> &'static str {
     match report.outcome {
+        // A dry-run reports `outcome: forecast` (NRN-161); the older
+        // `Applied` + `dry_run` shape stays mapped for a defensive belt.
+        ApplyOutcome::Forecast => "dry-run",
         ApplyOutcome::Applied if report.dry_run => "dry-run",
         ApplyOutcome::Applied => "applied",
         ApplyOutcome::Failed => "failed",
