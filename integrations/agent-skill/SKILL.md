@@ -107,7 +107,7 @@ norn count --by project,lifecycle             # multi-key: nested distribution p
 norn count --path 'notes/**/*.md' --by type
 ```
 
-`count` shares the full `find` filter surface. `--by` takes one or more comma-separated fields: one field → flat value→count `groups` with a string `by`; several → nested groups (one map level per field, counts at the leaves) with an array `by`. Formats: `text` (default) and `json` only.
+`count` shares the full `find` filter surface. `--by` takes one or more comma-separated fields: one field → flat value→count `groups` with a string `by`; several → nested groups (one map level per field, counts at the leaves) with an array `by`. Formats: `records` (default) and `json` only.
 
 ### Output formats
 
@@ -272,7 +272,7 @@ Single-line pipeline (skips the artifact file): `norn -C /vault repair --plan --
 
 ### Repair plan shape
 
-`repair --plan` formats: `report` (human, TTY default), `json` (full `MigrationPlan`, the only format `apply` consumes; pipe default), `paths` (affected paths). Supported findings become `PlannedChange`s (path, field, new value, document hash). Skipped findings carry a stable reason code: `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, `precondition-failed`. Filter with `--skip-reason <PATTERN>` (globs).
+`repair --plan` formats: `records` (human, TTY default), `json` (full `MigrationPlan`, the only format `apply` consumes; pipe default), `paths` (affected paths). Supported findings become `PlannedChange`s (path, field, new value, document hash). Skipped findings carry a stable reason code: `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, `precondition-failed`. Filter with `--skip-reason <PATTERN>` (globs).
 
 Repair-action kinds in a plan: `set_frontmatter`, `remove_frontmatter`, `add_frontmatter`, `move_document`, `rewrite_link`, `replace_body` (emitted only by `set --body-from-stdin`), `create_document` (emitted only by `new`). Closest-match `rewrite_link` proposals are confidence-banded (`high` = slug-identity, safe; `medium` = small edit distance, review). Use `--confidence high` to keep only high-confidence proposals. Ties skip with `ambiguous-target`; never auto-pick them.
 

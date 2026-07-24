@@ -399,7 +399,9 @@ const VALIDATE_CASES: &[Case] = &[
 /// `repair` ports as a READ verb (NRN-382): findings → `MigrationPlan`, never
 /// applied (the donor's `norn repair` is read-only; `apply` executes the plan).
 /// Bare `norn repair` prints the findings summary (order-free: sorted by-code
-/// counts + operation/skip tallies); `--plan` emits the plan.
+/// counts + operation/skip tallies), or — with `--format json` (NRN-416) — the
+/// report-envelope JSON of that same summary (a rewrite-only divergence from the
+/// oracle's `--format`-ignoring prose, gated by PD-144); `--plan` emits the plan.
 ///
 /// A `--plan --format json` case is NOT included — the raw serialized
 /// `MigrationPlan` is unpinnable for THREE independent reasons, any one fatal
@@ -445,6 +447,27 @@ const REPAIR_CASES: &[Case] = &[
         // order-free (counts, not ordered lists), so rerun-stable.
         id: "repair-summary-zoo",
         argv: &["repair"],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
+        // Bare `norn repair --format json` (no `--plan`): the report-envelope
+        // JSON of the same findings summary — findings total, documents scanned,
+        // the sorted per-code tally, and the planner's repairable/skipped counts,
+        // never the `MigrationPlan` (NRN-416 ruling: `--format json` is the JSON
+        // of what the invocation prints WITHOUT it). Every field is a scalar or a
+        // BTreeMap-sorted tally, so it is rerun-stable. This DIVERGES from the
+        // pinned oracle, which ignores `--format` on the bare path and prints the
+        // prose summary — gated by PD-144.
+        id: "repair-summary-json-zoo",
+        argv: &["repair", "--format", "json"],
         fixture: ZOO_1,
         stdin: None,
         mutating: false,

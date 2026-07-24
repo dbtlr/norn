@@ -67,7 +67,7 @@ norn service status      # host launchd state + a live control-ping
 norn service status --vault PATH  # also report one vault's serving/writer state
 ```
 
-Every verb accepts `--format text|json` (default `text`); `json` always emits a machine-readable object, even on failure. `norn service` is macOS-only today — on any other host every verb refuses with:
+Every verb accepts `--format records|json` (default `records`); `json` always emits a machine-readable object, even on failure. `norn service` is macOS-only today — on any other host every verb refuses with:
 
 ```
 norn service requires macOS (launchd)

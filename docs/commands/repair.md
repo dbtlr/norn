@@ -50,7 +50,9 @@ Skipped findings carry a stable reason code: `missing-default`, `link-decision-n
 
 ## Output formats
 
-With `--plan`: `report` (human summary, TTY default), `json` (the full `MigrationPlan` envelope — the only format `apply` consumes; pipe default), and `paths` (one affected path per line, deduplicated).
+With `--plan`: `records` (human summary, TTY default), `json` (the full `MigrationPlan` envelope — the only format `apply` consumes; pipe default), and `paths` (one affected path per line, deduplicated). `paths` requires `--plan`.
+
+Bare `repair` (no `--plan`) has its own, narrower `--format`: `records` prints the findings summary as prose (default) and `json` emits that same summary as a JSON envelope (`findings_total`, `total_docs`, `findings_by_code`, `operations`, `skipped`) — never the `MigrationPlan`.
 
 ## See also
 

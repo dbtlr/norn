@@ -18,7 +18,7 @@ description: Stable JSON and JSONL contracts, agent loop patterns, and common ha
 | Apply report schema | `apply` JSON output (`ApplyReport`) | Stable across the matching plan schema version. |
 | Finding codes | `norn validate` output `code` field | Stable; renames are breaking changes called out in CHANGELOG. |
 
-Default human-readable rendering (`records` on most commands, `report` for `repair --plan`) is for humans and may evolve between point releases. Agents should always pass an explicit `--format json` or `--format jsonl`.
+Default human-readable rendering (`records` on every command, including `repair --plan`) is for humans and may evolve between point releases. Agents should always pass an explicit `--format json` or `--format jsonl`.
 
 ## Vault targeting
 

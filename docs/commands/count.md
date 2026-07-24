@@ -40,10 +40,10 @@ JSON shape: with one field, `by` is the field name (a string) and `groups` a fla
 
 | Format | Shape | Stable contract |
 |---|---|---|
-| `text` | Records-block: the total, plus one tally row per group with `--by`. TTY default. | No. |
+| `records` | Records-block: the total, plus one tally row per group with `--by`. TTY default. | No. |
 | `json` | Structured total and groups. | Yes, versioned. |
 
-`count` returns a scalar or a small grouping, so it offers `text` and `json` only — not the document-oriented `paths` / `jsonl`.
+`count` returns a scalar or a small grouping, so it offers `records` and `json` only — not the document-oriented `paths` / `jsonl`.
 
 ## See also
 

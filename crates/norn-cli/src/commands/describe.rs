@@ -16,7 +16,7 @@ impl From<DescribeFormat> for Format {
     fn from(f: DescribeFormat) -> Self {
         match f {
             // `describe`'s bespoke text renders in the records slot, unstyled.
-            DescribeFormat::Text => Format::Records,
+            DescribeFormat::Records => Format::Records,
             DescribeFormat::Json => Format::Json,
         }
     }
@@ -46,7 +46,7 @@ pub fn run(args: &DescribeArgs, global: &GlobalArgs) -> Result<Output, Diagnosti
         report,
         by: args.by.clone(),
         format: FormatChoice {
-            explicit: Some(Format::from(args.format.unwrap_or(DescribeFormat::Text))),
+            explicit: Some(Format::from(args.format.unwrap_or(DescribeFormat::Records))),
             spec: FormatSpec {
                 tty: Format::Records,
                 piped: Format::Records,

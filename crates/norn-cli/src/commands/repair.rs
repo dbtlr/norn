@@ -7,7 +7,7 @@
 //! [`RepairParams`], the owner answers with the [`RepairReport`] (the plan as its
 //! JSON string plus the bare-summary tally + exit signal), and `run` returns it
 //! as an [`Output`]; the display layer projects bare-summary vs `--plan`
-//! (report / json / paths) and honors `--out`.
+//! (records / json / paths) and honors `--out`.
 
 use crate::cli::{ConfidenceArg, GlobalArgs, RepairArgs};
 use crate::display::{Diagnostic, Output, RepairView};
@@ -44,7 +44,7 @@ pub fn run(args: &RepairArgs, global: &GlobalArgs) -> Result<Output, Diagnostic>
 }
 
 /// The active triage/confidence/skip-reason flags, reconstructed as an argv
-/// fragment for the `--format report` apply-guidance lines. Glob-shaped values
+/// fragment for the `--format records` apply-guidance lines. Glob-shaped values
 /// are single-quoted so the
 /// printed command copy-pastes safely.
 fn active_filter_flags(args: &RepairArgs) -> Vec<String> {
@@ -122,5 +122,25 @@ mod tests {
                 .map(String::from)
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// Bare `repair --format paths` (no `--plan`) has no defined projection —
+    /// the bare output is a findings summary, not a document enumeration — so
+    /// clap refuses it at parse time (`requires_if`) rather than silently
+    /// rendering the records summary.
+    #[test]
+    fn bare_format_paths_without_plan_is_a_usage_error() {
+        let err = Cli::try_parse_from(["norn", "repair", "--format", "paths"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn plan_format_paths_parses() {
+        let args = repair_args(&["norn", "repair", "--plan", "--format", "paths"]);
+        assert!(args.plan);
+        assert!(matches!(
+            args.format,
+            Some(crate::cli::RepairPlanFormat::Paths)
+        ));
     }
 }

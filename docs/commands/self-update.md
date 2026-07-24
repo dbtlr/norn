@@ -31,7 +31,7 @@ norn self-update --version 0.30.0
 |---|---|
 | `--version <X.Y.Z>` | Install a specific version. Defaults to the latest release. Downgrades allowed. |
 | `--dry-run` | Resolve the target and print the plan without downloading or modifying anything. |
-| `--format text\|json` | Output shape. `text` on a TTY, `json` when piped. |
+| `--format records\|json` | Output shape. `records` on a TTY, `json` when piped. |
 
 ## See also
 
