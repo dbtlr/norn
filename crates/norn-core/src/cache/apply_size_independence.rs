@@ -36,6 +36,7 @@ fn measure_single_file_apply(expansion_docs: usize) -> (usize, usize, u128) {
         section_edge: false,
         wikilink_edge: false,
         validate_edge: false,
+        alias_link: true,
     };
 
     let tmp = tempfile::TempDir::new().unwrap();

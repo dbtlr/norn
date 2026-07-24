@@ -150,6 +150,13 @@ pub struct FilesConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinksConfig {
+    /// RETIRED (NRN-455) — accepted for backward compatibility but no longer
+    /// honored. Alias participation in link resolution was cut; the resolution
+    /// ladder is path → stem only. This key is still parsed (so a config that
+    /// carries it loads without a `deny_unknown_fields` rejection) but drives
+    /// nothing: aliases are now the fixed `aliases` frontmatter convention,
+    /// surfacing only as a `repair` alias-hint. Re-adding opt-in alias resolution
+    /// later would rewire this key additively.
     #[serde(default)]
     pub alias_field: Option<String>,
 }

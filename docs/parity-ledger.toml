@@ -984,3 +984,47 @@ old = "`allowed_values` matches an array-valued field WHOLE against the configur
 new = "`allowed_values` matches an array-valued field ELEMENT-WISE — one finding per violating element, none when every element is allowed (an empty array yields no findings); a scalar field is unaffected, matching whole as before"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-455 — alias participation in link/get resolution is CUT (resolution ladder
+# is path → stem only). The oracle (0.48.1) resolves an alias-only wikilink via
+# the `links.alias_field` config key; the rewrite leaves it dangling
+# (`link-target-missing`) and instead offers a deterministic `repair` alias-hint
+# (rewrite to the canonical stem). Aliases remain plain queryable frontmatter.
+# The zoo config still carries `links.alias_field: aliases` (accepted-but-inert
+# in the rewrite) so the oracle still resolves `notes/gamma.md`'s `[[bee]]` and
+# `get bee`, making the divergence observable and gated here.
+[[entry]]
+id = "PD-148"
+surface = "get <alias> (target resolution — alias fallback removed)"
+cases = ["read-get-alias-json-zoo"]
+old = "`get bee` resolves via the alias fallback (`notes/beta.md` declares `aliases: [bee]`; stem `bee` does not exist) and returns the beta record"
+new = "`get`'s resolution ladder is path → stem only (NRN-455); `bee` matches no path or stem, so `get bee` resolves to no doc and emits a `target-not-found` error note. `aliases` stays queryable via `find`"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+[[entry]]
+id = "PD-149"
+surface = "validate (alias-only wikilink now dangling — zoo fixture)"
+cases = ["validate-summary-zoo", "validate-summary-records-zoo", "validate-paths-zoo", "validate-severity-summary-zoo"]
+old = "`notes/gamma.md`'s `[[bee]]` resolves via `notes/beta.md`'s alias, so it is not a finding; the link-target-missing set and warning tally exclude it (the zoo fixture carries the `beta`/`gamma` alias pair; `Profile::alias_link`, `crate::zoo::valid_docs`)"
+new = "aliases do not participate in resolution (NRN-455), so `[[bee]]` is `link-target-missing` on `notes/gamma.md` — one more warning-severity finding, one more affected path, and a higher warning tally than the oracle reports. The `clean` profile omits the alias pair entirely (`Profile::alias_link` is false there) so its finding-free invariant holds under the rewrite too — only the zoo fixture demonstrates this divergence"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+[[entry]]
+id = "PD-150"
+surface = "repair (alias-only dangling link + deterministic alias-hint — zoo fixture)"
+cases = ["repair-summary-zoo", "repair-plan-paths-zoo", "repair-plan-report-zoo"]
+old = "the oracle resolves `notes/gamma.md`'s `[[bee]]` via alias, so repair sees no finding for it and proposes no operation"
+new = "`[[bee]]` is dangling and uniquely matches `notes/beta.md`'s alias, so repair plans a built-in `rewrite_link` op (`bee` → the `beta` stem, `built-in:alias-stem`, alias-suggestion footnote) — one more finding, one more planned operation, and `notes/gamma.md` in the affected paths (NRN-455). The `clean` profile omits the alias pair (`Profile::alias_link` is false there), so it stays finding-free and this entry no longer needs to cover it"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+[[entry]]
+id = "PD-151"
+surface = "find --all-cols (link-resolution columns expose the dangling alias link)"
+cases = ["read-find-all-cols-json-zoo"]
+old = "`find --all-cols` on the zoo emits `notes/gamma.md`'s `[[bee]]` among its resolved outgoing links (the oracle resolves it via alias)"
+new = "aliases do not participate in resolution (NRN-455), so `notes/gamma.md`'s `[[bee]]` renders as an unresolved link in the all-columns projection instead of a resolved one"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

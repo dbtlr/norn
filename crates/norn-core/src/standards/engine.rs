@@ -1,11 +1,11 @@
 //! The validate engine: run every configured check against a built graph.
 //!
 //! One blessed public entry — [`validate_with_compiled`] — walks the graph
-//! index once, applies the graph/link/frontmatter checks per document plus the
-//! cross-doc alias checks, and returns the flat [`Finding`] list. It takes a
+//! index once, applies the graph/link/frontmatter checks per document, and
+//! returns the flat [`Finding`] list. It takes a
 //! [`CompiledConfig`] so path patterns are matched pre-compiled (an uncompiled
 //! per-document re-parse of every rule glob is the accidental quadratic this
-//! path avoids). The `validate` / `validate_with_alias_field` / `validate_rule*`
+//! path avoids). The `validate` / `validate_rule*`
 //! convenience wrappers are a second, uncompiled way to reach the same job —
 //! retained here only as `#[cfg(test)]` helpers.
 
@@ -24,7 +24,6 @@ pub fn validate_with_compiled(
     index: &GraphIndex,
     config: &ValidateConfig,
     compiled: &CompiledConfig,
-    alias_field: Option<&str>,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
 
@@ -111,27 +110,6 @@ pub fn validate_with_compiled(
         if let Some(finding) = crate::standards::checks::check_portable_filename(document) {
             findings.push(finding);
         }
-        findings.extend(crate::standards::checks::check_alias_malformed(
-            document,
-            alias_field,
-        ));
-    }
-
-    // Cross-doc alias checks (after per-doc loop).
-    if alias_field.is_some() {
-        let non_ignored: Vec<&Document> = index
-            .documents
-            .iter()
-            .filter(|d| !document_ignored_compiled(d, compiled, &config.ignore))
-            .collect();
-        findings.extend(crate::standards::checks::check_alias_shadowed_by_stem(
-            &non_ignored,
-            alias_field,
-        ));
-        findings.extend(crate::standards::checks::check_alias_duplicate_across_docs(
-            &non_ignored,
-            alias_field,
-        ));
     }
 
     findings
@@ -245,24 +223,15 @@ fn rule_matches_compiled(
 
 // ── #[cfg(test)] convenience wrappers ────────────────────────────────────────
 //
-// `validate` / `validate_with_alias_field` (default-compiled whole-index runs)
-// and `validate_rule` / `validate_rule_compiled` (single-rule runs over a
-// pre-narrowed `DocumentSummary` scope) reach the same job the compiled engine
-// does, a second uncompiled way. They exist only to drive the tests, so they
-// are gated to test builds.
+// `validate` (default-compiled whole-index run) and `validate_rule` /
+// `validate_rule_compiled` (single-rule runs over a pre-narrowed
+// `DocumentSummary` scope) reach the same job the compiled engine does, a second
+// uncompiled way. They exist only to drive the tests, so they are gated to test
+// builds.
 
 #[cfg(test)]
 fn validate(index: &GraphIndex, config: &ValidateConfig) -> Vec<Finding> {
-    validate_with_alias_field(index, config, None)
-}
-
-#[cfg(test)]
-fn validate_with_alias_field(
-    index: &GraphIndex,
-    config: &ValidateConfig,
-    alias_field: Option<&str>,
-) -> Vec<Finding> {
-    validate_with_compiled(index, config, &CompiledConfig::default(), alias_field)
+    validate_with_compiled(index, config, &CompiledConfig::default())
 }
 
 #[cfg(test)]
@@ -496,264 +465,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_emits_alias_malformed_finding() {
-        let doc = Document {
-            path: "a.md".into(),
-            stem: "a".into(),
-            hash: "h".into(),
-            frontmatter: None,
-            body_text: String::new(),
-            headings: vec![],
-            block_ids: vec![],
-            links: vec![],
-            diagnostics: vec![],
-            aliases: vec!["valid".into()],
-            alias_malformed: vec![json!({"nested": "x"})],
-        };
-        let index = GraphIndex {
-            root: ".".into(),
-            files: vec![],
-            ignored_files: vec![],
-            documents: vec![doc],
-        };
-        let findings =
-            validate_with_alias_field(&index, &ValidateConfig::default(), Some("aliases"));
-        let malformed_count = findings
-            .iter()
-            .filter(|f| f.code == "frontmatter-alias-malformed")
-            .count();
-        assert_eq!(malformed_count, 1);
-    }
-
-    #[test]
-    fn validate_does_not_emit_alias_findings_when_field_unconfigured() {
-        let doc = Document {
-            path: "a.md".into(),
-            stem: "a".into(),
-            hash: "h".into(),
-            frontmatter: None,
-            body_text: String::new(),
-            headings: vec![],
-            block_ids: vec![],
-            links: vec![],
-            diagnostics: vec![],
-            aliases: vec![],
-            alias_malformed: vec![json!({"nested": "x"})],
-        };
-        let index = GraphIndex {
-            root: ".".into(),
-            files: vec![],
-            ignored_files: vec![],
-            documents: vec![doc],
-        };
-        let findings = validate_with_alias_field(&index, &ValidateConfig::default(), None);
-        let malformed_count = findings
-            .iter()
-            .filter(|f| f.code == "frontmatter-alias-malformed")
-            .count();
-        assert_eq!(malformed_count, 0);
-    }
-
-    #[test]
-    fn validate_emits_alias_shadowed_by_stem_finding() {
-        // doc-a.md has stem "foo"
-        // doc-b.md has aliases: ["foo"] — shadowed by doc-a's stem.
-        let doc_a = Document {
-            path: "doc-a.md".into(),
-            stem: "foo".into(),
-            hash: "h1".into(),
-            frontmatter: None,
-            body_text: String::new(),
-            headings: vec![],
-            block_ids: vec![],
-            links: vec![],
-            diagnostics: vec![],
-            aliases: vec![],
-            alias_malformed: vec![],
-        };
-        let doc_b = Document {
-            path: "doc-b.md".into(),
-            stem: "doc-b".into(),
-            hash: "h2".into(),
-            frontmatter: None,
-            body_text: String::new(),
-            headings: vec![],
-            block_ids: vec![],
-            links: vec![],
-            diagnostics: vec![],
-            aliases: vec!["foo".into()],
-            alias_malformed: vec![],
-        };
-        let index = GraphIndex {
-            root: ".".into(),
-            files: vec![],
-            ignored_files: vec![],
-            documents: vec![doc_a, doc_b],
-        };
-        let findings =
-            validate_with_alias_field(&index, &ValidateConfig::default(), Some("aliases"));
-        let shadow: Vec<_> = findings
-            .iter()
-            .filter(|f| f.code == "frontmatter-alias-shadowed-by-stem")
-            .collect();
-        assert_eq!(shadow.len(), 1);
-        assert_eq!(shadow[0].path, "doc-b.md");
-    }
-
-    #[test]
-    fn validate_emits_self_stem_shadow_finding() {
-        let doc = Document {
-            path: "self.md".into(),
-            stem: "self".into(),
-            hash: "h".into(),
-            frontmatter: None,
-            body_text: String::new(),
-            headings: vec![],
-            block_ids: vec![],
-            links: vec![],
-            diagnostics: vec![],
-            aliases: vec!["self".into()],
-            alias_malformed: vec![],
-        };
-        let index = GraphIndex {
-            root: ".".into(),
-            files: vec![],
-            ignored_files: vec![],
-            documents: vec![doc],
-        };
-        let findings =
-            validate_with_alias_field(&index, &ValidateConfig::default(), Some("aliases"));
-        let shadow: Vec<_> = findings
-            .iter()
-            .filter(|f| f.code == "frontmatter-alias-shadowed-by-stem")
-            .collect();
-        assert_eq!(shadow.len(), 1);
-        assert!(
-            shadow[0].message.contains("this doc's own stem"),
-            "expected self-stem message; got: {}",
-            shadow[0].message
-        );
-    }
-
-    #[test]
-    fn validate_does_not_emit_shadow_when_alias_field_none() {
-        let doc_a = Document {
-            path: "doc-a.md".into(),
-            stem: "foo".into(),
-            hash: "h1".into(),
-            frontmatter: None,
-            body_text: String::new(),
-            headings: vec![],
-            block_ids: vec![],
-            links: vec![],
-            diagnostics: vec![],
-            aliases: vec![],
-            alias_malformed: vec![],
-        };
-        let doc_b = Document {
-            path: "doc-b.md".into(),
-            stem: "doc-b".into(),
-            hash: "h2".into(),
-            frontmatter: None,
-            body_text: String::new(),
-            headings: vec![],
-            block_ids: vec![],
-            links: vec![],
-            diagnostics: vec![],
-            aliases: vec!["foo".into()],
-            alias_malformed: vec![],
-        };
-        let index = GraphIndex {
-            root: ".".into(),
-            files: vec![],
-            ignored_files: vec![],
-            documents: vec![doc_a, doc_b],
-        };
-        let findings = validate_with_alias_field(&index, &ValidateConfig::default(), None);
-        let shadow: Vec<_> = findings
-            .iter()
-            .filter(|f| f.code == "frontmatter-alias-shadowed-by-stem")
-            .collect();
-        assert!(shadow.is_empty());
-    }
-
-    #[test]
-    fn validate_emits_alias_duplicate_finding_for_each_participant() {
-        let doc_a = Document {
-            path: "a.md".into(),
-            stem: "a".into(),
-            hash: "h1".into(),
-            frontmatter: None,
-            body_text: String::new(),
-            headings: vec![],
-            block_ids: vec![],
-            links: vec![],
-            diagnostics: vec![],
-            aliases: vec!["vault memory".into()],
-            alias_malformed: vec![],
-        };
-        let doc_b = Document {
-            path: "b.md".into(),
-            stem: "b".into(),
-            hash: "h2".into(),
-            frontmatter: None,
-            body_text: String::new(),
-            headings: vec![],
-            block_ids: vec![],
-            links: vec![],
-            diagnostics: vec![],
-            aliases: vec!["vault memory".into()],
-            alias_malformed: vec![],
-        };
-        let index = GraphIndex {
-            root: ".".into(),
-            files: vec![],
-            ignored_files: vec![],
-            documents: vec![doc_a, doc_b],
-        };
-        let findings =
-            validate_with_alias_field(&index, &ValidateConfig::default(), Some("aliases"));
-        let dupes: Vec<_> = findings
-            .iter()
-            .filter(|f| f.code == "frontmatter-alias-duplicate-across-docs")
-            .collect();
-        assert_eq!(dupes.len(), 2, "both docs should get the finding");
-        let paths: Vec<_> = dupes.iter().map(|f| f.path.as_str()).collect();
-        assert!(paths.contains(&"a.md"));
-        assert!(paths.contains(&"b.md"));
-    }
-
-    #[test]
-    fn validate_does_not_emit_duplicate_when_only_one_doc_claims_alias() {
-        let doc = Document {
-            path: "a.md".into(),
-            stem: "a".into(),
-            hash: "h".into(),
-            frontmatter: None,
-            body_text: String::new(),
-            headings: vec![],
-            block_ids: vec![],
-            links: vec![],
-            diagnostics: vec![],
-            aliases: vec!["vault memory".into()],
-            alias_malformed: vec![],
-        };
-        let index = GraphIndex {
-            root: ".".into(),
-            files: vec![],
-            ignored_files: vec![],
-            documents: vec![doc],
-        };
-        let findings =
-            validate_with_alias_field(&index, &ValidateConfig::default(), Some("aliases"));
-        let dupes = findings
-            .iter()
-            .filter(|f| f.code == "frontmatter-alias-duplicate-across-docs")
-            .count();
-        assert_eq!(dupes, 0);
-    }
-
-    #[test]
     fn scoped_rule_fires_only_on_matching_path() {
         let mut rule = empty_rule("workspace-notes");
         rule.r#match.path = Some("Workspaces/**/notes/*.md".into());
@@ -772,41 +483,6 @@ mod tests {
         // Only the Workspaces/foo/notes/a.md document should fire the rule.
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].path, "Workspaces/foo/notes/a.md");
-    }
-
-    #[test]
-    fn validate_does_not_emit_duplicate_when_single_doc_has_repeated_alias() {
-        // A doc with the same alias listed twice — weird but legal frontmatter.
-        // The duplicate-across-docs check must NOT fire (only one real doc claims it).
-        let doc = Document {
-            path: "a.md".into(),
-            stem: "a".into(),
-            hash: "h".into(),
-            frontmatter: None,
-            body_text: String::new(),
-            headings: vec![],
-            block_ids: vec![],
-            links: vec![],
-            diagnostics: vec![],
-            aliases: vec!["foo".into(), "foo".into()],
-            alias_malformed: vec![],
-        };
-        let index = GraphIndex {
-            root: ".".into(),
-            files: vec![],
-            ignored_files: vec![],
-            documents: vec![doc],
-        };
-        let findings =
-            validate_with_alias_field(&index, &ValidateConfig::default(), Some("aliases"));
-        let dupes = findings
-            .iter()
-            .filter(|f| f.code == "frontmatter-alias-duplicate-across-docs")
-            .count();
-        assert_eq!(
-            dupes, 0,
-            "expected no duplicate-across-docs finding for single-doc repeated alias"
-        );
     }
 }
 

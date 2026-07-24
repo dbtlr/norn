@@ -4,10 +4,14 @@
 //! This is the semantic half of the link model (the lexical half — token and
 //! anchor syntax — is `norn_frontmatter`). Resolution is external contract: which
 //! path a target resolves to, when it is ambiguous, and which anchors/blocks
-//! validate are observable behavior. Known contract-shaped
-//! quirks tracked on the correctness slate — block-ids inside code spans
-//! (NRN-350), alias / ambiguity edges (NRN-122 / NRN-124) — are preserved here
-//! deliberately, not silently changed.
+//! validate are observable behavior.
+//!
+//! The resolution ladder is **path → stem ONLY** (NRN-455): aliases do NOT
+//! participate. A wikilink whose target matches only a document's `aliases`
+//! frontmatter entry is `Unresolved`/`TargetMissing`, not resolved. The `aliases`
+//! field remains ordinary queryable frontmatter; a dangling link that uniquely
+//! matches one doc's alias is surfaced as a deterministic `repair` hint (rewrite
+//! to the canonical stem link), not resolved here.
 
 use std::collections::HashMap;
 use std::path::Component;
@@ -23,7 +27,6 @@ pub fn resolve_links(files: &[VaultFile], documents: &mut [Document]) {
     let mut by_path: HashMap<String, Utf8PathBuf> = HashMap::new();
     let mut by_path_lower: HashMap<String, Utf8PathBuf> = HashMap::new();
     let mut by_stem: HashMap<String, Vec<Utf8PathBuf>> = HashMap::new();
-    let mut by_alias: HashMap<String, Vec<Utf8PathBuf>> = HashMap::new();
     let mut facts_by_path: HashMap<Utf8PathBuf, DocumentFacts> = HashMap::new();
 
     for file in files {
@@ -36,13 +39,6 @@ pub fn resolve_links(files: &[VaultFile], documents: &mut [Document]) {
             .entry(document.stem.to_lowercase())
             .or_default()
             .push(document.path.clone());
-        for alias in &document.aliases {
-            // alias is already lowercased upstream (parse_aliases in graph::aliases)
-            by_alias
-                .entry(alias.clone())
-                .or_default()
-                .push(document.path.clone());
-        }
         facts_by_path.insert(
             document.path.clone(),
             DocumentFacts {
@@ -73,7 +69,6 @@ pub fn resolve_links(files: &[VaultFile], documents: &mut [Document]) {
                             &by_path,
                             &by_path_lower,
                             &by_stem,
-                            &by_alias,
                         )
                     }
                 }
@@ -82,13 +77,7 @@ pub fn resolve_links(files: &[VaultFile], documents: &mut [Document]) {
                     {
                         vec![document.path.clone()]
                     } else {
-                        resolve_wikilink(
-                            &link.target,
-                            &by_path,
-                            &by_path_lower,
-                            &by_stem,
-                            &by_alias,
-                        )
+                        resolve_wikilink(&link.target, &by_path, &by_path_lower, &by_stem)
                     }
                 }
             };
@@ -170,7 +159,6 @@ fn resolve_embed_link(
     by_path: &HashMap<String, Utf8PathBuf>,
     by_path_lower: &HashMap<String, Utf8PathBuf>,
     by_stem: &HashMap<String, Vec<Utf8PathBuf>>,
-    by_alias: &HashMap<String, Vec<Utf8PathBuf>>,
 ) -> Vec<Utf8PathBuf> {
     let base = source_path.parent().unwrap_or_else(|| Utf8Path::new(""));
     let base_matches = resolve_path_like_target(base, target, by_path, by_path_lower);
@@ -183,7 +171,7 @@ fn resolve_embed_link(
         return root_matches;
     }
 
-    resolve_wikilink(target, by_path, by_path_lower, by_stem, by_alias)
+    resolve_wikilink(target, by_path, by_path_lower, by_stem)
 }
 
 fn resolve_wikilink(
@@ -191,7 +179,6 @@ fn resolve_wikilink(
     by_path: &HashMap<String, Utf8PathBuf>,
     by_path_lower: &HashMap<String, Utf8PathBuf>,
     by_stem: &HashMap<String, Vec<Utf8PathBuf>>,
-    by_alias: &HashMap<String, Vec<Utf8PathBuf>>,
 ) -> Vec<Utf8PathBuf> {
     if target.contains('/') {
         let path_matches =
@@ -207,18 +194,16 @@ fn resolve_wikilink(
     // Replicate file_stem's two useful effects deliberately: take the final path
     // component (so a stale `dir/name` target still falls back to the `name`
     // stem, keeping such links in the move/delete cascade set), then strip only a
-    // literal `.md` (never an arbitrary extension). Lowercase once; by_stem/
-    // by_alias keys are lowercased at construction.
+    // literal `.md` (never an arbitrary extension). Lowercase once; by_stem keys
+    // are lowercased at construction.
+    //
+    // The ladder ends at stem (NRN-455): aliases do NOT participate in resolution.
+    // A target that matches only an `aliases` entry returns ∅ here (dangling), and
+    // `repair` offers the deterministic rewrite-to-stem hint instead.
     let target_lower = target.to_lowercase();
     let last_component = target_lower.rsplit('/').next().unwrap_or(&target_lower);
     let stem = last_component.strip_suffix(".md").unwrap_or(last_component);
-    let stem_matches: Vec<Utf8PathBuf> = by_stem.get(stem).cloned().unwrap_or_default();
-    if !stem_matches.is_empty() {
-        return stem_matches;
-    }
-
-    // Fallback: consult aliases only when stem returned ∅.
-    by_alias.get(stem).cloned().unwrap_or_default()
+    by_stem.get(stem).cloned().unwrap_or_default()
 }
 
 fn resolve_path_like_target(
@@ -407,20 +392,6 @@ mod tests {
     }
 
     #[test]
-    fn dotted_alias_wikilink_resolves() {
-        // The by_alias lookup key was also mangled by file_stem; a dotted alias
-        // value must resolve now (was `v0.40` before, missing the alias).
-        let files = vec![make_file("release-notes.md"), make_file("a.md")];
-        let mut documents = vec![make_document("release-notes.md"), make_document("a.md")];
-        documents[0].aliases = vec!["v0.40.0".to_string()];
-        documents[1].links.push(make_wikilink("a.md", "v0.40.0"));
-        resolve_links(&files, &mut documents);
-        let link = &documents[1].links[0];
-        assert_eq!(link.status, LinkStatus::Resolved);
-        assert_eq!(link.resolved_path, Some("release-notes.md".into()));
-    }
-
-    #[test]
     fn ambiguous_dotted_stem_wikilink_is_ambiguous() {
         // A dotted stem shared by two docs must be Ambiguous, not silently
         // resolved to one — the fix routes dotted stems into the multi-candidate
@@ -567,7 +538,10 @@ mod tests {
     }
 
     #[test]
-    fn alias_only_resolves_when_stem_absent() {
+    fn alias_only_target_is_dangling_not_resolved() {
+        // NRN-455: aliases no longer participate in resolution. A wikilink whose
+        // target matches only a doc's `aliases` entry (no path, no stem) is
+        // Unresolved/TargetMissing — the repair alias-hint offers the stem rewrite.
         let files = vec![make_file("vault-memory.md"), make_file("notes.md")];
         let mut documents = vec![
             make_document_with_aliases("vault-memory.md", vec!["vault memory"]),
@@ -578,13 +552,18 @@ mod tests {
             .push(make_wikilink("notes.md", "Vault Memory"));
         resolve_links(&files, &mut documents);
         let link = &documents[1].links[0];
-        assert_eq!(link.status, LinkStatus::Resolved);
-        assert_eq!(link.resolved_path, Some("vault-memory.md".into()));
+        assert_eq!(link.status, LinkStatus::Unresolved);
+        assert_eq!(
+            link.unresolved_reason,
+            Some(UnresolvedReason::TargetMissing)
+        );
+        assert!(link.resolved_path.is_none());
     }
 
     #[test]
-    fn stem_wins_over_alias() {
-        // Doc-A has stem `foo`; Doc-B aliases `foo`. [[foo]] resolves to Doc-A via stem.
+    fn stem_resolves_even_when_another_doc_aliases_it() {
+        // Doc-A has stem `foo`; Doc-B aliases `foo`. `[[foo]]` resolves to Doc-A
+        // via stem (aliases are irrelevant to resolution).
         let files = vec![make_file("foo.md"), make_file("bar.md")];
         let mut documents = vec![
             make_document("foo.md"),
@@ -598,29 +577,9 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_aliases_yield_ambiguous() {
-        // Two docs both claim alias `vault memory`; no stem matches. Resolution → Ambiguous.
-        let files = vec![
-            make_file("doc-a.md"),
-            make_file("doc-b.md"),
-            make_file("src.md"),
-        ];
-        let mut documents = vec![
-            make_document_with_aliases("doc-a.md", vec!["vault memory"]),
-            make_document_with_aliases("doc-b.md", vec!["vault memory"]),
-            make_document("src.md"),
-        ];
-        documents[2]
-            .links
-            .push(make_wikilink("src.md", "Vault Memory"));
-        resolve_links(&files, &mut documents);
-        let link = &documents[2].links[0];
-        assert_eq!(link.status, LinkStatus::Ambiguous);
-        assert_eq!(link.candidates.len(), 2);
-    }
-
-    #[test]
-    fn alias_target_with_anchor_validates_against_resolved_doc_headings() {
+    fn alias_only_target_with_anchor_is_target_missing() {
+        // The whole target is unresolvable (alias-only), so the failure is
+        // TargetMissing — anchor validation never runs against a non-resolved doc.
         let files = vec![make_file("vault-memory.md"), make_file("src.md")];
         let mut documents = vec![
             make_document_with_aliases("vault-memory.md", vec!["vault memory"]),
@@ -638,25 +597,10 @@ mod tests {
         documents[1].links.push(link);
         resolve_links(&files, &mut documents);
         let link = &documents[1].links[0];
-        assert_eq!(link.status, LinkStatus::Resolved);
-    }
-
-    #[test]
-    fn alias_target_with_missing_anchor_emits_anchor_missing() {
-        let files = vec![make_file("vault-memory.md"), make_file("src.md")];
-        let mut documents = vec![
-            make_document_with_aliases("vault-memory.md", vec!["vault memory"]),
-            make_document("src.md"),
-        ];
-        let mut link = make_wikilink("src.md", "Vault Memory");
-        link.anchor = Some("DoesNotExist".to_string());
-        documents[1].links.push(link);
-        resolve_links(&files, &mut documents);
-        let link = &documents[1].links[0];
         assert_eq!(link.status, LinkStatus::Unresolved);
         assert_eq!(
             link.unresolved_reason,
-            Some(UnresolvedReason::AnchorMissing)
+            Some(UnresolvedReason::TargetMissing)
         );
     }
 }

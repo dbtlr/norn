@@ -66,8 +66,7 @@ pub fn execute(
     }
     let has_diagnostic_errors = has_errors(&index);
 
-    let alias_field = cache.alias_field();
-    let findings = validate_with_compiled(&index, &config.validate, &compiled, alias_field);
+    let findings = validate_with_compiled(&index, &config.validate, &compiled);
 
     let options = ValidateFilterOptions {
         codes: &params.codes,

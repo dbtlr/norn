@@ -783,7 +783,7 @@ pub enum InputFormat {
 
 #[derive(Debug, Args)]
 pub struct RewriteWikilinkArgs {
-    /// Old wikilink target (stem, path, or alias) to find and rewrite.
+    /// Old wikilink target (stem or path) to find and rewrite.
     #[arg(value_name = "OLD")]
     pub old: String,
 

@@ -30,10 +30,19 @@
 //! `retired/src/config_loader.rs` (the pre-0018 tree the 0.48.0 release was
 //! built from) and verified directly against the oracle: `[[bee]]` reports
 //! `link-target-missing` without this key, resolves cleanly with it.
-//! `docs/configuration.md` does not document a `links:` top-level section at
-//! all — a real doc gap — but the key is necessary for a feature the spec
-//! explicitly exercises, so it is added here rather than dropping the
-//! alias-resolution fixture.
+//!
+//! NRN-455 CUT alias participation from resolution in the rewrite (ladder is
+//! path → stem only). The key is DELIBERATELY retained here: the ORACLE still
+//! honors it (resolving `[[bee]]` and `get bee`) while the rewrite treats it as
+//! accepted-but-inert, so the divergence is observable and ledger-gated
+//! (PD-148 / PD-149 / PD-150 / PD-151). Removing it would silently converge the two
+//! binaries and hide the intended behavior change. `docs/configuration.md` does
+//! not document a `links:` top-level section — a real doc gap that predates and
+//! outlives the key's retirement. This config is emitted for every profile
+//! regardless of content — `notes/beta.md`'s `aliases: [bee]` and
+//! `notes/gamma.md`'s `[[bee]]` link only appear when `Profile::alias_link` is
+//! set (`crate::zoo::valid_docs`), which excludes the `clean` profile so its
+//! finding-free invariant holds under the rewrite too.
 
 use crate::contract::{
     DRAFTS_DIR, IGNORED_DIR, LOGS_DIR, NOTES_DIR, PHASES_GLOB, STATUS_VALUES, TASKS_DIR,

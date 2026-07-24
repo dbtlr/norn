@@ -252,7 +252,7 @@ const HELP_CASES: &[Case] = &[
     // `get --help` diverges from the oracle beyond the standard GLOBAL
     // OPTIONS reshape (PD-102): the rewrite's `get` gains a `--no-pager` flag
     // (NRN-454) the oracle's `get` never had, so the OPTIONS block carries one
-    // extra row. See PD-144.
+    // extra row. See PD-145.
     Case {
         id: "help-get",
         argv: &["get", "--help"],
@@ -1121,9 +1121,13 @@ const READ_CASES: &[Case] = &[
         plan: None,
     },
     Case {
-        // Alias addressing: the zoo config sets `links.alias_field: aliases` and
-        // `notes/beta.md` declares `aliases: [bee]`, so `get bee` resolves via the
-        // alias fallback (stem `bee` does not exist). Pins alias resolution.
+        // Alias addressing DIVERGES (NRN-455, gated by PD-148): the zoo config
+        // still carries `links.alias_field: aliases` (accepted-but-inert in the
+        // rewrite) and `notes/beta.md` declares `aliases: [bee]`, so the ORACLE
+        // resolves `get bee` via the alias fallback. The rewrite's resolution
+        // ladder is path → stem only — `bee` is neither, so it resolves to no doc
+        // (a `target-not-found` error note). Kept ported so the gated run observes
+        // the divergence; `aliases` stays queryable via `find`.
         id: "read-get-alias-json-zoo",
         argv: &["get", "bee", "--format", "json"],
         fixture: ZOO_1,
@@ -1920,9 +1924,10 @@ const MCP_CASES: &[Case] = &[
         // finding class (the same finding-order stability discipline the validate
         // case uses). The plan's `generated_at` timestamp is neutralized by the
         // MCP comparator's targeted key normalization, so the plan compares on its
-        // deterministic content. DIVERGES under PD-122 (ADR 0022): the plan's
-        // finding-provenance rides the flat closed contract, no leaked internal
-        // model.
+        // deterministic content. DIVERGES under PD-137 (ADR 0024): the
+        // `structuredContent` is the richer `RepairReport` — plan, finding tally,
+        // and rich `skipped_detail` — not the oracle's bare `{plan,
+        // has_diagnostic_errors}`.
         id: "mcp-tools-call-repair-code-zoo",
         argv: &["mcp"],
         fixture: MCP_FIXTURE,
@@ -2243,7 +2248,7 @@ const MUTATE_CASES: &[Case] = &[
         normalize: TRACE_NORM,
         plan: None,
     },
-    // new: an allowed_values violation on a confirmed create. NRN-430 (PD-145):
+    // new: an allowed_values violation on a confirmed create. NRN-430 (PD-146):
     // the rewrite REFUSES at preflight (exit 2, write-free) where the oracle
     // only WARNS post-apply and writes the schema-violating file (exit 0). The
     // `task-rule` constrains `status` to backlog/active/done, so `status:someday`

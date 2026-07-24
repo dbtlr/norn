@@ -1247,7 +1247,7 @@ fn gate_query_fields(
         return Ok(Ok(()));
     }
     let mut universe: BTreeSet<String> = match config {
-        Some(cfg) => norn_core::grammar::schema_field_names(&cfg.validate, cfg),
+        Some(cfg) => norn_core::grammar::schema_field_names(&cfg.validate),
         None => BTreeSet::new(),
     };
     universe.extend(cache.observed_field_names()?);

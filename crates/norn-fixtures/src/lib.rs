@@ -78,6 +78,14 @@ pub struct Profile {
     /// shared profile so the decided divergence never perturbs zoo/clean
     /// parity.
     pub validate_edge: bool,
+    /// `notes/beta.md` declares `aliases: [bee]` and `notes/gamma.md` links
+    /// `[[bee]]` (the NRN-455 alias-hint divergence demonstration) when true.
+    /// True on every profile except `clean`: the alias-only link is dangling
+    /// under the rewrite (aliases do not participate in resolution), so
+    /// leaving it in `clean` would permanently break that profile's
+    /// finding-free invariant. `zoo` keeps it — the divergence must stay
+    /// observable somewhere.
+    pub alias_link: bool,
 }
 
 /// The named profiles, in fixed order — the single source for `by_name`,
@@ -99,6 +107,7 @@ const PROFILES: &[Profile] = &[
         section_edge: false,
         wikilink_edge: false,
         validate_edge: false,
+        alias_link: true,
     },
     // Zoo without violations, plus ~60 expansion docs. Invariant: the oracle's
     // `validate` reports zero findings against this profile.
@@ -117,6 +126,7 @@ const PROFILES: &[Profile] = &[
         section_edge: false,
         wikilink_edge: false,
         validate_edge: false,
+        alias_link: false,
     },
     // Zoo including violations, plus ~120 expansion docs at elevated
     // violation/broken-link ratios.
@@ -135,6 +145,7 @@ const PROFILES: &[Profile] = &[
         section_edge: false,
         wikilink_edge: false,
         validate_edge: false,
+        alias_link: true,
     },
     // Zoo without violations, plus ~200 densely-linked docs across deep, wide
     // folders.
@@ -153,6 +164,7 @@ const PROFILES: &[Profile] = &[
         section_edge: false,
         wikilink_edge: false,
         validate_edge: false,
+        alias_link: true,
     },
     // Zoo without violations, plus 1000 expansion docs at moderate settings.
     Profile {
@@ -170,6 +182,7 @@ const PROFILES: &[Profile] = &[
         section_edge: false,
         wikilink_edge: false,
         validate_edge: false,
+        alias_link: true,
     },
     // The valid zoo plus the text-layer edge probes (NRN-349 / NRN-350) — no
     // expansion, no violations. Dedicated to the BOM / code-opacity parity cases
@@ -189,6 +202,7 @@ const PROFILES: &[Profile] = &[
         section_edge: false,
         wikilink_edge: false,
         validate_edge: false,
+        alias_link: true,
     },
     // The valid zoo doc tree under a deliberately-INVALID `.norn/config.yaml`.
     // Dedicated to the malformed-config error-surface parity case (NRN-361): the
@@ -209,6 +223,7 @@ const PROFILES: &[Profile] = &[
         section_edge: false,
         wikilink_edge: false,
         validate_edge: false,
+        alias_link: true,
     },
     // The valid zoo doc tree plus the mutation-edge probes (NRN-371) — no
     // expansion, no violations. Dedicated to the null-/comment-only frontmatter
@@ -229,6 +244,7 @@ const PROFILES: &[Profile] = &[
         section_edge: false,
         wikilink_edge: false,
         validate_edge: false,
+        alias_link: true,
     },
     // The valid zoo doc tree plus the section-edge probes (NRN-437) — no
     // expansion, no violations. Dedicated to the SETEXT / heading-at-EOF section
@@ -249,6 +265,7 @@ const PROFILES: &[Profile] = &[
         section_edge: true,
         wikilink_edge: false,
         validate_edge: false,
+        alias_link: true,
     },
     // The valid zoo doc tree plus the wikilink-edge probes (NRN-424) — no
     // expansion, no violations. Dedicated to the embed / code-fence-shadow /
@@ -270,6 +287,7 @@ const PROFILES: &[Profile] = &[
         section_edge: false,
         wikilink_edge: true,
         validate_edge: false,
+        alias_link: true,
     },
     // The valid zoo plus the validate-edge probe (NRN-429) — no expansion, no
     // violations. Dedicated to the element-wise `allowed_values` parity case so
@@ -290,6 +308,7 @@ const PROFILES: &[Profile] = &[
         section_edge: false,
         wikilink_edge: false,
         validate_edge: true,
+        alias_link: true,
     },
 ];
 
@@ -490,7 +509,7 @@ pub fn generate(profile: &Profile, seed: u64, out_dir: &Path) -> io::Result<Mani
     )?;
 
     let mut known: Vec<KnownDoc> = Vec::new();
-    for doc in zoo::valid_docs() {
+    for doc in zoo::valid_docs(profile.alias_link) {
         write_rel(
             out_dir,
             doc.path,

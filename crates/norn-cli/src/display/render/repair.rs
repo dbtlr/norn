@@ -319,7 +319,6 @@ fn skip_reason_prose(code: &str) -> &'static str {
         "missing-default" => "missing field has no configured deterministic default",
         "link-decision-needed" => "link repair requires an explicit path/link decision",
         "no-rule-matched" => "no configured deterministic repair rule matched",
-        "alias-shadowed" => "alias shadowed by a doc stem cannot be repaired deterministically",
         "graph-diagnostic" => "graph diagnostic cannot be repaired deterministically",
         "ambiguous-target" => "ambiguous link target",
         "missing-hash" => "index missing hash for finding's path",

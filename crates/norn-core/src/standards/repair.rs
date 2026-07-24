@@ -48,8 +48,6 @@ pub enum SkipReason {
     LinkDecisionNeeded,
     /// Finding has no matching repair rule in the configured rule set.
     NoRuleMatched,
-    /// Alias collides with an existing doc stem and cannot be safely rewritten.
-    AliasShadowed,
     /// Graph-derived diagnostic (e.g. dangling reference detected at graph build) without a repair path.
     GraphDiagnostic,
     /// Link-ambiguous: multiple resolution candidates, manual decision required.
@@ -69,7 +67,6 @@ impl SkipReason {
             SkipReason::MissingDefault => "missing-default",
             SkipReason::LinkDecisionNeeded => "link-decision-needed",
             SkipReason::NoRuleMatched => "no-rule-matched",
-            SkipReason::AliasShadowed => "alias-shadowed",
             SkipReason::GraphDiagnostic => "graph-diagnostic",
             SkipReason::AmbiguousTarget => "ambiguous-target",
             SkipReason::MissingHash => "missing-hash",
@@ -221,11 +218,11 @@ fn op_fields_from_change(change: &ApplyOp) -> Value {
     Value::Object(fields)
 }
 
-/// The per-op footnote STRING for a closest-match suggestion. The former
+/// The per-op footnote STRING for a built-in link rewrite. The former
 /// `plan_from_findings` built this off the `RepairPlan.footnotes` list keyed by
-/// `change_id`; it now attaches directly to the op at construction. Preserved
-/// verbatim — its bytes ride the plan (`repair --plan --format report` renders it).
-fn closest_match_footnote(footnote: &PlanFootnote) -> String {
+/// `change_id`; it now attaches directly to the op at construction. Its bytes
+/// ride the plan (`repair --plan --format report` renders it).
+fn render_plan_footnote(footnote: &PlanFootnote) -> String {
     match &footnote.details {
         FootnoteDetails::ClosestMatch(d) => {
             let confidence_label = match footnote.confidence {
@@ -237,6 +234,10 @@ fn closest_match_footnote(footnote: &PlanFootnote) -> String {
                 confidence_label, d.original_target, d.candidate_stem, d.normalized_distance,
             )
         }
+        FootnoteDetails::Alias(d) => format!(
+            "alias rewrite (deterministic): \"{}\" → \"{}\" (unique alias of {})",
+            d.original_target, d.candidate_stem, d.alias_doc,
+        ),
     }
 }
 
@@ -251,12 +252,16 @@ pub enum Confidence {
 #[serde(rename_all = "snake_case")]
 pub enum FootnoteKind {
     ClosestMatchSuggestion,
+    /// Deterministic rewrite of a dangling wikilink that uniquely matches one
+    /// document's `aliases` entry, to that document's canonical stem (NRN-455).
+    AliasSuggestion,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FootnoteDetails {
     ClosestMatch(ClosestMatchDetails),
+    Alias(AliasDetails),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -266,6 +271,16 @@ pub struct ClosestMatchDetails {
     pub candidate_stem: String,
     pub normalized_distance: usize,
     pub slug_normalized_identity: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AliasDetails {
+    /// The dangling wikilink target as authored (the alias).
+    pub original_target: String,
+    /// The canonical stem the link is rewritten to.
+    pub candidate_stem: String,
+    /// The document that uniquely declares the alias.
+    pub alias_doc: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -312,6 +327,96 @@ enum ClosestMatchOutcome {
         skipped: Box<SkippedFinding>,
     },
     NoMatch,
+}
+
+/// The deterministic alias-hint (NRN-455): if the dangling target uniquely
+/// matches exactly ONE document's `aliases` entry (case-folded, mirroring the
+/// resolver's case-insensitive stem posture), AND that document's stem is
+/// itself unique across the vault, propose a `rewrite_link` to that document's
+/// canonical stem. Non-unique alias matches (two docs claim the alias) yield
+/// `None`, as does a unique alias match whose candidate stem is shared by
+/// other documents — rewriting to a non-unique stem would trade a dangling
+/// link for an ambiguous one, which is not an improvement. Checked BEFORE
+/// fuzzy closest-match: an exact alias match is a certain rewrite target, so
+/// it wins over edit-distance guessing.
+fn handle_alias_match(
+    finding: &Finding,
+    by_alias: &BTreeMap<String, Vec<(Utf8PathBuf, String)>>,
+    stem_counts: &BTreeMap<String, u32>,
+    document_hashes: &BTreeMap<Utf8PathBuf, String>,
+    occurrence_counts: &mut BTreeMap<(Utf8PathBuf, String, String), u32>,
+) -> Option<(ApplyOp, PlanFootnote)> {
+    let broken_target = finding.target.as_deref()?;
+    let key = broken_target.to_lowercase();
+    let matches = by_alias.get(&key)?;
+    // Uniqueness gate: exactly one distinct doc claims the alias.
+    let [(alias_doc, candidate_stem)] = matches.as_slice() else {
+        return None;
+    };
+    // Stem-uniqueness gate: the candidate stem must itself resolve to exactly
+    // one document, or the rewrite trades a dangling link for an ambiguous one.
+    // Case-folded to mirror the resolver, which keys stems lowercased
+    // (links/resolve.rs `by_stem` on `to_lowercase`) — two stems differing only
+    // by case (e.g. `notes/beta.md` and `archive/Beta.md`) resolve to the same
+    // ambiguous target there, so the uniqueness gate must fold case too.
+    if stem_counts
+        .get(&candidate_stem.to_lowercase())
+        .copied()
+        .unwrap_or(0)
+        != 1
+    {
+        return None;
+    }
+    let document_hash = document_hashes.get(&finding.path).cloned()?;
+
+    let expected_old_value = Some(Value::String(broken_target.to_string()));
+    let occ_key = (
+        finding.path.clone(),
+        finding.code.clone(),
+        expected_old_value
+            .as_ref()
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+    );
+    let occurrence_index = *occurrence_counts
+        .entry(occ_key)
+        .and_modify(|n| *n += 1)
+        .or_insert(0);
+    let change_id = derive_change_id(
+        &finding.path,
+        &finding.code,
+        expected_old_value.as_ref(),
+        occurrence_index,
+    );
+
+    let change = ApplyOp {
+        change_id: change_id.clone(),
+        path: finding.path.clone(),
+        document_hash,
+        finding_code: Some(finding.code.clone()),
+        finding_rule: None,
+        repair_rule: Some("built-in:alias-stem".to_string()),
+        operation: "rewrite_link".to_string(),
+        field: None,
+        expected_old_value,
+        new_value: Some(Value::String(candidate_stem.clone())),
+        destination: None,
+        link_risk: None,
+        warnings: vec![],
+        force: false,
+        parents: false,
+    };
+    let footnote = PlanFootnote {
+        change_id,
+        kind: FootnoteKind::AliasSuggestion,
+        confidence: Confidence::High,
+        details: FootnoteDetails::Alias(AliasDetails {
+            original_target: broken_target.to_string(),
+            candidate_stem: candidate_stem.clone(),
+            alias_doc: alias_doc.to_string(),
+        }),
+    };
+    Some((change, footnote))
 }
 
 fn handle_closest_match(
@@ -446,6 +551,34 @@ pub fn plan_repairs(
         .map(|d| (d.path.clone(), d.hash.clone()))
         .collect();
     let stem_corpus: Vec<&str> = index.documents.iter().map(|d| d.stem.as_str()).collect();
+
+    // Alias index for the deterministic alias-hint (NRN-455): a lowercased alias
+    // maps to the (path, stem) of each document that declares it, deduplicated per
+    // document so a doc listing an alias twice counts once. A dangling wikilink
+    // whose target uniquely matches ONE entry here is rewritten to that doc's
+    // canonical stem; a non-unique match yields no hint.
+    let mut by_alias: BTreeMap<String, Vec<(Utf8PathBuf, String)>> = BTreeMap::new();
+    for doc in &index.documents {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for alias in &doc.aliases {
+            if seen.insert(alias.as_str()) {
+                by_alias
+                    .entry(alias.clone())
+                    .or_default()
+                    .push((doc.path.clone(), doc.stem.clone()));
+            }
+        }
+    }
+    // How many documents share each stem, so the alias-hint can require its
+    // candidate stem to resolve to exactly one document (see handle_alias_match).
+    // Keyed lowercased, mirroring the resolver (links/resolve.rs `by_stem` on
+    // `to_lowercase`): stems differing only by case are the same resolver
+    // target, so they must count as shared here too.
+    let mut stem_counts: BTreeMap<String, u32> = BTreeMap::new();
+    for doc in &index.documents {
+        *stem_counts.entry(doc.stem.to_lowercase()).or_insert(0) += 1;
+    }
+
     let mut changes = Vec::new();
     let mut skipped: Vec<SkippedFinding> = Vec::new();
     let mut footnotes: Vec<PlanFootnote> = Vec::new();
@@ -488,6 +621,21 @@ pub fn plan_repairs(
             }
             None => {
                 if finding.code == "link-target-missing" {
+                    // Deterministic alias-hint first (NRN-455): a unique alias
+                    // match is a certain rewrite target, so it takes priority over
+                    // fuzzy closest-match. Falls through when there is no unique
+                    // alias match.
+                    if let Some((change, footnote)) = handle_alias_match(
+                        finding,
+                        &by_alias,
+                        &stem_counts,
+                        &document_hashes,
+                        &mut occurrence_counts,
+                    ) {
+                        changes.push(change);
+                        footnotes.push(footnote);
+                        continue;
+                    }
                     match handle_closest_match(
                         finding,
                         &stem_corpus,
@@ -580,9 +728,9 @@ pub fn plan_repairs(
 
     // Emit wire ops natively (ADR 0024). Each interior `ApplyOp` becomes a
     // `MigrationOp`: `operation` → `kind`, the remaining fields → the `fields`
-    // object (matching the former serde round trip), and the 1:1
-    // closest-match footnote — keyed by `change_id`, the only footnote family — is
-    // resolved to its string and attached to the op.
+    // object (matching the former serde round trip), and the 1:1 built-in link
+    // footnote (closest-match or the deterministic alias-hint) — keyed by
+    // `change_id` — is resolved to its string and attached to the op.
     let footnote_by_change_id: std::collections::HashMap<&str, &PlanFootnote> = footnotes
         .iter()
         .map(|f| (f.change_id.as_str(), f))
@@ -596,7 +744,7 @@ pub fn plan_repairs(
             fields: op_fields_from_change(change),
             footnote: footnote_by_change_id
                 .get(change.change_id.as_str())
-                .map(|f| closest_match_footnote(f)),
+                .map(|f| render_plan_footnote(f)),
         })
         .collect();
 
@@ -809,10 +957,7 @@ fn skip_reason_for_finding(finding: &Finding) -> SkipReason {
         | "frontmatter-forbidden-field"
         | "document-misrouted"
         | "frontmatter-reference-type"
-        | "frontmatter-alias-malformed"
-        | "frontmatter-alias-duplicate-across-docs"
         | "nonportable-filename" => SkipReason::NoRuleMatched,
-        "frontmatter-alias-shadowed-by-stem" => SkipReason::AliasShadowed,
         _ => SkipReason::GraphDiagnostic,
     }
 }
@@ -875,42 +1020,6 @@ fn skipped_finding(
                 "add a move_document repair rule matching this finding's code".to_string(),
             ],
         ),
-        "frontmatter-alias-malformed" => (
-            "malformed alias entries cannot be repaired deterministically".to_string(),
-            vec![
-                format!("edit the '{field}' frontmatter list to contain only scalar strings"),
-                "rerun validate after fixing the entries".to_string(),
-            ],
-        ),
-        "frontmatter-alias-shadowed-by-stem" => {
-            let alias_value = finding.alias_value.as_deref().unwrap_or("");
-            let shadowing = finding
-                .shadowing_doc_path
-                .as_ref()
-                .map(|p| p.as_str())
-                .unwrap_or("");
-            (
-                "alias shadowed by a doc stem cannot be repaired deterministically".to_string(),
-                vec![
-                    format!(
-                        "remove or rename alias '{alias_value}' on this doc, or rename {shadowing} to free the stem"
-                    ),
-                    "rerun validate after fixing the conflict".to_string(),
-                ],
-            )
-        }
-        "frontmatter-alias-duplicate-across-docs" => {
-            let alias_value = finding.alias_value.as_deref().unwrap_or("");
-            (
-                "alias duplicated across docs cannot be repaired deterministically".to_string(),
-                vec![
-                    format!(
-                        "pick a canonical doc for alias '{alias_value}', remove the alias from the others"
-                    ),
-                    "rerun validate after fixing the conflict".to_string(),
-                ],
-            )
-        }
         "nonportable-filename" => (
             "filename portability is diagnosed, not auto-repaired (a rename cascades every backlink; that is a move, out of repair's scope)".to_string(),
             vec![
@@ -1326,6 +1435,167 @@ mod tests {
         );
     }
 
+    /// Build an index whose docs carry aliases (path == stem via `doc()`), for the
+    /// alias-hint tests.
+    fn index_with_aliases(specs: &[(&str, &[&str])]) -> crate::domain::GraphIndex {
+        let documents = specs
+            .iter()
+            .map(|(path, aliases)| {
+                let mut d = doc(path, &format!("hash-{path}"));
+                d.aliases = aliases.iter().map(|a| a.to_string()).collect();
+                d
+            })
+            .collect();
+        crate::domain::GraphIndex {
+            root: vault_root(),
+            files: vec![],
+            ignored_files: vec![],
+            documents,
+        }
+    }
+
+    #[test]
+    fn alias_hint_rewrites_dangling_link_to_unique_alias_stem() {
+        // NRN-455: `[[Bee]]` is dangling (no path/stem `bee`), but `beta.md`
+        // uniquely declares alias `bee` — repair proposes the deterministic
+        // rewrite to the canonical stem `beta`. Case-folded match (authored `Bee`).
+        let finding = finding_link_unresolved("src.md", "Bee");
+        let config = RepairConfig { rules: vec![] };
+        let index = index_with_aliases(&[("src.md", &[]), ("beta.md", &["bee"])]);
+        let result = plan_repairs(
+            vault_root(),
+            RepairPlanFilters::default(),
+            vec![finding],
+            &config,
+            &index,
+        );
+        assert_eq!(result.plan.operations.len(), 1, "one rewrite op expected");
+        assert!(
+            result.skipped.is_empty(),
+            "the dangling link is repaired, not skipped"
+        );
+        assert_eq!(result.plan.operations[0].kind, "rewrite_link");
+        assert_eq!(op_str(&result, 0, "new_value"), Some("beta"));
+        assert_eq!(op_str(&result, 0, "expected_old_value"), Some("Bee"));
+        assert_eq!(
+            op_str(&result, 0, "repair_rule"),
+            Some("built-in:alias-stem")
+        );
+        assert_eq!(footnote_count(&result), 1);
+        let footnote = result.plan.operations[0].footnote.as_deref().unwrap();
+        assert!(
+            footnote.contains("alias rewrite") && footnote.contains("beta"),
+            "footnote should describe the deterministic alias rewrite; got: {footnote}"
+        );
+    }
+
+    #[test]
+    fn alias_hint_skips_when_two_docs_claim_the_alias() {
+        // Non-unique alias match (both docs claim `bee`) yields NO hint — the link
+        // stays plain-dangling (no unique stem, no fuzzy match here → skipped).
+        let finding = finding_link_unresolved("src.md", "bee");
+        let config = RepairConfig { rules: vec![] };
+        let index = index_with_aliases(&[
+            ("src.md", &[]),
+            ("beta.md", &["bee"]),
+            ("gamma.md", &["bee"]),
+        ]);
+        let result = plan_repairs(
+            vault_root(),
+            RepairPlanFilters::default(),
+            vec![finding],
+            &config,
+            &index,
+        );
+        assert!(
+            result.plan.operations.iter().all(|op| op
+                .fields
+                .get("repair_rule")
+                .and_then(Value::as_str)
+                != Some("built-in:alias-stem")),
+            "no alias-stem op when the alias is non-unique"
+        );
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(
+            result.skipped[0].skip_reason,
+            SkipReason::LinkDecisionNeeded
+        );
+    }
+
+    #[test]
+    fn alias_hint_skips_when_candidate_stem_is_shared_by_another_document() {
+        // NRN-455 fix: `bee` uniquely resolves to `beta.md` via alias, but the
+        // stem `beta` is ALSO carried by `archive/beta.md` — rewriting to `beta`
+        // would trade a dangling link for an ambiguous one (link-target-ambiguous),
+        // which is not an improvement. No hint is proposed; the link stays
+        // dangling (skipped, no fuzzy match here either).
+        let finding = finding_link_unresolved("src.md", "bee");
+        let config = RepairConfig { rules: vec![] };
+        let index = index_with_aliases(&[
+            ("src.md", &[]),
+            ("beta.md", &["bee"]),
+            ("archive/beta.md", &[]),
+        ]);
+        let result = plan_repairs(
+            vault_root(),
+            RepairPlanFilters::default(),
+            vec![finding],
+            &config,
+            &index,
+        );
+        assert!(
+            result.plan.operations.iter().all(|op| op
+                .fields
+                .get("repair_rule")
+                .and_then(Value::as_str)
+                != Some("built-in:alias-stem")),
+            "no alias-stem op when the candidate stem is shared by another document"
+        );
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(
+            result.skipped[0].skip_reason,
+            SkipReason::LinkDecisionNeeded
+        );
+    }
+
+    #[test]
+    fn alias_hint_skips_when_candidate_stem_is_shared_by_case_variant_document() {
+        // NRN-455 fix: `bee` uniquely resolves to `beta.md` via alias, but the
+        // stem `beta` is ALSO carried by `archive/Beta.md` — differing only by
+        // case. The resolver folds stems to lowercase (links/resolve.rs
+        // `by_stem`), so these two count as the SAME stem there; rewriting to
+        // `beta` would trade a dangling link for one the resolver treats as
+        // ambiguous. No hint is proposed; the link stays dangling (skipped, no
+        // fuzzy match here either).
+        let finding = finding_link_unresolved("src.md", "bee");
+        let config = RepairConfig { rules: vec![] };
+        let index = index_with_aliases(&[
+            ("src.md", &[]),
+            ("beta.md", &["bee"]),
+            ("archive/Beta.md", &[]),
+        ]);
+        let result = plan_repairs(
+            vault_root(),
+            RepairPlanFilters::default(),
+            vec![finding],
+            &config,
+            &index,
+        );
+        assert!(
+            result.plan.operations.iter().all(|op| op
+                .fields
+                .get("repair_rule")
+                .and_then(Value::as_str)
+                != Some("built-in:alias-stem")),
+            "no alias-stem op when the candidate stem is shared by a case-variant document"
+        );
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(
+            result.skipped[0].skip_reason,
+            SkipReason::LinkDecisionNeeded
+        );
+    }
+
     #[test]
     fn missing_document_hash_routes_to_skipped_with_missing_hash_reason() {
         let finding = finding_disallowed_value("task.md", "status", json!("someday"));
@@ -1715,24 +1985,22 @@ mod tests {
     }
 
     #[test]
-    fn skip_reason_has_eight_variants_with_stable_codes() {
+    fn skip_reason_has_seven_variants_with_stable_codes() {
         use SkipReason::*;
         let all = [
             MissingDefault,
             LinkDecisionNeeded,
             NoRuleMatched,
-            AliasShadowed,
             GraphDiagnostic,
             AmbiguousTarget,
             MissingHash,
             PreconditionFailed,
         ];
-        assert_eq!(all.len(), 8);
+        assert_eq!(all.len(), 7);
 
         assert_eq!(MissingDefault.code(), "missing-default");
         assert_eq!(LinkDecisionNeeded.code(), "link-decision-needed");
         assert_eq!(NoRuleMatched.code(), "no-rule-matched");
-        assert_eq!(AliasShadowed.code(), "alias-shadowed");
         assert_eq!(GraphDiagnostic.code(), "graph-diagnostic");
         assert_eq!(AmbiguousTarget.code(), "ambiguous-target");
         assert_eq!(MissingHash.code(), "missing-hash");

@@ -1,7 +1,7 @@
 //! The `get` verb's execute seam (the 0016 Params/execute/Report vocabulary).
 //!
 //! Resolve each target (path / stem /
-//! wikilink-shaped / alias), load its full connection set, resolve any
+//! wikilink-shaped), load its full connection set, resolve any
 //! `--section` spans, then apply in-memory sort/paging over the resolved
 //! records. Every resolved document carries its whole facet set (frontmatter,
 //! headings, the three link sets, body, hash, stem); the CLI projects `--col` /
@@ -171,9 +171,10 @@ pub fn normalize_target(raw: &str) -> &str {
 }
 
 /// Resolve a target string to one-or-more document paths: exact-path probe, then
-/// case-insensitive stem scan, then alias scan (only when the vault configures an
-/// alias field). Empty result means "no match" (the caller notes the error);
-/// more than one means an ambiguous stem (one record per candidate).
+/// case-insensitive stem scan. The ladder is **path → stem ONLY** (NRN-455) —
+/// aliases do NOT resolve here, mirroring the link resolver. Empty result means
+/// "no match" (the caller notes the error); more than one means an ambiguous stem
+/// (one record per candidate).
 fn resolve_target(cache: &Cache, raw: &str) -> Result<Vec<Utf8PathBuf>> {
     let normalized = normalize_target(raw).to_string();
     if normalized.is_empty() {
@@ -195,27 +196,7 @@ fn resolve_target(cache: &Cache, raw: &str) -> Result<Vec<Utf8PathBuf>> {
         .filter(|d| d.stem.eq_ignore_ascii_case(&normalized))
         .map(|d| d.path.clone())
         .collect();
-    if !stem_matches.is_empty() {
-        return Ok(stem_matches);
-    }
-
-    // 3. Alias fallback — only when the stem found nothing AND an alias field is
-    //    configured. `parse_aliases` lowercases, so compare against the lowered
-    //    target. Reuses the `all` set (still one SELECT total).
-    if let Some(field) = cache.alias_field() {
-        let target_lower = normalized.to_lowercase();
-        let alias_matches: Vec<Utf8PathBuf> = all
-            .iter()
-            .filter(|d| {
-                let (aliases, _) = crate::graph::parse_aliases(d.frontmatter.as_ref(), field);
-                aliases.iter().any(|a| a == &target_lower)
-            })
-            .map(|d| d.path.clone())
-            .collect();
-        return Ok(alias_matches);
-    }
-
-    Ok(Vec::new())
+    Ok(stem_matches)
 }
 
 // ── `--section` resolution ────────────────────────────────────────────────────

@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use crate::domain::{Document, LinkStatus};
 use crate::standards::findings::Finding;
 use crate::standards::path_match::PathPattern;
-use camino::Utf8PathBuf;
 use serde_json::Value;
 
 pub(crate) fn check_graph_diagnostics(document: &Document) -> Vec<Finding> {
@@ -220,100 +219,6 @@ pub(crate) fn check_allowed_paths_compiled(
     ))
 }
 
-pub(crate) fn check_alias_malformed(
-    document: &Document,
-    alias_field: Option<&str>,
-) -> Vec<Finding> {
-    let Some(field) = alias_field else {
-        return Vec::new();
-    };
-    if document.alias_malformed.is_empty() {
-        return Vec::new();
-    }
-    vec![Finding::frontmatter_alias_malformed(
-        document.path.clone(),
-        field.to_string(),
-        document.alias_malformed.clone(),
-    )]
-}
-
-pub(crate) fn check_alias_shadowed_by_stem(
-    documents: &[&Document],
-    alias_field: Option<&str>,
-) -> Vec<Finding> {
-    if alias_field.is_none() {
-        return Vec::new();
-    }
-    // Build stem -> all docs with that stem (case-insensitive). Stems can collide;
-    // shadow finding fires against ANY stem match.
-    let mut by_stem_lower: std::collections::HashMap<String, Vec<&Document>> =
-        std::collections::HashMap::new();
-    for doc in documents {
-        by_stem_lower
-            .entry(doc.stem.to_lowercase())
-            .or_default()
-            .push(doc);
-    }
-    let mut findings = Vec::new();
-    for doc in documents {
-        for alias in &doc.aliases {
-            // alias is already lowercased upstream
-            if let Some(matches) = by_stem_lower.get(alias) {
-                for shadowing in matches {
-                    findings.push(Finding::frontmatter_alias_shadowed_by_stem(
-                        doc.path.clone(),
-                        alias.clone(),
-                        shadowing.path.clone(),
-                    ));
-                }
-            }
-        }
-    }
-    findings
-}
-
-pub(crate) fn check_alias_duplicate_across_docs(
-    documents: &[&Document],
-    alias_field: Option<&str>,
-) -> Vec<Finding> {
-    if alias_field.is_none() {
-        return Vec::new();
-    }
-    // alias-key -> Vec<doc references>
-    let mut by_alias: std::collections::HashMap<&str, Vec<&Document>> =
-        std::collections::HashMap::new();
-    for doc in documents {
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for alias in &doc.aliases {
-            if seen.insert(alias.as_str()) {
-                by_alias.entry(alias.as_str()).or_default().push(doc);
-            }
-        }
-    }
-    let mut findings = Vec::new();
-    // Sorted for deterministic finding order.
-    let mut groups: Vec<_> = by_alias.into_iter().collect();
-    groups.sort_by(|a, b| a.0.cmp(b.0));
-    for (alias_value, docs) in groups {
-        if docs.len() < 2 {
-            continue;
-        }
-        for &doc in &docs {
-            let peers: Vec<Utf8PathBuf> = docs
-                .iter()
-                .filter(|peer| peer.path != doc.path)
-                .map(|peer| peer.path.clone())
-                .collect();
-            findings.push(Finding::frontmatter_alias_duplicate_across_docs(
-                doc.path.clone(),
-                alias_value.to_string(),
-                peers,
-            ));
-        }
-    }
-    findings
-}
-
 /// Typed-reference constraint (`field_references`): each frontmatter
 /// wikilink in a constrained field must resolve to a document whose `type`
 /// is in the allowed set. Only **resolved** links are judged — unresolved
@@ -451,6 +356,7 @@ pub(crate) fn check_links(document: &Document) -> Vec<Finding> {
 mod tests {
     use super::*;
     use crate::standards::config::FieldTypeSpec;
+    use camino::Utf8PathBuf;
     use serde_json::json;
 
     fn doc_with_frontmatter(fm: serde_json::Value) -> Document {

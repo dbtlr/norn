@@ -41,7 +41,7 @@ pub struct IndexOptions {
     pub alias_field: Option<String>,
 }
 
-pub use aliases::parse_aliases;
+pub use aliases::{parse_aliases, ALIAS_FRONTMATTER_FIELD};
 pub(crate) use build::overlay_changed_paths;
 pub use build::{
     build_index_with_options, concise_diagnostics, graph_visible_markdown_under, has_errors,

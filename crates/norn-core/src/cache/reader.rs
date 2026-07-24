@@ -88,8 +88,10 @@ fn load_documents(
         let diagnostics = load_diagnostics(conn, path.as_str())?;
         // Re-derive aliases on read: the schema has no dedicated columns for
         // `aliases` / `alias_malformed`, but `frontmatter_json` is the source of
-        // truth and `parse_aliases` is cheap. Without this, alias-aware findings
-        // silently no-op.
+        // truth and `parse_aliases` is cheap. `aliases` feeds `find`'s field
+        // universe and the `repair` alias-hint; `alias_malformed` is populated
+        // for cache-shape stability only (see `Document::alias_malformed`) —
+        // without this re-derivation both fields would silently read empty.
         let (aliases, alias_malformed) = match alias_field {
             Some(field) => crate::graph::parse_aliases(frontmatter.as_ref(), field),
             None => (Vec::new(), Vec::new()),

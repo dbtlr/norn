@@ -2,6 +2,13 @@
 
 use serde_json::Value;
 
+/// The fixed frontmatter field aliases live under (NRN-455). Aliases no longer
+/// participate in link resolution or validation; this convention drives only the
+/// derived `Document::aliases` set, which the `repair` verb consults for its
+/// deterministic alias-hint (rewrite a dangling alias-only link to the canonical
+/// stem). The former configurable `links.alias_field` key is retired.
+pub const ALIAS_FRONTMATTER_FIELD: &str = "aliases";
+
 /// Parses the configured alias field from a doc's frontmatter, returning
 /// (lowercased coerced strings, malformed raw values).
 ///

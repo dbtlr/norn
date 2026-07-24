@@ -47,10 +47,6 @@ pub struct Finding {
     pub allowed_types: Vec<String>,
     /// Path-portability issues (nonportable-filename findings) — repair skip prose.
     pub issues: Vec<String>,
-    /// Alias value (alias findings) — repair skip prose.
-    pub alias_value: Option<String>,
-    /// Doc whose stem shadows the alias (alias-shadowed findings) — repair prose.
-    pub shadowing_doc_path: Option<Utf8PathBuf>,
 }
 
 impl Finding {
@@ -69,8 +65,6 @@ impl Finding {
             expected_type: None,
             allowed_types: Vec::new(),
             issues: Vec::new(),
-            alias_value: None,
-            shadowing_doc_path: None,
         }
     }
 
@@ -287,69 +281,6 @@ impl Finding {
             "document path is outside allowed rule locations".to_string(),
         );
         finding.rule = rule;
-        finding
-    }
-
-    pub fn frontmatter_alias_malformed(
-        path: Utf8PathBuf,
-        field: String,
-        invalid_entries: Vec<Value>,
-    ) -> Self {
-        let message = format!(
-            "alias field '{field}' contains {} non-scalar value(s); entries skipped from resolution",
-            invalid_entries.len()
-        );
-        let mut finding = Self::base(
-            "frontmatter-alias-malformed",
-            Severity::Warning,
-            path,
-            message,
-        );
-        finding.field = Some(field);
-        finding
-    }
-
-    pub fn frontmatter_alias_shadowed_by_stem(
-        path: Utf8PathBuf,
-        alias_value: String,
-        shadowing_doc_path: Utf8PathBuf,
-    ) -> Self {
-        let message = if shadowing_doc_path == path {
-            format!(
-                "alias '{alias_value}' is shadowed by this doc's own stem; alias is dead in fallback resolution"
-            )
-        } else {
-            format!(
-                "alias '{alias_value}' is shadowed by stem of {shadowing_doc_path}; alias is dead in fallback resolution"
-            )
-        };
-        let mut finding = Self::base(
-            "frontmatter-alias-shadowed-by-stem",
-            Severity::Warning,
-            path,
-            message,
-        );
-        finding.alias_value = Some(alias_value);
-        finding.shadowing_doc_path = Some(shadowing_doc_path);
-        finding
-    }
-
-    pub fn frontmatter_alias_duplicate_across_docs(
-        path: Utf8PathBuf,
-        alias_value: String,
-        peer_doc_paths: Vec<Utf8PathBuf>,
-    ) -> Self {
-        let message = format!(
-            "alias '{alias_value}' is also claimed by {} other doc(s); resolution will be ambiguous",
-            peer_doc_paths.len()
-        );
-        let mut finding = Self::base(
-            "frontmatter-alias-duplicate-across-docs",
-            Severity::Warning,
-            path,
-            message,
-        );
-        finding.alias_value = Some(alias_value);
         finding
     }
 
