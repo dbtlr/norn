@@ -185,9 +185,15 @@ pub fn client_error_diagnostic(e: &ClientError) -> Diagnostic {
         // may point at them.
         ClientError::OwnerHealth(_) => Diagnostic::new(e.to_string())
             .with_hint("the vault owner is not responding — re-run the command, or retry"),
-        // The remaining variants (runtime-dir security, foreign owner, spawn,
-        // protocol, raw IO) are self-explanatory headlines with no honest next
-        // step to add — a hint here would be noise.
+        // The computed runtime dir (an `XDG_RUNTIME_DIR`-derived path, or the
+        // world-writable `$TMPDIR/norn-<uid>` fallback) is a symlink or is
+        // owned by another uid — a squatting attempt. The concrete remedy is a
+        // private runtime dir the caller's uid alone controls.
+        ClientError::InsecureRuntimeDir(_) => Diagnostic::new(e.to_string())
+            .with_hint("set XDG_RUNTIME_DIR to a private, per-user directory and re-run"),
+        // The remaining variants (foreign owner, spawn, protocol, raw IO) are
+        // self-explanatory headlines with no honest next step to add — a hint
+        // here would be noise.
         _ => Diagnostic::new(e.to_string()),
     }
 }
@@ -311,6 +317,16 @@ mod tests {
 
         let io = client_error_diagnostic(&ClientError::Io(std::io::Error::other("boom")));
         assert!(io.hints().is_empty(), "a raw IO error adds no filler hint");
+    }
+
+    #[test]
+    fn insecure_runtime_dir_gets_an_xdg_runtime_dir_hint() {
+        let diag = client_error_diagnostic(&ClientError::InsecureRuntimeDir(
+            "/tmp/norn-501 is owned by uid 999 (expected 501)".into(),
+        ));
+        assert!(diag.message().contains("insecure runtime dir"));
+        assert_eq!(diag.hints().len(), 1);
+        assert!(diag.hints()[0].contains("XDG_RUNTIME_DIR"));
     }
 
     #[test]
