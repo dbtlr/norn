@@ -836,6 +836,49 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
             }
         }
 
+        // frontmatter_defaults: a default must satisfy the SAME rule's own
+        // allowed_values / field_types (NRN-430) — a rule cannot ship a default
+        // that its own schema would reject at write time. This is the
+        // compile-time twin of the write-path enforcement: catch a
+        // self-contradicting rule when the config loads, not per document.
+        // Values carrying a `{{…}}` substitution are resolved at write time
+        // (their concrete value is unknown here), so they are skipped.
+        // Reuses the sorted `default_entries` above for deterministic output.
+        for &(field, value) in &default_entries {
+            if value.as_str().is_some_and(|s| s.contains("{{")) {
+                continue;
+            }
+            if let Some(allowed) = rule.allowed_values.get(field) {
+                let ok = allowed
+                    .iter()
+                    .any(|a| crate::standards::predicates::frontmatter_value_matches(value, a));
+                if !ok {
+                    return Err(ConfigError::Invalid {
+                        source_path: source_path.to_owned(),
+                        message: format!(
+                            "rule {rule_label}: frontmatter_defaults.{field} is not in this rule's allowed_values"
+                        ),
+                    });
+                }
+            }
+            if let Some(spec) = rule.field_types.get(field) {
+                if let Some(ty) = spec.type_name() {
+                    if !crate::standards::predicates::frontmatter_type_matches(
+                        value,
+                        ty,
+                        spec.max_length(),
+                    ) {
+                        return Err(ConfigError::Invalid {
+                            source_path: source_path.to_owned(),
+                            message: format!(
+                                "rule {rule_label}: frontmatter_defaults.{field} does not match this rule's field_types type '{ty}'"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
         // target: requires name; mutually exclusive with match.path; must not
         // start with `/` (vault paths are relative — a leading slash would cause
         // the derived matcher to strip it while generate_path does not, breaking
@@ -1075,6 +1118,44 @@ mod tests {
         assert!(msg.contains("v0.16"), "got: {msg}");
         assert!(msg.contains("graph.ignore"), "got: {msg}");
         assert!(msg.contains("files.ignore"), "got: {msg}");
+    }
+
+    #[test]
+    fn default_violating_allowed_values_is_rejected() {
+        // NRN-430 compile-time lint: a rule whose default value falls outside
+        // its own allowed_values is self-contradicting and must fail to load.
+        let yaml = "validate:\n  rules:\n    - name: r\n      allowed_values:\n        status: [backlog, done]\n      frontmatter_defaults:\n        status: someday\n";
+        let msg = parse(yaml).unwrap_err().to_string();
+        assert!(
+            msg.contains("frontmatter_defaults.status") && msg.contains("allowed_values"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn default_within_allowed_values_loads() {
+        let yaml = "validate:\n  rules:\n    - name: r\n      allowed_values:\n        status: [backlog, done]\n      frontmatter_defaults:\n        status: backlog\n";
+        assert!(parse(yaml).is_ok());
+    }
+
+    #[test]
+    fn default_violating_field_type_is_rejected() {
+        // A `date`-typed field with a non-date literal default is rejected at
+        // compile time (the write path would produce a type-invalid value).
+        let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        due: date\n      frontmatter_defaults:\n        due: notadate\n";
+        let msg = parse(yaml).unwrap_err().to_string();
+        assert!(
+            msg.contains("frontmatter_defaults.due") && msg.contains("field_types"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn templated_default_skips_the_allowed_values_lint() {
+        // A `{{…}}` default is resolved at write time, so its concrete value is
+        // unknown at compile time and the lint must not fire on the template.
+        let yaml = "validate:\n  rules:\n    - name: r\n      field_types:\n        created: datetime\n      frontmatter_defaults:\n        created: \"{{now}}\"\n";
+        assert!(parse(yaml).is_ok());
     }
 
     #[test]
