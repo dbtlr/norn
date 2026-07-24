@@ -5,8 +5,12 @@
 //! and every subcommand set `disable_help_flag` + `disable_help_subcommand`,
 //! and the `-h` / `--help` globals are plain bool flags this interceptor reads).
 //!
+//! `--help` (the long form only — `-h` never pages) spawns the same TTY pager
+//! `find` / `get` do (NRN-454): a long render on a real terminal pages through
+//! `$PAGER`; piped/non-TTY output and a short render write straight to stdout,
+//! unchanged from before the pager existed.
+//!
 //! Deliberate simplifications:
-//! - No pager: the buffer is written straight to stdout.
 //! - No live-examples materialization: there is no query core yet, and `--help`
 //!   opens an empty cache and would emit none anyway (see `model.rs`).
 //! - `self-update` is always listed, unconditionally.
@@ -22,12 +26,13 @@ pub use bin_name::BIN_NAME;
 pub use extract::build_model;
 pub use model::HelpForm;
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 use clap::CommandFactory;
 
 use crate::cli::Cli;
-use crate::display::Presenter;
+use crate::display::{Conversation, Presenter};
+use crate::output::pager;
 use crate::output::palette;
 
 /// Fixed wrap width. Wrapping affects only the short-form description line and
@@ -103,7 +108,25 @@ fn render_help_for_args(args: &[String]) -> Option<i32> {
         return Some(1);
     }
 
-    if let Err(err) = io::stdout().write_all(&buf) {
+    // Long-form help alone is pageable — `-h`'s short form is a one-line-per-flag
+    // summary, never long enough to page. There is no `--help`-local
+    // `--no-pager` flag (this interceptor runs before clap parses anything),
+    // so the suppress input is always `false`.
+    let is_tty = io::stdout().is_terminal();
+    let buffer_lines = buf.iter().filter(|&b| *b == b'\n').count();
+    let should_page = form == HelpForm::Long
+        && pager::should_page(buffer_lines, /* no_pager */ false, is_tty);
+
+    let write_result: io::Result<()> = if should_page {
+        let mut stderr = io::stderr();
+        let mut conv = Conversation::new(&mut stderr);
+        let mut stdout = io::stdout();
+        pager::page_or_write_direct(&buf, &mut stdout, &mut conv)
+    } else {
+        io::stdout().write_all(&buf)
+    };
+
+    if let Err(err) = write_result {
         if err.kind() != io::ErrorKind::BrokenPipe {
             Presenter::stdio().diagnostic(&format!("writing help failed: {err}"));
             return Some(1);
