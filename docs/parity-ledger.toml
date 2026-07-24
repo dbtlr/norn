@@ -965,3 +965,22 @@ old = "`new` never enforces allowed_values before writing: a `--field status=som
 new = "the synthesized frontmatter is validated for allowed_values at forecast/preflight: a value outside a matching rule's allowed set REFUSES (`value-not-allowed`, exit 2, write-free) with the allowed list carried in the refusal message; `--force` bypasses to a `force-bypass` warning and applies. Enforcement is identical on the CLI `norn new` and the MCP `vault.new` (one owner seam)"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+
+# NRN-429 (ruling settled by the NRN-430 grill, 2026-07-23): `allowed_values`
+# on an array-valued field now matches ELEMENT-WISE, matching mutation's own
+# `coerce::value_in_allowed` decision (`set` already coerces a scalar CLI
+# value into a single-element array on a `list_of_strings` field and checks
+# each element against the set). Config already rejects a non-scalar
+# `allowed_values` entry, so a whole-array match against a set of scalars
+# could never succeed — the oracle's check flags every array value on a
+# constrained field, valid or not. `check_allowed_values` now shares
+# `value_in_allowed` rather than mirroring it, so the two engines cannot
+# drift again.
+[[entry]]
+id = "PD-147"
+surface = "validate (allowed_values on a list_of_strings field — element-wise match)"
+cases = ["validate-list-allowed-values-elementwise"]
+old = "`allowed_values` matches an array-valued field WHOLE against the configured scalar set — `frontmatter_value_matches` has no `(Array, String)` arm, so the match never succeeds and every array value on a constrained field reports `value-not-allowed`, even when every element is in the set"
+new = "`allowed_values` matches an array-valued field ELEMENT-WISE — one finding per violating element, none when every element is allowed (an empty array yields no findings); a scalar field is unaffected, matching whole as before"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

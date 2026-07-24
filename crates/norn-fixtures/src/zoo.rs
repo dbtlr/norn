@@ -198,6 +198,26 @@ pub fn section_edge_docs() -> Vec<ZooDoc> {
     ]
 }
 
+/// The validate-edge zoo — emitted only when `Profile::validate_edge` is set.
+/// One document (NRN-429), isolated on a dedicated profile (the text-edge /
+/// mutate-edge / section-edge discipline) so the decided element-wise
+/// `allowed_values` divergence never perturbs a shared zoo/clean case:
+///
+/// - `shapes/validate-edge/tags-elementwise.md` — a `list_of_strings` field
+///   (`tags: [a]`) matched against an `allowed_values` set of scalars
+///   (`[a, b]`). The pinned oracle's `check_allowed_values` matches the WHOLE
+///   array against the scalar set and never succeeds (`frontmatter_value_
+///   matches` has no `(Array, String)` arm), flagging a fully-valid value
+///   `value-not-allowed`; the rewrite matches element-wise — the same
+///   decision `set`'s own `coerce::value_in_allowed` already makes on the
+///   write path — and reports the document clean.
+pub fn validate_edge_docs() -> Vec<ZooDoc> {
+    vec![valid_unlinkable(
+        "shapes/validate-edge/tags-elementwise.md",
+        TAGS_ELEMENTWISE,
+    )]
+}
+
 /// The wikilink-edge zoo — emitted only when `Profile::wikilink_edge` is set.
 /// Backlink probes for the three wikilink-rewriter corruptions (NRN-424 /
 /// NRN-431/432/433), isolated on a dedicated profile (the text-edge /
@@ -625,6 +645,15 @@ const SETEXT_DOC: &str =
 /// body content must supply the missing line terminator, else the content welds
 /// onto the heading marker. Deliberately not newline-terminated.
 const EOF_HEADING_DOC: &str = "---\ntitle: EOF Heading Doc\n---\n\n## Tail";
+
+// ---- validate-edge content --------------------------------------------------
+
+/// A single-element `tags` array (NRN-429), every element allowed
+/// (`validate-edge`'s `allowed_values: tags: [a, b]`). Exercises the
+/// element-wise match: the whole-array oracle behavior flags this as
+/// disallowed even though every element is in the set.
+const TAGS_ELEMENTWISE: &str =
+    "---\ntitle: Tags Elementwise\ntags: [a]\n---\n\nBody under a valid single-element tags array.\n";
 
 // ---- wikilink-edge content -------------------------------------------------
 
