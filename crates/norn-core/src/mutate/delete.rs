@@ -10,7 +10,9 @@
 use super::{owner_index_options, MutationExecution};
 use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::domain::GraphIndex;
-use crate::target::{backlinks, resolve_target, target_refusal, TargetRefusalFamily, TargetResolution};
+use crate::target::{
+    backlinks, resolve_target, target_refusal, TargetRefusalFamily, TargetResolution,
+};
 use camino::Utf8PathBuf;
 use norn_wire::{ApplyError, ApplyOutcome, ApplyReport};
 use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
