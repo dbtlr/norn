@@ -113,7 +113,7 @@ fn render_help_for_args(args: &[String]) -> Option<i32> {
     // `--no-pager` flag (this interceptor runs before clap parses anything),
     // so the suppress input is always `false`.
     let is_tty = io::stdout().is_terminal();
-    let buffer_lines = buf.iter().filter(|&b| *b == b'\n').count();
+    let buffer_lines = pager::count_lines(&buf);
     let should_page = form == HelpForm::Long
         && pager::should_page(buffer_lines, /* no_pager */ false, is_tty);
 

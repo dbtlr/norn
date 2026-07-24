@@ -93,22 +93,20 @@ fn render_with<O: Write, E: Write, R>(
 /// mid-stream. Report annotations (`conv`) are unaffected: they still go
 /// straight to the real stderr as the renderer emits them.
 ///
-/// `pageable` is the caller's per-format gate (`find`/`get` page only their
-/// `records` — and for `get`, `markdown` — shape; `paths`/`json`/`jsonl` never
-/// do). `should_page` folds `pageable` together with the buffer's line count,
-/// `no_pager`, and `is_tty` into the one spawn-or-not decision, then either
-/// hands the buffer to [`pager::page_or_write_direct`] or writes it straight
-/// through — the same bytes `render_with` would have streamed, in one
-/// `write_all` instead of many small writes. `is_tty` is false for every piped
-/// invocation, so `should_page` never returns true there and this write is the
-/// only one that ever runs off a pipe.
+/// The caller invokes this ONLY when paging is actually reachable — a
+/// pageable format, a real stdout TTY, and no `--no-pager` — never for a
+/// piped or non-pageable-format invocation, which streams through
+/// [`render_with`] instead using the identical renderer closure. The buffer
+/// this function allocates is therefore confined to the interactive,
+/// long-output-on-a-real-terminal case: bounded by one command's result set,
+/// held only long enough to learn its line count and hand it to
+/// [`pager::should_page`], then either paged through
+/// [`pager::page_or_write_direct`] or written straight through in one
+/// `write_all` — the same bytes `render_with` would have streamed.
 fn render_paged<O: Write, E: Write>(
     presenter: &mut Presenter<O, E>,
     palette: &Palette,
     width: usize,
-    is_tty: bool,
-    no_pager: bool,
-    pageable: bool,
     render: impl FnOnce(&mut Sink<'_>, &mut Conversation<'_>) -> i32,
 ) -> i32 {
     let (out, err) = presenter.streams();
@@ -116,8 +114,11 @@ fn render_paged<O: Write, E: Write>(
     let mut buffer: Vec<u8> = Vec::new();
     let inner_exit = render(&mut Sink::new(&mut buffer, palette, width), &mut conv);
 
-    let buffer_lines = buffer.iter().filter(|&&b| b == b'\n').count();
-    let write_result = if pageable && pager::should_page(buffer_lines, no_pager, is_tty) {
+    let buffer_lines = pager::count_lines(&buffer);
+    // `no_pager: false` and `stdout_is_tty: true`: both already hold by the
+    // caller's precondition for reaching this function at all — only the
+    // line-count threshold is still open here.
+    let write_result = if pager::should_page(buffer_lines, false, true) {
         pager::page_or_write_direct(&buffer, out, &mut conv)
     } else {
         out.write_all(&buffer)
@@ -166,15 +167,18 @@ pub fn emit<O: Write, E: Write>(
             // `find`'s one pageable shape is `records` — `paths`/`json`/`jsonl`
             // are structured/pipeline output, never paged.
             let pageable = format == Format::Records;
-            render_paged(
-                presenter,
-                &styled,
-                width,
-                is_tty,
-                no_pager,
-                pageable,
-                |sink, conv| render::find::render_find(view, format, sink, conv),
-            )
+            let render = |sink: &mut Sink<'_>, conv: &mut Conversation<'_>| {
+                render::find::render_find(view, format, sink, conv)
+            };
+            // Paging is only reachable on a pageable format, a real stdout
+            // TTY, and without `--no-pager`; every other invocation —
+            // including every piped/agent call — streams straight to stdout
+            // through `render_with` instead of buffering the full render.
+            if pageable && is_tty && !no_pager {
+                render_paged(presenter, &styled, width, render)
+            } else {
+                render_with(presenter, &styled, width, render)
+            }
         }
         Output::Get(view) => {
             let format = view.format.resolve(is_tty);
@@ -184,15 +188,17 @@ pub fn emit<O: Write, E: Write>(
             // whole source file, the strongest long-form case); `paths` /
             // `json` / `jsonl` never do.
             let pageable = matches!(format, Format::Records | Format::Markdown);
-            render_paged(
-                presenter,
-                &styled,
-                width,
-                is_tty,
-                no_pager,
-                pageable,
-                |sink, conv| render::get::render_get(view, format, sink, conv),
-            )
+            let render = |sink: &mut Sink<'_>, conv: &mut Conversation<'_>| {
+                render::get::render_get(view, format, sink, conv)
+            };
+            // Same gate as `find`: buffer-and-page only when paging is
+            // actually reachable; stream otherwise (piped/agent calls, and
+            // `paths`/`json`/`jsonl` even on a TTY).
+            if pageable && is_tty && !no_pager {
+                render_paged(presenter, &styled, width, render)
+            } else {
+                render_with(presenter, &styled, width, render)
+            }
         }
         Output::Count(view) => {
             let format = view.format.resolve(is_tty);

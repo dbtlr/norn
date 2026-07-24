@@ -9,12 +9,46 @@
 //! call, invoked only from [`crate::display::emit`]'s buffered render path and
 //! the `--help` interceptor — the two real call sites that hold an actual
 //! process stdout.
+//!
+//! `$PAGER` is split on whitespace into argv ([`resolve_pager`]) — no shell
+//! interpretation. `PAGER="less -R"` works; a value that relies on shell
+//! syntax, e.g. quoted args or a pipeline (`PAGER='sh -c "col -b | less"'`),
+//! does not — it is split into literal words and passed to `Command::new` as
+//! one program plus argv, so a construct like that spawns a program named
+//! `sh` with the literal arguments `-c`, `"col`, `-b`, `|`, `less"` rather than
+//! running a shell. Command lookup then fails and [`page_or_write_direct`]
+//! degrades to a direct write, with a warning on stderr.
+//!
+//! A renderer's own `Conversation` warnings (an unknown column, an unknown
+//! sort field, …) reach the real stderr during buffering — before the paging
+//! decision runs and before any pager spawns. With the default `less -FRX`,
+//! `-X` keeps the primary screen, so that pre-spawn text stays on screen
+//! alongside the pager's own output rather than being cleared on exit. A
+//! `$PAGER` that switches to the alternate screen itself (plain `less`
+//! without `-X`, `most`, …) can still overdraw it for the duration of the
+//! pager session, even though it was written first.
 
 use std::env;
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
 
 use crate::display::Conversation;
+
+/// The line count of a buffered render, for [`should_page`]'s threshold
+/// check: one per `\n`, plus one more for a final unterminated line (content
+/// after the last newline, or the whole buffer when it contains none) — that
+/// trailing line still occupies a screen row even without its own newline.
+/// Byte-faithful markdown (a source file with no trailing newline) is the
+/// case this covers; counting `\n` bytes alone would undercount it by one
+/// right at the paging threshold.
+pub fn count_lines(buffer: &[u8]) -> usize {
+    let newlines = buffer.iter().filter(|&&b| b == b'\n').count();
+    if buffer.last().is_some_and(|&b| b != b'\n') {
+        newlines + 1
+    } else {
+        newlines
+    }
+}
 
 /// Whether a buffered render should page: never with `--no-pager`, never off
 /// a real terminal, and — even on a TTY — only when the buffer's line count
@@ -87,6 +121,30 @@ pub fn page_or_write_direct(
 mod tests {
     use super::*;
     use crate::test_support::EnvGuard;
+
+    // ── count_lines: the trailing-unterminated-line boundary ───────────────
+
+    #[test]
+    fn empty_buffer_counts_zero_lines() {
+        assert_eq!(count_lines(b""), 0);
+    }
+
+    #[test]
+    fn a_trailing_newline_counts_only_the_terminated_lines() {
+        assert_eq!(count_lines(b"one\ntwo\n"), 2);
+    }
+
+    #[test]
+    fn a_missing_trailing_newline_still_counts_the_final_line() {
+        // Byte-faithful markdown without a trailing newline: the `\n` count
+        // alone (1) would undercount the real two-line buffer.
+        assert_eq!(count_lines(b"one\ntwo"), 2);
+    }
+
+    #[test]
+    fn a_single_unterminated_line_counts_as_one() {
+        assert_eq!(count_lines(b"no newline at all"), 1);
+    }
 
     // ── should_page: the env/flag/TTY selection matrix ──────────────────────
 
