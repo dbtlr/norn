@@ -17,10 +17,10 @@
 //!    `src/display/render/` + `src/output/` (the CLI's presentation layer,
 //!    the tree NRN-407's fix round converged onto the constructors) and to
 //!    PRODUCTION source only: a test module legitimately asserts the
-//!    rendered `"warning: ..."` text, which is not an emission site, so
-//!    everything at and after a file's (single, trailing, per this
-//!    codebase's convention) `#[cfg(test)]` marker is excluded from the
-//!    scan. `conversation.rs` — the one place these prefixes are
+//!    rendered `"warning: ..."` text, which is not an emission site, so each
+//!    `#[cfg(test)]`-annotated item's own body — not everything from its
+//!    first occurrence to end-of-file — is excluded from the scan.
+//!    `conversation.rs` — the one place these prefixes are
 //!    legitimately literal — lives outside this scoped tree already. The
 //!    needle requires the colon immediately after the bare word, so a
 //!    stdout data payload like set-records' `"warnings: N"` (a plural
@@ -36,8 +36,19 @@
 //!    identifier and only accidentally lowercase). So no PRODUCTION line
 //!    under `src/display/render/` may carry a `:?}` in either form. Test
 //!    assertions legitimately print `Debug` for failure messages (`{err:?}`,
-//!    `{s:?}`, …), so this too only scans before a file's trailing
-//!    `#[cfg(test)]` marker.
+//!    `{s:?}`, …), so this too only scans each file's non-`#[cfg(test)]`
+//!    body.
+//!
+//!    **Scope decision (NRN-448):** this scans `src/display/render/` only,
+//!    matching the boundary `docs/architecture.md` invariant 2 states
+//!    (`format!("{:?}")` never appears in DISPLAY code). The same `{:?}`
+//!    shape also appears outside display code: `norn-core`'s
+//!    `mutate/delete.rs` and `mutate/move_doc.rs` build an ambiguous-target
+//!    refusal message by `Debug`-formatting the candidate path list
+//!    (`{candidates:?}`). That is a `norn-core` message-construction site,
+//!    not a renderer, so it sits outside this guard's scope; wording it to
+//!    match `mutate/edit.rs` and `mutate/set.rs`'s comma-joined candidate
+//!    list is a separate task, not this invariant's job.
 //!
 //! It lives in `tests/` (outside every scanned `src/` tree) so its own needle
 //! literals are not scanned by invariant 1, and its `{:?}`/`:?}`-free source is
@@ -89,16 +100,107 @@ fn scan_rs<F: FnMut(&Path, &str)>(dir: &Path, visit: &mut F) {
     }
 }
 
-/// The PRODUCTION slice of a file's source — everything before its (single,
-/// trailing, per this codebase's convention) `#[cfg(test)]` module. Test
-/// modules legitimately assert against rendered annotation text (`"warning:
-/// ..."`) and print `Debug` in failure messages (`{err:?}`); neither is an
-/// emission site, so invariants 2 and 3 only scan what actually ships.
-fn production_source(text: &str) -> &str {
-    match text.find("#[cfg(test)]") {
-        Some(idx) => &text[..idx],
-        None => text,
+/// The PRODUCTION slice of a file's source — every `#[cfg(test)]`-annotated
+/// item's own body excised, not everything from the first occurrence to
+/// end-of-file. This codebase's convention is a single trailing `#[cfg(test)]
+/// mod tests { .. }`, for which excising just that item's body is
+/// indistinguishable from the old truncate-at-first-occurrence behavior. But a
+/// file is not guaranteed to hold to that convention: an early `#[cfg(test)]`
+/// helper (item, not the trailing module) followed by more production code
+/// must not silently exit the scan — only the annotated item's own span is
+/// test-only. Test modules legitimately assert against rendered annotation
+/// text (`"warning: ..."`) and print `Debug` in failure messages (`{err:?}`);
+/// neither is an emission site, so invariants 2 and 3 only scan what actually
+/// ships.
+fn production_source(text: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let Some(idx) = rest.find("#[cfg(test)]") else {
+            kept.push_str(rest);
+            break;
+        };
+        kept.push_str(&rest[..idx]);
+        let after_attr = idx + "#[cfg(test)]".len();
+        match cfg_test_item_end(rest, after_attr) {
+            Some(end) => rest = &rest[end..],
+            // No item (brace block or `;`-terminated statement) follows the
+            // attribute — nothing left that is safely known to be
+            // production, so stop here (the old conservative behavior).
+            None => break,
+        }
     }
+    kept
+}
+
+/// The byte offset just past the end of the item a `#[cfg(test)]` attribute
+/// (found at `from`, right after the attribute) annotates: the matching `}`
+/// of its first `{...}` block (`mod`/`fn`/`struct`/`impl`/…), or the `;` of a
+/// brace-free statement item (`use`/`const`/…) — whichever delimiter is
+/// reached first, so a stray `{`/`;` inside a string literal is never
+/// miscounted. Other attributes stacked on the same item (`#[cfg(test)]
+/// #[allow(dead_code)] fn f() {..}`) are skipped over transparently since
+/// neither delimiter appears inside them.
+fn cfg_test_item_end(text: &str, from: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate().skip(from) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => return find_matching_brace(text, i).map(|close| close + 1),
+            b';' => return Some(i + 1),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Find the `}` matching the `{` at byte offset `open`, tracking string-quote
+/// state so a brace inside a `"..."` literal is never miscounted. Sibling of
+/// [`find_matching_paren`].
+fn find_matching_brace(text: &str, open: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.get(open) != Some(&b'{') {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate().skip(open) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The stderr-emission macros a raw annotation-prefix literal must never
@@ -164,6 +266,54 @@ fn macro_call_bodies(text: &str) -> Vec<&str> {
         }
     }
     bodies
+}
+
+/// Sensitivity check (1/2, NRN-448): an early `#[cfg(test)]` item — not the
+/// file's trailing test module — must exclude only its own body. Production
+/// code that follows it, including a would-be `:?}` violation, stays IN
+/// scope; a truncate-at-first-occurrence scan would have missed it entirely.
+#[test]
+fn production_source_keeps_code_after_an_early_cfg_test_item_in_scope() {
+    let src = "fn a() {}\n\
+               #[cfg(test)]\n\
+               mod early_helpers {\n    \
+                   fn t() { let _ = format!(\"{:?}\", 1); }\n\
+               }\n\
+               fn b() { let _ = format!(\"{:?}\", 2); }\n";
+    let production = production_source(src);
+    assert!(
+        production.contains("fn a() {}") && production.contains("fn b()"),
+        "production code before AND after the early item must survive: {production:?}"
+    );
+    assert!(
+        !production.contains("early_helpers"),
+        "the cfg(test) item's own body must still be excluded: {production:?}"
+    );
+    assert!(
+        production.contains(":?}"),
+        "fn b's Debug placeholder is production code and must be visible to invariant 3: \
+         {production:?}"
+    );
+}
+
+/// Sensitivity check (2/2, NRN-448): the common convention — one trailing
+/// `#[cfg(test)] mod tests { .. }` at end of file — still excises the whole
+/// test module, matching the pre-hardening truncate-at-first-occurrence
+/// result for that shape.
+#[test]
+fn production_source_still_excludes_a_trailing_cfg_test_module() {
+    let src = "fn a() { let _ = 1; }\n\
+               #[cfg(test)]\n\
+               mod tests {\n    \
+                   fn t() { let _ = format!(\"{:?}\", 1); }\n\
+               }\n";
+    let production = production_source(src);
+    assert!(production.contains("fn a()"));
+    assert!(
+        !production.contains(":?}"),
+        "the trailing test module's Debug placeholder must not leak into production: \
+         {production:?}"
+    );
 }
 
 #[test]
@@ -232,7 +382,7 @@ fn no_render_or_output_surface_emits_a_raw_stderr_prefix() {
     for dir in &dirs {
         scan_rs(dir, &mut |path, text| {
             let production = production_source(text);
-            for body in macro_call_bodies(production) {
+            for body in macro_call_bodies(&production) {
                 for needle in RAW_PREFIX_NEEDLES {
                     if body.contains(needle) {
                         hits.push(format!("{}: `{needle}`", path.display()));
