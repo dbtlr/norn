@@ -1121,9 +1121,13 @@ const READ_CASES: &[Case] = &[
         plan: None,
     },
     Case {
-        // Alias addressing: the zoo config sets `links.alias_field: aliases` and
-        // `notes/beta.md` declares `aliases: [bee]`, so `get bee` resolves via the
-        // alias fallback (stem `bee` does not exist). Pins alias resolution.
+        // Alias addressing DIVERGES (NRN-455, gated by PD-146): the zoo config
+        // still carries `links.alias_field: aliases` (accepted-but-inert in the
+        // rewrite) and `notes/beta.md` declares `aliases: [bee]`, so the ORACLE
+        // resolves `get bee` via the alias fallback. The rewrite's resolution
+        // ladder is path → stem only — `bee` is neither, so it resolves to no doc
+        // (a `target-not-found` error note). Kept ported so the gated run observes
+        // the divergence; `aliases` stays queryable via `find`.
         id: "read-get-alias-json-zoo",
         argv: &["get", "bee", "--format", "json"],
         fixture: ZOO_1,
