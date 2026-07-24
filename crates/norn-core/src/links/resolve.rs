@@ -553,7 +553,10 @@ mod tests {
         resolve_links(&files, &mut documents);
         let link = &documents[1].links[0];
         assert_eq!(link.status, LinkStatus::Unresolved);
-        assert_eq!(link.unresolved_reason, Some(UnresolvedReason::TargetMissing));
+        assert_eq!(
+            link.unresolved_reason,
+            Some(UnresolvedReason::TargetMissing)
+        );
         assert!(link.resolved_path.is_none());
     }
 
@@ -595,6 +598,9 @@ mod tests {
         resolve_links(&files, &mut documents);
         let link = &documents[1].links[0];
         assert_eq!(link.status, LinkStatus::Unresolved);
-        assert_eq!(link.unresolved_reason, Some(UnresolvedReason::TargetMissing));
+        assert_eq!(
+            link.unresolved_reason,
+            Some(UnresolvedReason::TargetMissing)
+        );
     }
 }
