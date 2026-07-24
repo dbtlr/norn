@@ -331,14 +331,18 @@ enum ClosestMatchOutcome {
 
 /// The deterministic alias-hint (NRN-455): if the dangling target uniquely
 /// matches exactly ONE document's `aliases` entry (case-folded, mirroring the
-/// resolver's case-insensitive stem posture), propose a `rewrite_link` to that
-/// document's canonical stem. Non-unique matches (two docs claim the alias) yield
-/// `None` — the link stays plain-dangling. Checked BEFORE fuzzy closest-match: an
-/// exact alias match is a certain rewrite target, so it wins over edit-distance
-/// guessing.
+/// resolver's case-insensitive stem posture), AND that document's stem is
+/// itself unique across the vault, propose a `rewrite_link` to that document's
+/// canonical stem. Non-unique alias matches (two docs claim the alias) yield
+/// `None`, as does a unique alias match whose candidate stem is shared by
+/// other documents — rewriting to a non-unique stem would trade a dangling
+/// link for an ambiguous one, which is not an improvement. Checked BEFORE
+/// fuzzy closest-match: an exact alias match is a certain rewrite target, so
+/// it wins over edit-distance guessing.
 fn handle_alias_match(
     finding: &Finding,
     by_alias: &BTreeMap<String, Vec<(Utf8PathBuf, String)>>,
+    stem_counts: &BTreeMap<String, u32>,
     document_hashes: &BTreeMap<Utf8PathBuf, String>,
     occurrence_counts: &mut BTreeMap<(Utf8PathBuf, String, String), u32>,
 ) -> Option<(ApplyOp, PlanFootnote)> {
@@ -349,6 +353,11 @@ fn handle_alias_match(
     let [(alias_doc, candidate_stem)] = matches.as_slice() else {
         return None;
     };
+    // Stem-uniqueness gate: the candidate stem must itself resolve to exactly
+    // one document, or the rewrite trades a dangling link for an ambiguous one.
+    if stem_counts.get(candidate_stem).copied().unwrap_or(0) != 1 {
+        return None;
+    }
     let document_hash = document_hashes.get(&finding.path).cloned()?;
 
     let expected_old_value = Some(Value::String(broken_target.to_string()));
@@ -551,6 +560,12 @@ pub fn plan_repairs(
             }
         }
     }
+    // How many documents share each stem, so the alias-hint can require its
+    // candidate stem to resolve to exactly one document (see handle_alias_match).
+    let mut stem_counts: BTreeMap<String, u32> = BTreeMap::new();
+    for doc in &index.documents {
+        *stem_counts.entry(doc.stem.clone()).or_insert(0) += 1;
+    }
 
     let mut changes = Vec::new();
     let mut skipped: Vec<SkippedFinding> = Vec::new();
@@ -601,6 +616,7 @@ pub fn plan_repairs(
                     if let Some((change, footnote)) = handle_alias_match(
                         finding,
                         &by_alias,
+                        &stem_counts,
                         &document_hashes,
                         &mut occurrence_counts,
                     ) {
@@ -1486,6 +1502,42 @@ mod tests {
                 .and_then(Value::as_str)
                 != Some("built-in:alias-stem")),
             "no alias-stem op when the alias is non-unique"
+        );
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(
+            result.skipped[0].skip_reason,
+            SkipReason::LinkDecisionNeeded
+        );
+    }
+
+    #[test]
+    fn alias_hint_skips_when_candidate_stem_is_shared_by_another_document() {
+        // NRN-455 fix: `bee` uniquely resolves to `beta.md` via alias, but the
+        // stem `beta` is ALSO carried by `archive/beta.md` — rewriting to `beta`
+        // would trade a dangling link for an ambiguous one (link-target-ambiguous),
+        // which is not an improvement. No hint is proposed; the link stays
+        // dangling (skipped, no fuzzy match here either).
+        let finding = finding_link_unresolved("src.md", "bee");
+        let config = RepairConfig { rules: vec![] };
+        let index = index_with_aliases(&[
+            ("src.md", &[]),
+            ("beta.md", &["bee"]),
+            ("archive/beta.md", &[]),
+        ]);
+        let result = plan_repairs(
+            vault_root(),
+            RepairPlanFilters::default(),
+            vec![finding],
+            &config,
+            &index,
+        );
+        assert!(
+            result.plan.operations.iter().all(|op| op
+                .fields
+                .get("repair_rule")
+                .and_then(Value::as_str)
+                != Some("built-in:alias-stem")),
+            "no alias-stem op when the candidate stem is shared by another document"
         );
         assert_eq!(result.skipped.len(), 1);
         assert_eq!(
