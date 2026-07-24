@@ -70,8 +70,9 @@ pub enum ResolvedVia {
     UnregisteredCwd,
 }
 
-/// A resolved vault: its root, the registered name when known, and how it was
-/// resolved.
+/// A resolved vault: its root, the registered name when known, how it was
+/// resolved, and the matched registry entry when resolution went through the
+/// registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
     /// The vault root. Canonical for every via: registry-resolved vias
@@ -85,6 +86,14 @@ pub struct Resolved {
     pub root: PathBuf,
     pub name: Option<String>,
     pub via: ResolvedVia,
+    /// The registry entry that produced this resolution, for the vias that
+    /// went through the registry (`ExplicitName`, `RepoBinding`,
+    /// `ReverseLookup`). `None` for the direct-path vias (`ExplicitPath`,
+    /// `NornRootEnv`) and `UnregisteredCwd`, which never consult the
+    /// registry. Carrying the matched entry here means a caller that needs
+    /// one of its fields (e.g. a config override) reads it off this result
+    /// instead of looking the name back up a second time.
+    pub vault: Option<RegisteredVault>,
 }
 
 impl Registry {
@@ -106,6 +115,7 @@ impl Registry {
                 root: ground(&input.cwd, path),
                 name: None,
                 via: ResolvedVia::ExplicitPath,
+                vault: None,
             });
         }
 
@@ -141,6 +151,7 @@ impl Registry {
                 root: ground(&input.cwd, Path::new(raw)),
                 name: None,
                 via: ResolvedVia::NornRootEnv,
+                vault: None,
             });
         }
 
@@ -155,15 +166,17 @@ impl Registry {
             root: canonicalize_best_effort(&input.cwd),
             name: None,
             via: ResolvedVia::UnregisteredCwd,
+            vault: None,
         })
     }
 }
 
 fn resolved_from(vault: RegisteredVault, via: ResolvedVia) -> Resolved {
     Resolved {
-        root: vault.root,
-        name: Some(vault.name),
+        root: vault.root.clone(),
+        name: Some(vault.name.clone()),
         via,
+        vault: Some(vault),
     }
 }
 
@@ -282,6 +295,52 @@ mod tests {
         // canonicalized, so on macOS a `/tmp`-rooted tempdir compares against
         // its `/private/...` canonical form, not the raw spelling.
         assert_eq!(resolved.root, explicit.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn registry_vias_carry_the_matched_entry_direct_vias_do_not() {
+        // A registry-resolved via (`ExplicitName` here) carries the matched
+        // `RegisteredVault` on `Resolved`, so a caller reads its config
+        // override straight off the resolution instead of looking the name
+        // back up a second time. Direct-path and unregistered vias never
+        // consult the registry, so their `vault` stays `None`.
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_in(tmp.path());
+        let vault_dir = tmp.path().join("vault");
+        fs::create_dir_all(&vault_dir).unwrap();
+        let config_path = tmp.path().join("custom-config.yaml");
+        reg.register(
+            "docs",
+            &vault_dir,
+            VaultOverrides {
+                config: Some(config_path.clone()),
+                ..VaultOverrides::default()
+            },
+        )
+        .unwrap();
+
+        let input = ResolveInput {
+            explicit_name: Some("docs".into()),
+            ..ResolveInput::new(tmp.path())
+        };
+        let resolved = reg.resolve(&input).unwrap();
+        let matched = resolved.vault.expect("registry via must carry the entry");
+        assert_eq!(matched.name, "docs");
+        assert_eq!(matched.config.as_deref(), Some(config_path.as_path()));
+
+        let direct = reg
+            .resolve(&ResolveInput {
+                explicit_path: Some(vault_dir.clone()),
+                ..ResolveInput::new(tmp.path())
+            })
+            .unwrap();
+        assert_eq!(direct.vault, None);
+
+        let elsewhere = tmp.path().join("elsewhere-unused");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let unregistered = reg.resolve(&ResolveInput::new(elsewhere)).unwrap();
+        assert_eq!(unregistered.via, ResolvedVia::UnregisteredCwd);
+        assert_eq!(unregistered.vault, None);
     }
 
     #[test]

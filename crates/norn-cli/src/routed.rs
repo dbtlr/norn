@@ -67,11 +67,10 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
     // A registered vault may carry a `[vaults.<name>].config` override; the
     // summoned owner warms under it (ADR 0017 resolver-derived config). An
     // unregistered cwd (the common ephemeral case) has no override — the owner
-    // loads `<root>/.norn/config.yaml`.
-    let config_override = match &resolved.name {
-        Some(name) => registry.lookup(name).ok().flatten().and_then(|v| v.config),
-        None => None,
-    };
+    // loads `<root>/.norn/config.yaml`. `resolve` already looked the entry up
+    // for a registry via, so the resolved entry itself carries the override —
+    // no second registry lookup here.
+    let config_override = resolved.vault.as_ref().and_then(|v| v.config.clone());
 
     // Registration is what unlocks durable telemetry (NRN-400): a registered
     // vault resolves an events dir (honoring a `logs` override) the owner writes
