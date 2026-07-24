@@ -14,10 +14,11 @@
 //! `{{…}}` templates, `defaults` resolves `frontmatter_defaults` to a fixpoint
 //! (`applicable_rules` / `merge_defaults` / `resolve_to_fixpoint`, clock
 //! injected value-in), and `predicates` carries the document-matching helpers.
-//! `template_refs` holds the config-load `{{…}}` reference-scanning and the
-//! `KNOWN_TRANSFORMS` declaration list, pinned equal to the `substitution`
-//! renderer's transform table. The validate engine and findings model are
-//! ported (see below); repair planning ported in NRN-386. Still deferred to
+//! `template_refs` holds the config-load `{{…}}` reference-scanning and
+//! `is_known_transform`, which checks a referenced transform directly against
+//! the `substitution` renderer's transform table. The validate engine and
+//! findings model are ported (see below); repair planning ported in NRN-386.
+//! Still deferred to
 //! the mutation-verb port: the verb-level apply machinery (the minimal-edit
 //! splice core already went to `norn-frontmatter::edit`).
 
