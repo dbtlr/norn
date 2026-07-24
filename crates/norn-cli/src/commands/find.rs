@@ -162,6 +162,7 @@ pub fn run(args: &FindArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
         cols: args.col.clone(),
         all_cols: args.all_cols,
         sort_field: args.paging.sort.clone(),
+        no_pager: args.no_pager,
         format: FormatChoice {
             explicit: args.format.map(Format::from),
             // The one tty-sensitive default pair: records on a terminal, paths piped.

@@ -14,9 +14,11 @@
 use std::io::{self, Write};
 
 use crate::cli::GlobalArgs;
+use crate::output::pager;
 use crate::output::palette::{self, Palette};
 
 use super::conversation::Conversation;
+use super::format::Format;
 use super::output::Output;
 use super::prompt;
 use super::render;
@@ -84,6 +86,46 @@ fn render_with<O: Write, E: Write, R>(
     f(&mut sink, &mut conv)
 }
 
+/// [`render_with`]'s pageable counterpart (NRN-454): the renderer composes
+/// into an in-memory buffer instead of straight to stdout, so the line count
+/// is known before anything reaches the terminal — the pager's own
+/// spawn-and-feed decision needs that count up front, not discoverable
+/// mid-stream. Report annotations (`conv`) are unaffected: they still go
+/// straight to the real stderr as the renderer emits them.
+///
+/// `pageable` is the caller's per-format gate (`find`/`get` page only their
+/// `records` — and for `get`, `markdown` — shape; `paths`/`json`/`jsonl` never
+/// do). `should_page` folds `pageable` together with the buffer's line count,
+/// `no_pager`, and `is_tty` into the one spawn-or-not decision, then either
+/// hands the buffer to [`pager::page_or_write_direct`] or writes it straight
+/// through — the same bytes `render_with` would have streamed, in one
+/// `write_all` instead of many small writes. `is_tty` is false for every piped
+/// invocation, so `should_page` never returns true there and this write is the
+/// only one that ever runs off a pipe.
+fn render_paged<O: Write, E: Write>(
+    presenter: &mut Presenter<O, E>,
+    palette: &Palette,
+    width: usize,
+    is_tty: bool,
+    no_pager: bool,
+    pageable: bool,
+    render: impl FnOnce(&mut Sink<'_>, &mut Conversation<'_>) -> i32,
+) -> i32 {
+    let (out, err) = presenter.streams();
+    let mut conv = Conversation::new(err);
+    let mut buffer: Vec<u8> = Vec::new();
+    let inner_exit = render(&mut Sink::new(&mut buffer, palette, width), &mut conv);
+
+    let buffer_lines = buffer.iter().filter(|&&b| b == b'\n').count();
+    let write_result = if pageable && pager::should_page(buffer_lines, no_pager, is_tty) {
+        pager::page_or_write_direct(&buffer, out, &mut conv)
+    } else {
+        out.write_all(&buffer)
+    };
+
+    render_outcome(write_result.map(|()| inner_exit), conv.writer())
+}
+
 /// Render a command's returned [`Output`] (or its [`Diagnostic`]) and return the
 /// process exit code. The single render seam: every read/registry verb reaches
 /// stdout through here and nowhere else.
@@ -120,15 +162,37 @@ pub fn emit<O: Write, E: Write>(
     match output {
         Output::Find(view) => {
             let format = view.format.resolve(is_tty);
-            render_with(presenter, &styled, width, |sink, conv| {
-                render::find::render_find(view, format, sink, conv)
-            })
+            let no_pager = view.no_pager;
+            // `find`'s one pageable shape is `records` — `paths`/`json`/`jsonl`
+            // are structured/pipeline output, never paged.
+            let pageable = format == Format::Records;
+            render_paged(
+                presenter,
+                &styled,
+                width,
+                is_tty,
+                no_pager,
+                pageable,
+                |sink, conv| render::find::render_find(view, format, sink, conv),
+            )
         }
         Output::Get(view) => {
             let format = view.format.resolve(is_tty);
-            render_with(presenter, &styled, width, |sink, conv| {
-                render::get::render_get(view, format, sink, conv)
-            })
+            let no_pager = view.no_pager;
+            // `get`'s two human-legible shapes page: `records` (per-document
+            // key/value blocks) and `markdown` (NRN-454's extension — the
+            // whole source file, the strongest long-form case); `paths` /
+            // `json` / `jsonl` never do.
+            let pageable = matches!(format, Format::Records | Format::Markdown);
+            render_paged(
+                presenter,
+                &styled,
+                width,
+                is_tty,
+                no_pager,
+                pageable,
+                |sink, conv| render::get::render_get(view, format, sink, conv),
+            )
         }
         Output::Count(view) => {
             let format = view.format.resolve(is_tty);

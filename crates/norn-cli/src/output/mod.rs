@@ -1,9 +1,11 @@
-//! Output vocabulary for the custom help renderer: the brand color palette
-//! and the glyph set — only the pieces the help renderer depends on
-//! (`palette`, `glyphs`). The record-block primitives and projection live with
-//! the read verbs, not the help surface.
+//! Rendering primitives shared across the display layer: the brand color
+//! palette and glyph set (`palette`, `glyphs`), the record-block/report
+//! primitives (`primitives`), the `--col` projection ladder (`projection`),
+//! and the pager (`pager`, NRN-454) that `find` / `get` / `--help` spawn on a
+//! long TTY render.
 
 pub mod glyphs;
+pub mod pager;
 pub mod palette;
 pub mod primitives;
 pub mod projection;
