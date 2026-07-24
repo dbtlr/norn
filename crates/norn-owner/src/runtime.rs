@@ -743,8 +743,10 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                             // `--format markdown` is the exact source file straight
                             // from disk (ADR 0014) — the OWNER reads it (it holds the
                             // vault root and is co-located with the vault; a future
-                            // off-filesystem client could not). Only the single-doc
-                            // case reads; 0 / >1 selected is the CLI's error to render.
+                            // off-filesystem client could not). `read_markdown_source`
+                            // only reads the single-doc case; a >1-selected request
+                            // gets its own error note there (NRN-460) so every routed
+                            // surface — CLI and MCP alike — refuses identically.
                             if params.markdown {
                                 read_markdown_source(cache, &mut report);
                             }
@@ -1178,20 +1180,33 @@ fn classify_mutation<R>(
 }
 
 /// Fill `markdown_content` with the exact source bytes for a single-doc
-/// `--format markdown` request. A read failure becomes an `error`-severity note
-/// (the CLI exits 1 on it) rather than a cache fault — the db is intact; the file
-/// just could not be read.
+/// `--format markdown` request (NRN-460: enforced here so every surface routed
+/// through the owner — CLI and MCP alike — refuses identically). A read failure
+/// becomes an `error`-severity note (a read verb's exit-1 / `isError: true`
+/// signal) rather than a cache fault — the db is intact; the file just could not
+/// be read. Zero resolved is left to the per-target `target-not-found` notes
+/// `execute` already pushed; more than one resolved pushes its own error note —
+/// `--format markdown` is a single-document passthrough, never a dump of several.
 fn read_markdown_source(cache: &norn_core::cache::Cache, report: &mut norn_wire::GetReport) {
-    if report.records.len() != 1 {
-        return;
-    }
-    let path = report.records[0].path.clone();
-    let full = cache.vault_root().join(&path);
-    match std::fs::read_to_string(full.as_std_path()) {
-        Ok(raw) => report.markdown_content = Some(raw),
-        Err(_) => report.notes.push(norn_wire::Note::error(
-            "source-read-failed",
-            format!("could not read source file for '{path}'"),
+    match report.records.len() {
+        1 => {
+            let path = report.records[0].path.clone();
+            let full = cache.vault_root().join(&path);
+            match std::fs::read_to_string(full.as_std_path()) {
+                Ok(raw) => report.markdown_content = Some(raw),
+                Err(_) => report.notes.push(norn_wire::Note::error(
+                    "source-read-failed",
+                    format!("could not read source file for '{path}'"),
+                )),
+            }
+        }
+        0 => {}
+        n => report.notes.push(norn_wire::Note::error(
+            "format-markdown-multi-selection",
+            format!(
+                "--format markdown returns a single document; {n} selected \
+                 — request one target at a time"
+            ),
         )),
     }
 }

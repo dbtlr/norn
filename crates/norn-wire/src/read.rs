@@ -159,9 +159,10 @@ pub struct GetReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<Note>,
     /// The exact source bytes for a single-doc `--format markdown` request.
-    /// `None` for structured formats, or when markdown resolved zero / more than
-    /// one doc (the CLI derives the error from `records.len()`), or when the
-    /// owner could not read the source file.
+    /// `None` for structured formats, or when markdown resolved zero docs (the
+    /// per-target `target-not-found` notes already cover it) or more than one
+    /// (the owner pushes its own `format-markdown-multi-selection` error note,
+    /// NRN-460), or when the owner could not read the source file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub markdown_content: Option<String>,
 }
