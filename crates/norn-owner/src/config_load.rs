@@ -8,8 +8,8 @@
 //! Resolution (root resolution lives in `norn-config`, not here): an
 //! explicit `[vaults.<name>].config` override path wins; otherwise
 //! `<vault_root>/.norn/config.yaml` is used if it exists; otherwise the vault
-//! runs under [`CacheOpenConfig::default`] (no alias field, no ignores, empty
-//! index set).
+//! runs under [`CacheOpenConfig::default`] (the fixed `aliases` frontmatter
+//! convention, no ignores, empty index set).
 //!
 //! Both errors below feed the NRN-360 user-error surface (a warm-up config
 //! failure becomes an `OwnerFrame::Rejected`, not exit-to-heal), but they carry
@@ -103,7 +103,9 @@ mod tests {
     fn missing_config_yields_defaults() {
         let (_tmp, root) = root();
         let cfg = load_cache_config(&root, None).unwrap();
-        assert_eq!(cfg.alias_field, None);
+        // The alias field is the fixed `aliases` convention on every vault (NRN-455),
+        // even with no config file.
+        assert_eq!(cfg.alias_field.as_deref(), Some("aliases"));
         assert!(cfg.files_ignore.is_empty());
         assert!(cfg.index_set.is_empty());
     }
@@ -112,12 +114,15 @@ mod tests {
     fn default_path_config_is_loaded_and_mapped() {
         let (_tmp, root) = root();
         std::fs::create_dir_all(root.join(".norn").as_std_path()).unwrap();
+        // A retired-but-inert `links.alias_field` key still parses (NRN-455); the
+        // ignore globs and index set are what actually map through.
         std::fs::write(
             root.join(".norn/config.yaml").as_std_path(),
             "links:\n  alias_field: aliases\nfiles:\n  ignore:\n    - \"Archive/**\"\nvalidate:\n  rules:\n    - name: r\n      allowed_values:\n        status:\n          - a\n",
         )
         .unwrap();
         let cfg = load_cache_config(&root, None).unwrap();
+        // Fixed convention regardless of the (inert) config value.
         assert_eq!(cfg.alias_field.as_deref(), Some("aliases"));
         assert_eq!(cfg.files_ignore, vec!["Archive/**".to_string()]);
         assert!(cfg.index_set.contains("status"));
@@ -126,21 +131,23 @@ mod tests {
     #[test]
     fn override_path_wins_over_default() {
         let (_tmp, root) = root();
-        // Default path present but pointed away from — the override is loaded.
+        // Default path present but pointed away from — the override is loaded. The
+        // observable is the ignore glob (the `links.alias_field` key is inert since
+        // NRN-455 and can no longer distinguish the two configs).
         std::fs::create_dir_all(root.join(".norn").as_std_path()).unwrap();
         std::fs::write(
             root.join(".norn/config.yaml").as_std_path(),
-            "links:\n  alias_field: default_field\n",
+            "files:\n  ignore:\n    - \"Default/**\"\n",
         )
         .unwrap();
         let other = root.join("elsewhere.yaml");
         std::fs::write(
             other.as_std_path(),
-            "links:\n  alias_field: override_field\n",
+            "files:\n  ignore:\n    - \"Override/**\"\n",
         )
         .unwrap();
         let cfg = load_cache_config(&root, Some(&other)).unwrap();
-        assert_eq!(cfg.alias_field.as_deref(), Some("override_field"));
+        assert_eq!(cfg.files_ignore, vec!["Override/**".to_string()]);
     }
 
     #[test]
