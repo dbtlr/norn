@@ -35,7 +35,9 @@ Repair runs in two halves. `norn repair --plan` reads validate findings and emit
 
 Each supported finding becomes a `PlannedChange` recording the path, field, new value, and the source document's hash at plan time — so apply can refuse to write if the file changed since planning. Re-run `--plan` after editing files between plan and apply.
 
-Skipped findings carry a stable reason code: `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, `precondition-failed`. Filter them with `--skip-reason <PATTERN>` (globs accepted, repeatable).
+Skipped findings carry a stable reason code: `missing-default`, `link-decision-needed`, `no-rule-matched`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, `precondition-failed`. Filter them with `--skip-reason <PATTERN>` (globs accepted, repeatable).
+
+Two built-in rewrites need no configured rule. A `link-target-missing` finding whose target uniquely matches exactly one document's `aliases` entry plans a deterministic `rewrite_link` to that document's canonical stem (`built-in:alias-stem`) — the migration path for links that relied on the retired alias resolution (aliases are now plain queryable frontmatter, not a resolution target). Failing that, a close slug-normalized stem match plans a `built-in:closest-match-stem` rewrite. A target that uniquely matches an alias claimed by two or more documents gets no hint and stays dangling.
 
 ## Options
 

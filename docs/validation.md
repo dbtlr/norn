@@ -40,9 +40,6 @@ This is the complete, authoritative list of finding codes norn emits (also refer
 | `value-not-allowed` | warning | Present scalar field value isn't in `allowed_values`. Carries `field`, `actual_value`, `allowed_values`, `rule`. |
 | `document-misrouted` | warning | Document path matches no `allowed_paths` glob. Carries `allowed_paths`, `rule`. |
 | `frontmatter-reference-type` | warning | A frontmatter wikilink resolves to a document whose `type` is outside the field's `field_references.target_type` set. Carries `field`, `reference`, `target`, `actual_type`, `allowed_types`, `rule`. |
-| `frontmatter-alias-malformed` | warning | The alias field holds one or more non-scalar entries; those entries are skipped from alias resolution. Carries `field`, `invalid_entries`. |
-| `frontmatter-alias-shadowed-by-stem` | warning | An alias matches another document's stem, so it's dead — stem resolution wins. Carries `alias_value`, `shadowing_doc_path`. |
-| `frontmatter-alias-duplicate-across-docs` | warning | Two or more documents claim the same alias, so resolution is ambiguous. Carries `alias_value`, `peer_doc_paths`. |
 
 For the selector + constraint model that produces these codes, see [rule-shape.md](rule-shape.md).
 
@@ -148,7 +145,7 @@ Each planned operation carries a `kind` and a `fields` object with the target pa
 
 The optional `preconditions` array protects logical identities rather than physical paths. An `owner_set` entry asserts the exact current path set selected by `{ "stem": "…" }`, `{ "eq": ["field:value", "…"] }`, or `{ "stem_from_operation": "operation-id" }`. The operation-derived form resolves `{{seq}}` first. Norn evaluates the whole array once under the mutation lock; any mismatch refuses before an operation runs.
 
-Each skipped finding carries `finding_code` (the underlying validate code, e.g. `link-ambiguous`), `path`, and a single canonical `reason` — the stable **kebab-case** skip-reason code, one of `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, or `precondition-failed`. Branch on `reason`; the summary's `by_reason` map keys on the same codes. Fix the repairability problem, then rerun `repair --plan`.
+Each skipped finding carries `finding_code` (the underlying validate code, e.g. `link-ambiguous`), `path`, and a single canonical `reason` — the stable **kebab-case** skip-reason code, one of `missing-default`, `link-decision-needed`, `no-rule-matched`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, or `precondition-failed`. Branch on `reason`; the summary's `by_reason` map keys on the same codes. Fix the repairability problem, then rerun `repair --plan`.
 
 ### Supported actions
 

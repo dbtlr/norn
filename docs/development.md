@@ -99,7 +99,7 @@ Engines:
 
 - `cache/` — the SQLite-backed graph cache: schema, writer, readers, freshness, prune, EAV field index.
 - `frontmatter/` — YAML frontmatter extraction, offsets, and style-preserving serialization.
-- `graph/` — vault walking, index build, alias resolution, glob pattern matching.
+- `graph/` — vault walking, index build, alias parsing (`aliases.rs`), glob pattern matching.
 - `links/` — CommonMark and wikilink parsing, block IDs, anchors, link resolution.
 - `standards/` — the validate engine, config types, findings, summary, and repair rules.
 - `planner/` — turns findings and mutation intents into a `MigrationPlan`.

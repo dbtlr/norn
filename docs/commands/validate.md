@@ -70,9 +70,6 @@ Codes are stable; renames are called out as breaking changes in the CHANGELOG.
 | `frontmatter-exceeds-max-length` | A field's value exceeds its effective max length. |
 | `frontmatter-forbidden-field` | A field the rule forbids is present. |
 | `frontmatter-reference-type` | A frontmatter wikilink resolves to a document of a disallowed `type`. |
-| `frontmatter-alias-shadowed-by-stem` | An alias matches another doc's stem, so it's dead — stem resolution wins. |
-| `frontmatter-alias-duplicate-across-docs` | Two or more docs claim the same alias. |
-| `frontmatter-alias-malformed` | The alias field holds a non-scalar value. |
 | `document-misrouted` | A document is in a directory its rule's path selector excludes. |
 
 All codes above are `warning` severity except `read-failed`, which is `error`. See [Validation and repair](../validation.md#finding-codes) for the fields each code carries.
