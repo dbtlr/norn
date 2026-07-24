@@ -97,6 +97,11 @@ By default `find` shows frontmatter only. `--col` narrows or extends that select
 | `json` | A single object: `{ total, returned, starts_at, documents[] }`. | Yes, versioned. |
 | `jsonl` | One JSON object per line, no wrapper. | Yes. |
 
+A `records` render longer than the terminal pages through `$PAGER` (default
+`less -FRX`) on a real terminal. `--no-pager` writes straight to stdout
+instead. Piped/non-terminal output is unaffected either way — the pager only
+ever engages on a real terminal, and only for `records`.
+
 ## Recipes
 
 ```bash

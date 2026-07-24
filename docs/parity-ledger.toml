@@ -928,3 +928,16 @@ old = "bare `repair --format json` ignores `--format` and prints the human prose
 new = "bare `repair --format json` emits the findings-summary report envelope as JSON — `findings_total`, `total_docs`, the sorted `findings_by_code` tally, and the `operations`/`skipped` counts — the JSON of what the bare invocation prints without `--format`, never the MigrationPlan (that stays `--plan --format json`)"
 reason = "decided-better"
 decision = "docs/decisions/0021-verbs-return-one-layer-renders.md"
+# NRN-454: the TTY pager is restored across `find` (its `--no-pager` flag was
+# parsed but unwired) and extended to `get`, whose full-document render is the
+# strongest long-form case. `get` never had a pager or a `--no-pager` flag
+# before this; `get --help`'s OPTIONS block now carries the new flag, an
+# addition the oracle's `get --help` has no counterpart for.
+[[entry]]
+id = "PD-145"
+surface = "get --help (OPTIONS block — new --no-pager flag)"
+cases = ["help-get"]
+old = "the OPTIONS block has no `--no-pager` flag; `get` has no pager at all"
+new = "the OPTIONS block lists `--no-pager` (\"Skip the pager even when stdout is a TTY\") — `get` now pages its `records` and `markdown` output on a TTY exactly like `find` pages its `records` output"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

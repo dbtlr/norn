@@ -83,6 +83,11 @@ When a matching `norn serve` daemon is live, `markdown` routes through
 request time and returns the same content. Markdown is a representation,
 not a structural facet: it never adds `.raw` or `.source` to records.
 
+A `records` or `markdown` render longer than the terminal pages through
+`$PAGER` (default `less -FRX`) on a real terminal — a whole document is often
+the longest single render `get` produces. `--no-pager` writes straight to
+stdout instead. Piped/non-terminal output is unaffected either way.
+
 ## See also
 
 - [`find`](find.md) — select a set of documents by predicate, with the same `--col` vocabulary.
