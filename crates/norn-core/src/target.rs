@@ -50,10 +50,10 @@ impl TargetRefusalFamily {
 
 /// Build the `(code, message)` pair for a target-resolution refusal — the one
 /// constructor every mutating verb's resolve-failure branch calls, keyed on
-/// which refusal family fired (NRN-419). Each verb keeps its own wording for
-/// `message` (the phrasing for what didn't resolve has always differed
-/// between verbs and is passed in verbatim); this centralizes the `code`
-/// string so it is declared once instead of re-typed at each call site.
+/// which refusal family fired. The `code` is centralized here, declared once
+/// instead of re-typed at each call site; `message` is verb-supplied — each
+/// caller passes its own wording for what didn't resolve, and this
+/// constructor threads it through verbatim.
 pub fn target_refusal(family: TargetRefusalFamily, message: String) -> (&'static str, String) {
     (family.code(), message)
 }

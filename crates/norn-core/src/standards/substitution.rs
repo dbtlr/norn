@@ -314,11 +314,13 @@ type TransformFn = fn(&str) -> String;
 
 /// The single source of truth for the renderer's transform vocabulary.
 ///
-/// [`apply_transform`] dispatches through this table, and the
-/// `known_transforms_match_renderer_table` sync-pin test compares its names
-/// against [`crate::standards::template_refs::KNOWN_TRANSFORMS`]. Adding a
-/// transform is a single edit here (plus the matching name in
-/// `KNOWN_TRANSFORMS`, which the pin test enforces).
+/// [`apply_transform`] dispatches through this table, and
+/// [`crate::standards::template_refs::is_known_transform`] derives its
+/// answer directly from it — there is no separate name list to keep in
+/// sync. The `known_transforms_round_trip_through_renderer` test guards the
+/// round trip: every entry here both renders through [`render`] and is
+/// recognized by `is_known_transform`. Adding a transform is a single edit
+/// to this table.
 pub(crate) const TRANSFORMS: &[(&str, TransformFn)] = &[
     ("titlecase", titlecase),
     ("sentencecase", sentencecase),
