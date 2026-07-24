@@ -342,6 +342,46 @@ fn count_planned_links(change: &ApplyOp) -> usize {
     })
 }
 
+/// Run one structural change's backlink cascade and record it on `outcomes`:
+/// forecast against the index snapshot on a dry-run, apply against the live
+/// filesystem otherwise. Either way the resulting `rewritten` links are extended
+/// onto `outcomes.rewritten_links` and a `CascadeRecord` (with the plan's
+/// `planned` count) is pushed. The single source of the dry-run/apply cascade
+/// shape both `delete_pass` and `cascade_pass` build.
+///
+/// Returns `Err` ONLY when a live apply's rewrite pass itself failed (a dry-run
+/// and a successful apply both return `Ok`); nothing is recorded in that case, so
+/// the caller owns the structural op's fate — `delete_pass` aborts the delete,
+/// `cascade_pass` flips the already-landed move to failed.
+fn run_link_cascade(
+    env: &PassEnv,
+    change: &ApplyOp,
+    outcomes: &mut ApplyOutcomes,
+) -> Result<(), ApplyError> {
+    let planned = count_planned_links(change);
+    let outcome = if env.dry_run {
+        // Forecast the cascade against the index snapshot so the dry-run's
+        // rewritten/skipped counts match a same-snapshot apply (NRN-161) — same
+        // per-link classification, never the filesystem.
+        crate::standards::apply::forecast_link_rewrites(&env.index.documents, change)
+    } else {
+        let outcome = apply_link_rewrites(env.cwd, change)?;
+        if !outcome.rewritten.is_empty() {
+            outcomes.tracker.mark_wrote();
+        }
+        outcome
+    };
+    outcomes.rewritten_links.extend(outcome.rewritten.clone());
+    outcomes.cascades.push(CascadeRecord {
+        source_path: change.path.clone(),
+        planned,
+        rewritten: outcome.rewritten,
+        skipped: outcome.skipped,
+        failed: outcome.failed,
+    });
+    Ok(())
+}
+
 /// Re-attempt every failed backlink rewrite across all cascades, up to
 /// `backoff.len()` rounds, sleeping `backoff[round]` BEFORE each round. Recovered
 /// links move from `failed` to `rewritten`; survivors stay `failed`. Returns the
@@ -994,43 +1034,13 @@ fn delete_pass(
             }
         }
 
-        // Redirect backlinks (--rewrite-to), BEFORE the delete.
+        // Redirect backlinks (--rewrite-to), BEFORE the delete. A live-apply
+        // rewrite failure aborts the delete (the redirect is a precondition of a
+        // consistent delete); a dry-run and a successful apply record the cascade.
         if change.link_risk.is_some() {
-            let planned = count_planned_links(change);
-            if env.dry_run {
-                // Forecast the redirect cascade against the index snapshot so the
-                // dry-run's rewritten/skipped counts match a same-snapshot apply
-                // (NRN-161) — same per-link classification, never the filesystem.
-                let forecast =
-                    crate::standards::apply::forecast_link_rewrites(&env.index.documents, change);
-                outcomes.rewritten_links.extend(forecast.rewritten.clone());
-                outcomes.cascades.push(CascadeRecord {
-                    source_path: change.path.clone(),
-                    planned,
-                    rewritten: forecast.rewritten,
-                    skipped: forecast.skipped,
-                    failed: forecast.failed,
-                });
-            } else {
-                match apply_link_rewrites(env.cwd, change) {
-                    Ok(outcome) => {
-                        if !outcome.rewritten.is_empty() {
-                            outcomes.tracker.mark_wrote();
-                        }
-                        outcomes.rewritten_links.extend(outcome.rewritten.clone());
-                        outcomes.cascades.push(CascadeRecord {
-                            source_path: change.path.clone(),
-                            planned,
-                            rewritten: outcome.rewritten,
-                            skipped: outcome.skipped,
-                            failed: outcome.failed,
-                        });
-                    }
-                    Err(e) => {
-                        outcomes.tracker.failed(&change.change_id, &change.path, e);
-                        continue;
-                    }
-                }
+            if let Err(e) = run_link_cascade(env, change, outcomes) {
+                outcomes.tracker.failed(&change.change_id, &change.path, e);
+                continue;
             }
         }
 
@@ -1296,43 +1306,11 @@ fn cascade_pass(env: &PassEnv, plan: &ApplyBatch, outcomes: &mut ApplyOutcomes) 
         {
             continue;
         }
-        let planned = count_planned_links(change);
-        if env.dry_run {
-            // Forecast the move's backlink cascade against the index snapshot so
-            // the dry-run's rewritten/skipped counts match a same-snapshot apply
-            // (NRN-161) — same per-link classification, never the filesystem.
-            let forecast =
-                crate::standards::apply::forecast_link_rewrites(&env.index.documents, change);
-            outcomes.rewritten_links.extend(forecast.rewritten.clone());
-            outcomes.cascades.push(CascadeRecord {
-                source_path: change.path.clone(),
-                planned,
-                rewritten: forecast.rewritten,
-                skipped: forecast.skipped,
-                failed: forecast.failed,
-            });
-        } else {
-            match apply_link_rewrites(env.cwd, change) {
-                Ok(outcome) => {
-                    if !outcome.rewritten.is_empty() {
-                        outcomes.tracker.mark_wrote();
-                    }
-                    outcomes.rewritten_links.extend(outcome.rewritten.clone());
-                    outcomes.cascades.push(CascadeRecord {
-                        source_path: change.path.clone(),
-                        planned,
-                        rewritten: outcome.rewritten,
-                        skipped: outcome.skipped,
-                        failed: outcome.failed,
-                    });
-                }
-                Err(e) => {
-                    // The move landed but its declared cascade could not: the op
-                    // did not fully satisfy "move AND keep links consistent", so
-                    // it flips to failed (a truthful partial apply).
-                    outcomes.tracker.failed(&change.change_id, &change.path, e);
-                }
-            }
+        if let Err(e) = run_link_cascade(env, change, outcomes) {
+            // The move landed but its declared cascade could not: the op did not
+            // fully satisfy "move AND keep links consistent", so it flips to failed
+            // (a truthful partial apply). No `continue` — this is the loop tail.
+            outcomes.tracker.failed(&change.change_id, &change.path, e);
         }
     }
 }
@@ -1367,12 +1345,15 @@ fn retry_pass(
         } else {
             crate::domain::LinkKind::Markdown
         };
+        // Only real IO failures are retried; an unrepresentable target was skipped,
+        // never failed, so it never reaches here.
         crate::standards::apply::rewrite_one_backlink(
             env.cwd.as_path(),
             &f.file,
             &f.from,
             &f.to,
             &kind,
+            false,
         )
     });
     if !recovered.is_empty() {

@@ -79,7 +79,11 @@ pub enum ApplyOutcome {
     Applied,
     /// A dry-run preview that writes nothing: the report describes what a
     /// confirmed apply WOULD do, with the same applied/skipped/failed
-    /// classification a same-snapshot apply would produce (NRN-161) — exit 0.
+    /// classification a same-snapshot apply would produce for canonical-form
+    /// (norn-serialized) frontmatter (NRN-161) — exit 0. A backlinker whose
+    /// on-disk quoting deviates from canonical form can still classify differently
+    /// at apply (the snapshot has parsed the quoting away): most notably
+    /// over-optimistic — a forecast rewrite that apply skips.
     /// Distinct from `Applied` so a consumer keying on `outcome` alone tells a
     /// preview from a real write; the report's `dry_run: true` flag stays
     /// alongside as a direct convenience. A dry-run whose plan WOULD refuse still

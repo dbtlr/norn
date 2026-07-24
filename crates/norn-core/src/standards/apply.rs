@@ -109,6 +109,12 @@ pub enum ApplyError {
     #[error("move destination already exists: {destination}")]
     MoveDestinationExists { destination: Utf8PathBuf },
 
+    #[error("cannot move directory {src} into its own subtree {destination}")]
+    MoveDestinationInsideSource {
+        src: Utf8PathBuf,
+        destination: Utf8PathBuf,
+    },
+
     #[error("delete source missing: {path}")]
     DeleteSourceMissing { path: Utf8PathBuf },
 
@@ -193,6 +199,7 @@ impl ApplyError {
             ApplyError::MoveSourceMissing { .. } => "move-source-missing",
             ApplyError::MoveSourceIsSymlink { .. } => "move-source-is-symlink",
             ApplyError::MoveDestinationExists { .. } => "move-destination-exists",
+            ApplyError::MoveDestinationInsideSource { .. } => "move-destination-inside-source",
             ApplyError::DeleteSourceMissing { .. } => "delete-source-missing",
             ApplyError::DeleteSourceIsSymlink { .. } => "delete-source-is-symlink",
             ApplyError::ContentOpAfterVacate { .. } => "content-op-after-vacate",
@@ -233,7 +240,10 @@ impl ApplyError {
             | ApplyError::CreateDestinationExists { path }
             | ApplyError::CreateParentMissing { path }
             | ApplyError::CreateIgnoredPath { path } => Some(path.as_path()),
-            ApplyError::MoveDestinationExists { destination } => Some(destination.as_path()),
+            ApplyError::MoveDestinationExists { destination }
+            | ApplyError::MoveDestinationInsideSource { destination, .. } => {
+                Some(destination.as_path())
+            }
             ApplyError::Containment(inner) => Some(inner.target()),
             // The `malformed-plan` create faults carry no path (their messages
             // name none), matching the rest of the `malformed-plan` family.
@@ -284,6 +294,9 @@ impl ApplyError {
             | ApplyError::CreateIgnoredPath { .. }
             | ApplyError::CreateFrontmatterMalformed
             | ApplyError::CreateSerializeFailed { .. }
+            // A move-into-self is caught at plan expansion (index-only), before any
+            // write — the same pre-write posture as the containment gate.
+            | ApplyError::MoveDestinationInsideSource { .. }
             | ApplyError::Containment(_) => true,
             ApplyError::MissingNewValue { .. }
             | ApplyError::MoveSourceMissing { .. }
@@ -1227,7 +1240,9 @@ pub(crate) enum LinkAttempt {
 /// Read `source_path`, replace the affected backlink with `rewritten`, write it
 /// back via `atomic_write` (NRN-146: temp file + rename, the same crash-atomic
 /// guarantee as every other document write). Categorizes outcomes; never panics,
-/// never aborts.
+/// never aborts. The content-intrinsic verdict is [`plan_backlink_rewrite`]'s;
+/// this function owns only the filesystem outcomes around it.
+/// - unrepresentable new target -> Skipped(WouldCorruptWikilink), no read/write.
 /// - NotFound (read or write) -> Skipped(SourceMissing): the file moved on.
 /// - other io error on read   -> Failed(ReadFailed, detail)
 /// - other io error on write  -> Failed(WriteFailed, detail)
@@ -1248,16 +1263,32 @@ pub(crate) fn rewrite_one_backlink(
     raw: &str,
     rewritten: &str,
     kind: &crate::domain::LinkKind,
+    unrepresentable: bool,
 ) -> LinkAttempt {
     let abs = cwd.join(source_path);
-    let original = match fs::read_to_string(abs.as_std_path()) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return LinkAttempt::Skipped(LinkSkipReason::SourceMissing);
+    // An unrepresentable target is a content-free skip the classifier decides
+    // without the backlinker's bytes; every other verdict needs the current
+    // content, so read only when it matters (and let a missing/unreadable source
+    // become the filesystem-only outcome the plan cannot foresee).
+    let original = if unrepresentable {
+        String::new()
+    } else {
+        match fs::read_to_string(abs.as_std_path()) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return LinkAttempt::Skipped(LinkSkipReason::SourceMissing);
+            }
+            Err(e) => return LinkAttempt::Failed(LinkFailReason::ReadFailed, e.to_string()),
         }
-        Err(e) => return LinkAttempt::Failed(LinkFailReason::ReadFailed, e.to_string()),
     };
-    match plan_backlink_rewrite(source_path, &original, raw, rewritten, kind) {
+    match plan_backlink_rewrite(
+        source_path,
+        &original,
+        raw,
+        rewritten,
+        kind,
+        unrepresentable,
+    ) {
         BacklinkPlan::Skip(reason) => LinkAttempt::Skipped(reason),
         BacklinkPlan::Rewrite(updated) => match crate::apply::fsops::atomic_write(&abs, &updated) {
             Ok(()) => LinkAttempt::Rewritten,
@@ -1270,14 +1301,16 @@ pub(crate) fn rewrite_one_backlink(
 }
 
 /// The write-free classification of a single backlink rewrite, given the
-/// backlinker's CURRENT content — the shared decision both the apply path
-/// ([`rewrite_one_backlink`]) and the dry-run forecast
-/// ([`forecast_link_rewrites`]) route through, so a same-content apply and
-/// forecast reach the identical verdict by construction (NRN-161). Pure: no IO,
-/// no write. The only skip reasons it can produce are the ones intrinsic to the
-/// content+target pair (`Drifted`, `WouldCorruptFrontmatter`); the filesystem-
-/// only outcomes (`SourceMissing`, `Failed`) belong to the caller that owns the
-/// IO.
+/// backlinker's CURRENT content and whether the new target is representable — the
+/// shared decision both the apply path ([`rewrite_one_backlink`]) and the dry-run
+/// forecast ([`forecast_link_rewrites`]) route through, so a same-content apply
+/// and forecast reach the identical verdict for canonical-form frontmatter
+/// (NRN-161). Pure: no IO, no write. It owns every content-intrinsic skip: an
+/// `unrepresentable` new target (`WouldCorruptWikilink`, decided from the flag
+/// before any content is inspected), a link that no longer matches the content
+/// (`Drifted`), and a rewrite that would break the backlinker's frontmatter
+/// (`WouldCorruptFrontmatter`). The filesystem-only outcomes (`SourceMissing`,
+/// `Failed`) belong to the caller that owns the IO.
 pub(crate) enum BacklinkPlan {
     /// The rewrite is safe; carries the new full content to write.
     Rewrite(String),
@@ -1291,7 +1324,16 @@ pub(crate) fn plan_backlink_rewrite(
     raw: &str,
     rewritten: &str,
     kind: &crate::domain::LinkKind,
+    unrepresentable: bool,
 ) -> BacklinkPlan {
+    // A new target that cannot be represented as a wikilink target (it carries a
+    // `|`/`#`/`[`/`]` delimiter) is skipped rather than corrupted (NRN-424): the
+    // stale link remains, detectable by `validate` — the same recoverable posture
+    // as `WouldCorruptFrontmatter`. Content-free, so it precedes every content
+    // check and needs no bytes from the backlinker.
+    if unrepresentable {
+        return BacklinkPlan::Skip(LinkSkipReason::WouldCorruptWikilink);
+    }
     let updated = match kind {
         crate::domain::LinkKind::Wikilink | crate::domain::LinkKind::Embed => {
             let mut replaced = false;
@@ -1333,10 +1375,19 @@ pub(crate) fn plan_backlink_rewrite(
 /// input `verify_frontmatter_not_degraded` treats as having no rewritable
 /// mapping, so the forecast's frontmatter-degradation verdict matches apply's on a
 /// same-snapshot vault whose on-disk frontmatter is in norn's canonical form.
-/// On-disk frontmatter that deviates from that canonical form (a differently
-/// quoted scalar the index has already parsed away) is knowledge only the live
-/// bytes carry — an acknowledged inherent limit of a snapshot-only forecast,
-/// resolved when apply reads the real bytes.
+///
+/// Residual divergence, on-disk quoting that deviates from canonical form: the
+/// index has parsed the scalar's quoting away, so this reconstruction re-serializes
+/// it canonically (double-quoted), while apply splices the raw disk bytes. When the
+/// two quotings classify the rewrite differently the forecast diverges — and the
+/// dangerous direction is over-optimistic: a single-quoted on-disk value (norn-
+/// native state) whose rewrite target carries an apostrophe reconstructs to a
+/// double-quoted scalar that tolerates it (forecast: rewrite), while the raw single-
+/// quoted splice does not (apply: skip `would-corrupt-frontmatter`) — the forecast
+/// applies where apply skips. The mirror (forecast skips, apply lands — a target
+/// carrying a double-quote against a single-quoted value) is the pessimistic, less
+/// dangerous case. Both resolve when apply reads the real bytes; closing the gap
+/// needs the cache to retain the on-disk quoting style.
 fn reconstruct_backlinker_content(doc: &crate::domain::Document) -> String {
     match &doc.frontmatter {
         Some(serde_json::Value::Object(map)) => {
@@ -1353,8 +1404,11 @@ fn reconstruct_backlinker_content(doc: &crate::domain::Document) -> String {
 /// move/delete cascade against the GRAPH-INDEX SNAPSHOT (never the live
 /// filesystem), producing the `rewritten` / `skipped` buckets a same-snapshot
 /// apply would (NRN-161). It shares the exact per-link decision via
-/// [`plan_backlink_rewrite`], so the forecast's skip classification cannot drift
-/// from apply's.
+/// [`plan_backlink_rewrite`], so for canonical-form frontmatter the forecast's
+/// skip classification cannot drift from apply's. The one residual divergence is
+/// non-canonical on-disk quoting, which the snapshot has parsed away — see
+/// [`reconstruct_backlinker_content`] for the direction (over-optimistic:
+/// forecast rewrites where apply skips; or, less commonly, pessimistic).
 ///
 /// Boundary (NRN-161): only the two skip reasons a snapshot can KNOW are forecast
 /// here — `WouldCorruptWikilink` (the target is not a representable wikilink, a
@@ -1382,48 +1436,40 @@ pub fn forecast_link_rewrites(
         .chain(risk.path_qualified_wikilinks.iter())
         .chain(risk.markdown_links.iter());
     for affected in all {
-        // Snapshot-known skip: the new target cannot be represented as a wikilink
-        // (a pre-decided flag), so apply would skip it — forecast the same.
-        if affected.unrepresentable {
-            outcome.skipped.push(LinkSkipResult {
-                file: affected.source_path.clone(),
-                from: affected.raw.clone(),
-                to: affected.rewritten.clone(),
-                reason: LinkSkipReason::WouldCorruptWikilink,
-            });
-            continue;
-        }
         // Reconstruct the backlinker from the index; a source the snapshot does
         // not know (e.g. a self-referential link translated to a not-yet-created
-        // post-move path) is forecast optimistically as a rewrite — its real
-        // classification is a filesystem fact apply owns.
-        let Some(doc) = documents.iter().find(|d| d.path == affected.source_path) else {
-            outcome.rewritten.push(LinkRewriteResult {
-                file: affected.source_path.clone(),
-                from: affected.raw.clone(),
-                to: affected.rewritten.clone(),
-            });
-            continue;
-        };
-        let content = reconstruct_backlinker_content(doc);
+        // post-move path) reconstructs as empty, which the classifier reads as
+        // `Drifted` — forecast optimistically as a rewrite, its real classification
+        // a filesystem fact apply owns. An unrepresentable target overrides this:
+        // the classifier decides it before touching content.
+        let content = documents
+            .iter()
+            .find(|d| d.path == affected.source_path)
+            .map(reconstruct_backlinker_content)
+            .unwrap_or_default();
         match plan_backlink_rewrite(
             &affected.source_path,
             &content,
             &affected.raw,
             &affected.rewritten,
             &affected.kind,
+            affected.unrepresentable,
         ) {
-            BacklinkPlan::Skip(LinkSkipReason::WouldCorruptFrontmatter) => {
+            // The two content-intrinsic skips a snapshot can know are forecast as
+            // skips; `Drifted` (snapshot content lacks the planned raw) and
+            // `Rewrite` both forecast as a would-rewrite — drift is a
+            // filesystem-only fact, and a snapshot-consistent link would land.
+            BacklinkPlan::Skip(
+                reason @ (LinkSkipReason::WouldCorruptFrontmatter
+                | LinkSkipReason::WouldCorruptWikilink),
+            ) => {
                 outcome.skipped.push(LinkSkipResult {
                     file: affected.source_path.clone(),
                     from: affected.raw.clone(),
                     to: affected.rewritten.clone(),
-                    reason: LinkSkipReason::WouldCorruptFrontmatter,
+                    reason,
                 });
             }
-            // `Drifted` (snapshot content lacks the planned raw) and `Rewrite`
-            // both forecast as a would-rewrite: drift is a filesystem-only fact,
-            // and a snapshot-consistent link would land.
             _ => outcome.rewritten.push(LinkRewriteResult {
                 file: affected.source_path.clone(),
                 from: affected.raw.clone(),
@@ -1453,24 +1499,15 @@ pub fn apply_link_rewrites(
         .chain(risk.path_qualified_wikilinks.iter())
         .chain(risk.markdown_links.iter());
     for affected in all {
-        // A link whose new target is not representable as a wikilink is skipped
-        // rather than corrupted (NRN-424): the stale link remains, detectable by
-        // `validate` — the same recoverable posture as WouldCorruptFrontmatter.
-        if affected.unrepresentable {
-            outcome.skipped.push(LinkSkipResult {
-                file: affected.source_path.clone(),
-                from: affected.raw.clone(),
-                to: affected.rewritten.clone(),
-                reason: LinkSkipReason::WouldCorruptWikilink,
-            });
-            continue;
-        }
+        // The unrepresentable-target skip and every content-intrinsic verdict are
+        // owned by `plan_backlink_rewrite`, reached here via `rewrite_one_backlink`.
         match rewrite_one_backlink(
             cwd,
             &affected.source_path,
             &affected.raw,
             &affected.rewritten,
             &affected.kind,
+            affected.unrepresentable,
         ) {
             LinkAttempt::Rewritten => outcome.rewritten.push(LinkRewriteResult {
                 file: affected.source_path.clone(),
@@ -3368,6 +3405,7 @@ mod tests {
             "[[old]]",
             "[[new]]",
             &crate::domain::LinkKind::Wikilink,
+            false,
         );
         assert!(
             matches!(result, LinkAttempt::Rewritten),
@@ -3390,6 +3428,7 @@ mod tests {
             "[[absent]]",
             "[[whatever]]",
             &crate::domain::LinkKind::Wikilink,
+            false,
         );
         assert!(
             matches!(result2, LinkAttempt::Skipped(LinkSkipReason::Drifted)),
@@ -3418,6 +3457,7 @@ mod tests {
             "[[old]]",
             "[[new]]",
             &crate::domain::LinkKind::Wikilink,
+            false,
         );
         assert!(matches!(result, LinkAttempt::Rewritten));
         let content = std::fs::read_to_string(root.join(rel)).unwrap();
@@ -3444,6 +3484,7 @@ mod tests {
             "![[old|Display]]",
             "![[new|Display]]",
             &crate::domain::LinkKind::Embed,
+            false,
         );
         assert!(matches!(result, LinkAttempt::Rewritten));
         let content = std::fs::read_to_string(root.join(rel)).unwrap();
@@ -3471,6 +3512,7 @@ mod tests {
             "[[old]]",
             "[[new]]",
             &crate::domain::LinkKind::Wikilink,
+            false,
         );
         assert!(
             matches!(result, LinkAttempt::Rewritten),
@@ -3529,6 +3571,7 @@ mod tests {
             "[[old]]",
             "[[new]]",
             &crate::domain::LinkKind::Wikilink,
+            false,
         );
         assert!(
             matches!(result, LinkAttempt::Rewritten),
@@ -3583,6 +3626,7 @@ mod tests {
             "[[old]]",
             "[[new]]",
             &crate::domain::LinkKind::Wikilink,
+            false,
         );
 
         // Restore permissions so the tempdir's own cleanup can remove it.
