@@ -743,8 +743,15 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                             // `--format markdown` is the exact source file straight
                             // from disk (ADR 0014) — the OWNER reads it (it holds the
                             // vault root and is co-located with the vault; a future
-                            // off-filesystem client could not). Only the single-doc
-                            // case reads; 0 / >1 selected is the CLI's error to render.
+                            // off-filesystem client could not). The multi-selection
+                            // guard already ran in `execute` (NRN-460): a >1-selected
+                            // request already carries its own error note by the time
+                            // this runs, so `read_markdown_source` only performs the
+                            // single-doc read. Both surfaces routed through this seam
+                            // — CLI and MCP — see the same refusal signal (exit 1 /
+                            // `isError: true` driven by that note); their payloads
+                            // still differ (the CLI prints no document data on
+                            // refusal, MCP returns the resolved records unconditionally).
                             if params.markdown {
                                 read_markdown_source(cache, &mut report);
                             }
@@ -1178,9 +1185,15 @@ fn classify_mutation<R>(
 }
 
 /// Fill `markdown_content` with the exact source bytes for a single-doc
-/// `--format markdown` request. A read failure becomes an `error`-severity note
-/// (the CLI exits 1 on it) rather than a cache fault — the db is intact; the file
-/// just could not be read.
+/// `--format markdown` request. The multi-selection guard (NRN-460) lives in
+/// `norn_core::read::get::execute` (co-located with the sort/paging skip it
+/// depends on), so by the time this runs `report.records.len() > 1` has already
+/// pushed its own `format-markdown-multi-selection` error note and left
+/// `markdown_content` untouched; this function only performs the single-doc
+/// read. A read failure becomes an `error`-severity note (a read verb's exit-1 /
+/// `isError: true` signal) rather than a cache fault — the db is intact; the
+/// file just could not be read. Zero resolved is left to the per-target
+/// `target-not-found` notes `execute` already pushed.
 fn read_markdown_source(cache: &norn_core::cache::Cache, report: &mut norn_wire::GetReport) {
     if report.records.len() != 1 {
         return;

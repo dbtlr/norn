@@ -354,6 +354,50 @@ mod tests {
     }
 
     #[test]
+    fn markdown_multi_selection_note_projects_to_is_error_with_no_markdown_field() {
+        // NRN-460: the multi-selection guard rides as a `format-markdown-multi-selection`
+        // error note on the wire report — `envelope` must still map that to
+        // `isError: true` with no `markdown` field, while the resolved records
+        // (both of them) stay in the structured content.
+        use rmcp::handler::server::tool::IntoCallToolResult;
+
+        let params = GetParams {
+            targets: vec!["a.md".into(), "b.md".into()],
+            format: GetRepresentation::Markdown,
+            ..Default::default()
+        };
+        let report = GetReport {
+            records: vec![record(Some(json!({}))), record(Some(json!({})))],
+            notes: vec![Note::error(
+                "format-markdown-multi-selection",
+                "--format markdown returns a single document; 2 selected \
+                 — request one target at a time",
+            )],
+            markdown_content: None,
+        };
+
+        let env = envelope(&params, report);
+        let result = env.into_call_tool_result().unwrap();
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "a multi-selection refusal note must set isError"
+        );
+        let sc = result
+            .structured_content
+            .expect("the structured content survives the error path");
+        assert!(
+            sc.get("markdown").is_none(),
+            "no markdown field on a refused multi-selection, got {sc:?}"
+        );
+        assert_eq!(
+            sc["records"].as_array().map(Vec::len),
+            Some(2),
+            "both resolved records still ride the envelope, got {sc:?}"
+        );
+    }
+
+    #[test]
     fn unknown_param_key_is_rejected() {
         // B3: the param struct denies unknown keys, so an MCP client typo
         // (`target` vs the `targets` array) fails loudly instead of silently

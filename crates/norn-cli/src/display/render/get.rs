@@ -68,8 +68,12 @@ pub(crate) fn render_get(
     render_outcome(result, conv.writer())
 }
 
-/// `--format markdown`: the exact source bytes. Errors
-/// unless exactly one document resolved; `--col`/`--section` are ignored (warned).
+/// `--format markdown`: the exact source bytes. Refuses unless exactly one
+/// document resolved; `--col`/`--section` are ignored (warned). The refusal
+/// itself is an `error`-severity [`Note`](norn_wire::Note) pushed by the engine
+/// (NRN-460, `norn_core::read::get::execute`) — every routed surface (CLI, MCP)
+/// carries the same note, so this renderer only prints it and derives its exit
+/// code from [`has_error`]; it owns no refusal text of its own.
 fn render_get_markdown(view: &GetView, out: &mut dyn Write, conv: &mut Conversation<'_>) -> i32 {
     let result: io::Result<i32> = (|| {
         warn_col_ignored(&view.cols, Some("markdown"), conv)?;
@@ -80,24 +84,12 @@ fn render_get_markdown(view: &GetView, out: &mut dyn Write, conv: &mut Conversat
 
         if let Some(content) = &view.report.markdown_content {
             write!(out, "{content}")?;
-            return Ok(if has_error(&view.report) {
-                EXIT_OPERATIONAL
-            } else {
-                EXIT_OK
-            });
         }
 
-        Ok(match view.report.records.len() {
-            // Zero resolved, or one resolved but no content (source-read
-            // failure): the per-target `error:` notes are already printed.
-            0 | 1 => EXIT_OPERATIONAL,
-            n => {
-                conv.error(&format!(
-                    "--format markdown returns a single document; {n} selected \
-                     — request one target at a time"
-                ))?;
-                EXIT_OPERATIONAL
-            }
+        Ok(if has_error(&view.report) {
+            EXIT_OPERATIONAL
+        } else {
+            EXIT_OK
         })
     })();
 
