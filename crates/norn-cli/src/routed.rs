@@ -360,9 +360,10 @@ mod tests {
         // — this is the one diagnostic surfacing that override.
         let both = global_args(Some("/some/vault"), Some("atlas"));
         let warning = selector_precedence_warning(&both).expect("both given must warn");
-        assert!(warning.starts_with("warning: "));
-        assert!(warning.contains("--vault atlas"));
-        assert!(warning.contains("-C"));
+        assert_eq!(
+            warning,
+            "warning: --vault atlas is overridden by -C/--cwd (the explicit path always wins)"
+        );
 
         assert!(selector_precedence_warning(&global_args(Some("/some/vault"), None)).is_none());
         assert!(selector_precedence_warning(&global_args(None, Some("atlas"))).is_none());
