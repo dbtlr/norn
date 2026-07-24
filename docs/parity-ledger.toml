@@ -897,7 +897,7 @@ decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 # report.rs` (`ApplyOutcome::Forecast`) and `crates/norn-core/src/apply/
 # executor.rs`.
 [[entry]]
-id = "PD-142"
+id = "PD-143"
 surface = "move/delete/rewrite-wikilink/apply forecast outcome (ApplyOutcome::Forecast — cascade dry-run reports outcome: forecast)"
 cases = ["mutate-move-dry-run-json-zoo", "apply-authored-add-frontmatter-plan-dry-run-json-zoo", "mcp-tools-call-move-forecast-zoo", "mcp-tools-call-delete-forecast-zoo"]
 old = "a cascade-verb (`move` / `delete` / `rewrite-wikilink` / `apply`) dry-run reports `outcome: applied` alongside `dry_run: true` — a consumer keying on `outcome` sees a preview as a completed write, and preview detection is per-verb-family (`forecast` for `set`/`new`/`edit`, `dry_run` for the cascade verbs)"
