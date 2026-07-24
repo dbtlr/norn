@@ -1,8 +1,8 @@
 //! Expand a high-level `rewrite_wikilink` op into body-rewrite ops + frontmatter-update ops.
 //!
 //! Graph-aware: `classify_link_risk` identifies body matches (stem-only +
-//! path-qualified + alias-resolved). A frontmatter walker identifies fields
-//! whose value is the old wikilink target and emits `set_frontmatter` ops.
+//! path-qualified). A frontmatter walker identifies fields whose value is the
+//! old wikilink target and emits `set_frontmatter` ops.
 //!
 //! Pre-flight: refuses if `old` does not resolve to any document in the vault.
 //!

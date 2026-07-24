@@ -72,7 +72,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{anyhow, Result};
 
-use crate::standards::{ValidateConfig, VaultConfig};
+use crate::standards::ValidateConfig;
 
 /// Split an assignment/predicate token into `(key, value)` at the FIRST `:` or
 /// `=`, whichever comes first (ADR 0010 separator forgiveness, T1). Returns
@@ -715,17 +715,14 @@ pub fn gate_dynamic_fields(
     Ok(())
 }
 
-/// Frontmatter field names declared anywhere in the validate config, plus the
-/// configured link alias field — the vault-model half of the dynamic-predicate
-/// field universe. The observed-frontmatter half (indexed keys) is supplied by
-/// the cache engine and unioned in by the caller (see the clap-derivation seam
-/// note on the deferred `field_universe`).
+/// Frontmatter field names declared anywhere in the validate config — the
+/// vault-model half of the dynamic-predicate field universe. The
+/// observed-frontmatter half (indexed keys, which already covers a document's
+/// `aliases` entry) is supplied by the cache engine and unioned in by the
+/// caller (see the clap-derivation seam note on the deferred `field_universe`).
 ///
 /// Covers declared-but-not-yet-present fields so a query for them is not a typo.
-pub fn schema_field_names(
-    validate: &ValidateConfig,
-    vault_config: &VaultConfig,
-) -> BTreeSet<String> {
+pub fn schema_field_names(validate: &ValidateConfig) -> BTreeSet<String> {
     let mut fields = BTreeSet::new();
     fields.extend(validate.required_frontmatter.iter().cloned());
     for rule in &validate.rules {
@@ -741,11 +738,6 @@ pub fn schema_field_names(
         // Omitting them false-rejects a valid `find --type note` on a schema
         // that gates rules by a field it never lists as managed.
         fields.extend(rule.r#match.frontmatter.keys().cloned());
-    }
-    // R2b: the configured link alias field (e.g. `aliases`) is a first-class
-    // vault field even when no rule mentions it and no document carries it yet.
-    if let Some(alias) = &vault_config.links.alias_field {
-        fields.insert(alias.clone());
     }
     fields
 }
@@ -1179,10 +1171,10 @@ mod tests {
         }
     }
 
-    // ── R2: field universe includes match-selector keys + alias_field ──────
+    // ── R2: field universe includes match-selector keys ────────────────────
     #[test]
-    fn schema_fields_include_match_selector_and_alias_field() {
-        use crate::standards::{ValidateRule, VaultConfig};
+    fn schema_fields_include_match_selector_keys() {
+        use crate::standards::ValidateRule;
 
         let mut rule = ValidateRule::default();
         rule.r#match
@@ -1191,17 +1183,10 @@ mod tests {
         let mut validate = ValidateConfig::default();
         validate.rules.push(rule);
 
-        let mut vault_config = VaultConfig::default();
-        vault_config.links.alias_field = Some("aliases".to_string());
-
-        let fields = schema_field_names(&validate, &vault_config);
+        let fields = schema_field_names(&validate);
         assert!(
             fields.contains("kind"),
             "match-selector key missing: {fields:?}"
-        );
-        assert!(
-            fields.contains("aliases"),
-            "alias_field missing: {fields:?}"
         );
     }
 }

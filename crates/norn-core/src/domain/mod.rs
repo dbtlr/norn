@@ -122,6 +122,11 @@ pub struct Document {
     pub diagnostics: Vec<Diagnostic>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub aliases: Vec<String>,
+    /// Non-scalar entries found in the configured `links.alias_field` list
+    /// (e.g. a nested map or sequence). Populated by `graph::parse_aliases` for
+    /// cache-shape stability, but consumed by nothing: the validate finding it
+    /// once fed (`frontmatter-alias-malformed`) was retired with alias
+    /// resolution (NRN-455), and no repair rule or other reader inspects it.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub alias_malformed: Vec<Value>,
 }
