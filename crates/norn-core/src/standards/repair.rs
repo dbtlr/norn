@@ -355,7 +355,16 @@ fn handle_alias_match(
     };
     // Stem-uniqueness gate: the candidate stem must itself resolve to exactly
     // one document, or the rewrite trades a dangling link for an ambiguous one.
-    if stem_counts.get(candidate_stem).copied().unwrap_or(0) != 1 {
+    // Case-folded to mirror the resolver, which keys stems lowercased
+    // (links/resolve.rs `by_stem` on `to_lowercase`) — two stems differing only
+    // by case (e.g. `notes/beta.md` and `archive/Beta.md`) resolve to the same
+    // ambiguous target there, so the uniqueness gate must fold case too.
+    if stem_counts
+        .get(&candidate_stem.to_lowercase())
+        .copied()
+        .unwrap_or(0)
+        != 1
+    {
         return None;
     }
     let document_hash = document_hashes.get(&finding.path).cloned()?;
@@ -562,9 +571,12 @@ pub fn plan_repairs(
     }
     // How many documents share each stem, so the alias-hint can require its
     // candidate stem to resolve to exactly one document (see handle_alias_match).
+    // Keyed lowercased, mirroring the resolver (links/resolve.rs `by_stem` on
+    // `to_lowercase`): stems differing only by case are the same resolver
+    // target, so they must count as shared here too.
     let mut stem_counts: BTreeMap<String, u32> = BTreeMap::new();
     for doc in &index.documents {
-        *stem_counts.entry(doc.stem.clone()).or_insert(0) += 1;
+        *stem_counts.entry(doc.stem.to_lowercase()).or_insert(0) += 1;
     }
 
     let mut changes = Vec::new();
@@ -1538,6 +1550,44 @@ mod tests {
                 .and_then(Value::as_str)
                 != Some("built-in:alias-stem")),
             "no alias-stem op when the candidate stem is shared by another document"
+        );
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(
+            result.skipped[0].skip_reason,
+            SkipReason::LinkDecisionNeeded
+        );
+    }
+
+    #[test]
+    fn alias_hint_skips_when_candidate_stem_is_shared_by_case_variant_document() {
+        // NRN-455 fix: `bee` uniquely resolves to `beta.md` via alias, but the
+        // stem `beta` is ALSO carried by `archive/Beta.md` — differing only by
+        // case. The resolver folds stems to lowercase (links/resolve.rs
+        // `by_stem`), so these two count as the SAME stem there; rewriting to
+        // `beta` would trade a dangling link for one the resolver treats as
+        // ambiguous. No hint is proposed; the link stays dangling (skipped, no
+        // fuzzy match here either).
+        let finding = finding_link_unresolved("src.md", "bee");
+        let config = RepairConfig { rules: vec![] };
+        let index = index_with_aliases(&[
+            ("src.md", &[]),
+            ("beta.md", &["bee"]),
+            ("archive/Beta.md", &[]),
+        ]);
+        let result = plan_repairs(
+            vault_root(),
+            RepairPlanFilters::default(),
+            vec![finding],
+            &config,
+            &index,
+        );
+        assert!(
+            result.plan.operations.iter().all(|op| op
+                .fields
+                .get("repair_rule")
+                .and_then(Value::as_str)
+                != Some("built-in:alias-stem")),
+            "no alias-stem op when the candidate stem is shared by a case-variant document"
         );
         assert_eq!(result.skipped.len(), 1);
         assert_eq!(
