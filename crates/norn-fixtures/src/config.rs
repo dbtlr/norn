@@ -146,6 +146,14 @@ validate:
       field_types:
         scratch: { type: string, indexed: false }
 
+    - name: validate-edge
+      match:
+        path: "shapes/validate-edge/**"
+      field_types:
+        tags: list_of_strings
+      allowed_values:
+        tags: [a, b]
+
 repair:
   rules:
     - name: fix-task-status

@@ -111,6 +111,20 @@ pub(crate) fn check_forbidden_frontmatter(
         .collect()
 }
 
+/// `allowed_values` matches an array field ELEMENT-WISE, one finding per
+/// violating element, via `mutate::coerce::matches_one_allowed` — the same
+/// non-recursive scalar-match core the write path's `value_in_allowed` uses
+/// for its own array arm, shared here rather than mirrored so the two engines
+/// cannot drift. A scalar field matches whole (one finding if the value isn't
+/// in the set). Config already rejects a non-scalar `allowed_values` entry
+/// (`standards::config`'s scalar-only check), so element-wise is the only
+/// coherent semantics for a list-valued field — matching it as a whole
+/// against a set of scalars could never succeed. An empty array yields no
+/// findings (there is no element to violate the set); a mixed array flags
+/// only its invalid elements, each as its own finding carrying that element's
+/// value (mirroring `check_field_references`' per-violating-item granularity
+/// for a list-valued field). An element that is itself an array (nested)
+/// never matches a scalar allowed entry and is always flagged.
 pub(crate) fn check_allowed_values(
     document: &Document,
     values: &HashMap<String, Vec<Value>>,
@@ -119,26 +133,41 @@ pub(crate) fn check_allowed_values(
     // Sorted for deterministic finding order.
     let mut values: Vec<_> = values.iter().collect();
     values.sort_by(|a, b| a.0.cmp(b.0));
-    values
-        .into_iter()
-        .filter_map(|(field, allowed_values)| {
-            let actual = crate::standards::predicates::document_frontmatter_field(document, field)?;
-            if allowed_values
-                .iter()
-                .any(|av| crate::standards::predicates::frontmatter_value_matches(actual, av))
-            {
-                None
-            } else {
-                Some(Finding::frontmatter_disallowed_value(
-                    document.path.clone(),
-                    rule.map(str::to_string),
-                    field.clone(),
-                    actual.clone(),
-                    allowed_values.clone(),
-                ))
+    let mut findings = Vec::new();
+    for (field, allowed_values) in values {
+        let Some(actual) =
+            crate::standards::predicates::document_frontmatter_field(document, field)
+        else {
+            continue;
+        };
+        match actual {
+            Value::Array(items) => {
+                for item in items {
+                    if !crate::mutate::coerce::matches_one_allowed(item, allowed_values) {
+                        findings.push(Finding::frontmatter_disallowed_value(
+                            document.path.clone(),
+                            rule.map(str::to_string),
+                            field.clone(),
+                            item.clone(),
+                            allowed_values.clone(),
+                        ));
+                    }
+                }
             }
-        })
-        .collect()
+            scalar => {
+                if !crate::mutate::coerce::value_in_allowed(scalar, allowed_values) {
+                    findings.push(Finding::frontmatter_disallowed_value(
+                        document.path.clone(),
+                        rule.map(str::to_string),
+                        field.clone(),
+                        scalar.clone(),
+                        allowed_values.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    findings
 }
 
 /// Non-compiled allowed-path check, retained for the `#[cfg(test)]` per-rule
@@ -502,6 +531,94 @@ mod tests {
         let doc = doc_with_frontmatter(json!({"status": 12345}));
         let findings = check_field_types(&doc, &types, None);
         assert!(findings.is_empty());
+    }
+
+    fn allowed_values(field: &str, allowed_yaml: &str) -> HashMap<String, Vec<Value>> {
+        let yaml = format!(
+            "validate:\n  rules:\n    - name: r\n      allowed_values:\n        {field}:\n{allowed_yaml}"
+        );
+        let cfg = crate::standards::parse_config(&yaml, camino::Utf8Path::new("fixture.yaml"))
+            .expect("config should parse");
+        cfg.validate.rules[0].allowed_values.clone()
+    }
+
+    #[test]
+    fn list_field_with_only_valid_elements_produces_no_findings() {
+        // The headline false-positive fix: a list value whose every element is
+        // allowed must not be flagged just because the field itself is an array.
+        let allowed = allowed_values("tags", "          - a\n          - b\n");
+        let doc = doc_with_frontmatter(json!({"tags": ["a"]}));
+        let findings = check_allowed_values(&doc, &allowed, None);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn list_field_mixed_valid_invalid_flags_only_invalid_elements() {
+        let allowed = allowed_values("tags", "          - a\n          - b\n");
+        let doc = doc_with_frontmatter(json!({"tags": ["a", "bogus", "b", "also-bogus"]}));
+        let findings = check_allowed_values(&doc, &allowed, None);
+        assert_eq!(findings.len(), 2);
+        for finding in &findings {
+            assert_eq!(finding.code, "value-not-allowed");
+            assert_eq!(finding.field.as_deref(), Some("tags"));
+        }
+        let flagged: Vec<&str> = findings
+            .iter()
+            .map(|f| f.actual_value.as_ref().and_then(|v| v.as_str()).unwrap())
+            .collect();
+        assert_eq!(flagged, vec!["bogus", "also-bogus"]);
+    }
+
+    #[test]
+    fn nested_array_element_rejected_by_both_validate_and_mutation() {
+        // The per-element loop used to call the RECURSIVE `value_in_allowed`
+        // per element, so a nested-array element ([[a, b]]) was itself
+        // unpacked and matched element-wise — quietly ACCEPTED — while
+        // mutation's whole-value `value_in_allowed` call REJECTS the same
+        // field value. Both engines now share the non-recursive
+        // `matches_one_allowed` helper, so a nested-array element is rejected
+        // identically on both paths.
+        let allowed = allowed_values("tags", "          - a\n          - b\n");
+        let doc = doc_with_frontmatter(json!({"tags": [["a", "b"]]}));
+
+        let findings = check_allowed_values(&doc, &allowed, None);
+        assert_eq!(findings.len(), 1, "validate flags the nested-array element");
+        assert_eq!(findings[0].code, "value-not-allowed");
+        assert_eq!(findings[0].field.as_deref(), Some("tags"));
+
+        let allowed_values_vec = allowed.get("tags").expect("tags entry present");
+        assert!(
+            !crate::mutate::coerce::value_in_allowed(&json!([["a", "b"]]), allowed_values_vec),
+            "mutation refuses the same nested-array value"
+        );
+    }
+
+    #[test]
+    fn empty_array_produces_no_findings() {
+        let allowed = allowed_values("tags", "          - a\n          - b\n");
+        let doc = doc_with_frontmatter(json!({"tags": []}));
+        let findings = check_allowed_values(&doc, &allowed, None);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn scalar_field_valid_value_produces_no_findings() {
+        let allowed = allowed_values("status", "          - backlog\n          - active\n");
+        let doc = doc_with_frontmatter(json!({"status": "active"}));
+        let findings = check_allowed_values(&doc, &allowed, None);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn scalar_field_invalid_value_is_flagged_whole() {
+        let allowed = allowed_values("status", "          - backlog\n          - active\n");
+        let doc = doc_with_frontmatter(json!({"status": "bogus"}));
+        let findings = check_allowed_values(&doc, &allowed, None);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].actual_value.as_ref().and_then(|v| v.as_str()),
+            Some("bogus")
+        );
     }
 
     fn doc_with_path(path: &str) -> Document {

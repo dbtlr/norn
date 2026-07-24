@@ -260,17 +260,25 @@ pub fn lookup_allowed_values(cfg: &VaultConfig, doc: &Document, field: &str) -> 
     None
 }
 
+/// Does `value` itself match one entry of `allowed`? Non-recursive: a nested
+/// array never matches a scalar allowed entry, so a nested-array element is
+/// always rejected here rather than being unpacked and matched element-wise.
+/// Shared by [`value_in_allowed`]'s array arm and `standards::checks`'
+/// per-element loop so both engines reject a nested-array element the same
+/// way.
+pub(crate) fn matches_one_allowed(value: &Value, allowed: &[Value]) -> bool {
+    allowed
+        .iter()
+        .any(|a| crate::standards::predicates::frontmatter_value_matches(value, a))
+}
+
 /// Does `value` satisfy the `allowed` set? Scalars match one entry; arrays
-/// require every element to match.
+/// require every element to match one entry (an element that is itself an
+/// array never matches, since [`matches_one_allowed`] doesn't recurse).
 pub fn value_in_allowed(value: &Value, allowed: &[Value]) -> bool {
-    let matches_one = |v: &Value| {
-        allowed
-            .iter()
-            .any(|a| crate::standards::predicates::frontmatter_value_matches(v, a))
-    };
     match value {
-        Value::Array(items) => items.iter().all(matches_one),
-        scalar => matches_one(scalar),
+        Value::Array(items) => items.iter().all(|item| matches_one_allowed(item, allowed)),
+        scalar => matches_one_allowed(scalar, allowed),
     }
 }
 

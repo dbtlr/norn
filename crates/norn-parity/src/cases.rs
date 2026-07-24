@@ -411,6 +411,29 @@ const VALIDATE_CASES: &[Case] = &[
         normalize: NO_NORM,
         plan: None,
     },
+    // NRN-429: `allowed_values` on a `list_of_strings` field now matches
+    // ELEMENT-WISE, matching `set`'s own `coerce::value_in_allowed` decision.
+    // The lone doc on the `validate-edge` profile carries `tags: [a]` against
+    // an `allowed_values: [a, b]` set — every element allowed. The pinned
+    // oracle's whole-array match never succeeds against a set of scalars
+    // (`frontmatter_value_matches` has no `(Array, String)` arm) and flags
+    // this fully-valid value `value-not-allowed`; the rewrite reports the
+    // vault clean. A single doc, single finding (oracle side) — deterministic
+    // without the raw-order caveat bare `--format json` otherwise carries.
+    // DIVERGES; pinned by PD-147.
+    Case {
+        id: "validate-list-allowed-values-elementwise",
+        argv: &["validate", "--format", "json"],
+        fixture: VALIDATE_EDGE_1,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("shapes/validate-edge/tags-elementwise.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
 ];
 
 /// `repair` ports as a READ verb (NRN-382): findings → `MigrationPlan`, never
@@ -2026,6 +2049,16 @@ const SECTION_EDGE_1: Fixture = Fixture {
 /// never touch a shared zoo/clean case (the section-edge discipline).
 const WIKILINK_EDGE_1: Fixture = Fixture {
     profile_name: "wikilink-edge",
+    seed: 1,
+};
+
+/// The validate-edge fixture (NRN-429): the valid zoo plus the element-wise
+/// `allowed_values` probe (`shapes/validate-edge/tags-elementwise.md`),
+/// isolated on the `validate-edge` profile so the decided divergence never
+/// touches a shared zoo/clean case (the text-edge / mutate-edge / section-edge
+/// / wikilink-edge discipline).
+const VALIDATE_EDGE_1: Fixture = Fixture {
+    profile_name: "validate-edge",
     seed: 1,
 };
 

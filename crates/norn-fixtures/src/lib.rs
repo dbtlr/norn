@@ -73,6 +73,11 @@ pub struct Profile {
     /// (NRN-424 / NRN-431/432/433). Kept off every shared profile so the decided
     /// wikilink-rewriter corruption fixes never perturb zoo/clean parity.
     pub wikilink_edge: bool,
+    /// Emit the validate-edge docs (`crate::zoo::validate_edge_docs`) — the
+    /// isolated element-wise `allowed_values` probe (NRN-429). Kept off every
+    /// shared profile so the decided divergence never perturbs zoo/clean
+    /// parity.
+    pub validate_edge: bool,
 }
 
 /// The named profiles, in fixed order — the single source for `by_name`,
@@ -93,6 +98,7 @@ const PROFILES: &[Profile] = &[
         mutate_edge: false,
         section_edge: false,
         wikilink_edge: false,
+        validate_edge: false,
     },
     // Zoo without violations, plus ~60 expansion docs. Invariant: the oracle's
     // `validate` reports zero findings against this profile.
@@ -110,6 +116,7 @@ const PROFILES: &[Profile] = &[
         mutate_edge: false,
         section_edge: false,
         wikilink_edge: false,
+        validate_edge: false,
     },
     // Zoo including violations, plus ~120 expansion docs at elevated
     // violation/broken-link ratios.
@@ -127,6 +134,7 @@ const PROFILES: &[Profile] = &[
         mutate_edge: false,
         section_edge: false,
         wikilink_edge: false,
+        validate_edge: false,
     },
     // Zoo without violations, plus ~200 densely-linked docs across deep, wide
     // folders.
@@ -144,6 +152,7 @@ const PROFILES: &[Profile] = &[
         mutate_edge: false,
         section_edge: false,
         wikilink_edge: false,
+        validate_edge: false,
     },
     // Zoo without violations, plus 1000 expansion docs at moderate settings.
     Profile {
@@ -160,6 +169,7 @@ const PROFILES: &[Profile] = &[
         mutate_edge: false,
         section_edge: false,
         wikilink_edge: false,
+        validate_edge: false,
     },
     // The valid zoo plus the text-layer edge probes (NRN-349 / NRN-350) — no
     // expansion, no violations. Dedicated to the BOM / code-opacity parity cases
@@ -178,6 +188,7 @@ const PROFILES: &[Profile] = &[
         mutate_edge: false,
         section_edge: false,
         wikilink_edge: false,
+        validate_edge: false,
     },
     // The valid zoo doc tree under a deliberately-INVALID `.norn/config.yaml`.
     // Dedicated to the malformed-config error-surface parity case (NRN-361): the
@@ -197,6 +208,7 @@ const PROFILES: &[Profile] = &[
         mutate_edge: false,
         section_edge: false,
         wikilink_edge: false,
+        validate_edge: false,
     },
     // The valid zoo doc tree plus the mutation-edge probes (NRN-371) — no
     // expansion, no violations. Dedicated to the null-/comment-only frontmatter
@@ -216,6 +228,7 @@ const PROFILES: &[Profile] = &[
         mutate_edge: true,
         section_edge: false,
         wikilink_edge: false,
+        validate_edge: false,
     },
     // The valid zoo doc tree plus the section-edge probes (NRN-437) — no
     // expansion, no violations. Dedicated to the SETEXT / heading-at-EOF section
@@ -235,6 +248,7 @@ const PROFILES: &[Profile] = &[
         mutate_edge: false,
         section_edge: true,
         wikilink_edge: false,
+        validate_edge: false,
     },
     // The valid zoo doc tree plus the wikilink-edge probes (NRN-424) — no
     // expansion, no violations. Dedicated to the embed / code-fence-shadow /
@@ -255,6 +269,27 @@ const PROFILES: &[Profile] = &[
         mutate_edge: false,
         section_edge: false,
         wikilink_edge: true,
+        validate_edge: false,
+    },
+    // The valid zoo plus the validate-edge probe (NRN-429) — no expansion, no
+    // violations. Dedicated to the element-wise `allowed_values` parity case so
+    // the decided divergence stays off every shared fixture (mirrors the other
+    // -edge profiles).
+    Profile {
+        name: "validate-edge",
+        violations: false,
+        expansion_docs: 0,
+        folder_depth: 0,
+        folder_width: 0,
+        max_links_per_doc: 0,
+        broken_link_per_mille: 0,
+        violation_per_mille: 0,
+        text_edge: false,
+        malformed_config: false,
+        mutate_edge: false,
+        section_edge: false,
+        wikilink_edge: false,
+        validate_edge: true,
     },
 ];
 
@@ -533,6 +568,23 @@ pub fn generate(profile: &Profile, seed: u64, out_dir: &Path) -> io::Result<Mani
 
     if profile.wikilink_edge {
         for doc in zoo::wikilink_edge_docs() {
+            write_rel(
+                out_dir,
+                doc.path,
+                doc.content.as_bytes(),
+                &mut dirs,
+                &mut files,
+            )?;
+            docs.push(DocEntry {
+                path: doc.path.to_string(),
+                tier: doc.tier,
+                codes: &[],
+            });
+        }
+    }
+
+    if profile.validate_edge {
+        for doc in zoo::validate_edge_docs() {
             write_rel(
                 out_dir,
                 doc.path,
