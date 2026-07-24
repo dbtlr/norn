@@ -112,7 +112,15 @@ fn scan_rs<F: FnMut(&Path, &str)>(dir: &Path, visit: &mut F) {
 /// text (`"warning: ..."`) and print `Debug` in failure messages (`{err:?}`);
 /// neither is an emission site, so invariants 2 and 3 only scan what actually
 /// ships.
-fn production_source(text: &str) -> String {
+///
+/// When `cfg_test_item_end` cannot locate the item's end, this panics naming
+/// `path` and the byte offset rather than silently stopping the scan: a
+/// silent stop would drop every byte after that point from the
+/// production-code scan invariants 2 and 3 run — a false pass in the
+/// dangerous direction. A panic here means the guard test fails loudly
+/// instead, which is the correct outcome for a source shape the scanner
+/// cannot parse.
+fn production_source(path: &Path, text: &str) -> String {
     let mut kept = String::with_capacity(text.len());
     let mut rest = text;
     loop {
@@ -124,10 +132,18 @@ fn production_source(text: &str) -> String {
         let after_attr = idx + "#[cfg(test)]".len();
         match cfg_test_item_end(rest, after_attr) {
             Some(end) => rest = &rest[end..],
-            // No item (brace block or `;`-terminated statement) follows the
-            // attribute — nothing left that is safely known to be
-            // production, so stop here (the old conservative behavior).
-            None => break,
+            None => {
+                let offset = text.len() - rest.len() + after_attr;
+                panic!(
+                    "typed_severity_guard: {}: byte {offset} — could not locate the end \
+                     (matching `}}` or `;`) of the #[cfg(test)] item starting there; the \
+                     item-span scanner does not recognize this source shape. Extend \
+                     `cfg_test_item_end` / `skip_lexical_token` to cover it rather than let \
+                     this silently drop the remainder of the file from the production-code \
+                     scan.",
+                    path.display()
+                );
+            }
         }
     }
     kept
@@ -137,70 +153,49 @@ fn production_source(text: &str) -> String {
 /// (found at `from`, right after the attribute) annotates: the matching `}`
 /// of its first `{...}` block (`mod`/`fn`/`struct`/`impl`/…), or the `;` of a
 /// brace-free statement item (`use`/`const`/…) — whichever delimiter is
-/// reached first, so a stray `{`/`;` inside a string literal is never
-/// miscounted. Other attributes stacked on the same item (`#[cfg(test)]
-/// #[allow(dead_code)] fn f() {..}`) are skipped over transparently since
-/// neither delimiter appears inside them.
+/// reached first outside a string, char literal, raw string, line comment, or
+/// block comment (`skip_lexical_token` steps over all five, so a `{`/`;`
+/// inside one of them is never miscounted) AND at zero `(`/`)`/`[`/`]` depth,
+/// so the `;` inside an array type or repeat expression (`[u8; 4]`, `fn
+/// h(buf: [u8; 4])`) is never mistaken for the item's own terminator — that
+/// would end the item too early and leave its real body (including the
+/// closing `{...}`) misclassified as production code. Other attributes
+/// stacked on the same item (`#[cfg(test)] #[allow(dead_code)] fn f() {..}`)
+/// are skipped over transparently: their own `[`/`]` nest and unnest back to
+/// zero depth before the item proper starts. Returns `None` when neither
+/// delimiter is reached before end-of-input — including when a
+/// string/comment/char literal that `skip_lexical_token` started never
+/// terminates — and the caller (`production_source`) treats that as a fatal
+/// scan desync, not a reason to stop quietly.
 fn cfg_test_item_end(text: &str, from: usize) -> Option<usize> {
     let bytes = text.as_bytes();
-    let mut in_string = false;
-    let mut escaped = false;
-    for (i, &b) in bytes.iter().enumerate().skip(from) {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_string = false;
-            }
+    let mut i = from;
+    let mut bracket_depth = 0i32;
+    let mut paren_depth = 0i32;
+    while i < bytes.len() {
+        if let Some(next) = skip_lexical_token(bytes, i) {
+            i = next;
             continue;
         }
-        match b {
-            b'"' => in_string = true,
-            b'{' => return find_matching_brace(text, i).map(|close| close + 1),
-            b';' => return Some(i + 1),
+        let at_top_level = bracket_depth == 0 && paren_depth == 0;
+        match bytes[i] {
+            b'{' if at_top_level => return find_matching_brace(text, i).map(|close| close + 1),
+            b';' if at_top_level => return Some(i + 1),
+            b'[' => bracket_depth += 1,
+            b']' => bracket_depth -= 1,
+            b'(' => paren_depth += 1,
+            b')' => paren_depth -= 1,
             _ => {}
         }
+        i += 1;
     }
     None
 }
 
-/// Find the `}` matching the `{` at byte offset `open`, tracking string-quote
-/// state so a brace inside a `"..."` literal is never miscounted. Sibling of
-/// [`find_matching_paren`].
+/// Find the `}` matching the `{` at byte offset `open`. Sibling of
+/// [`find_matching_paren`]; both delegate to [`find_matching`].
 fn find_matching_brace(text: &str, open: usize) -> Option<usize> {
-    let bytes = text.as_bytes();
-    if bytes.get(open) != Some(&b'{') {
-        return None;
-    }
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (i, &b) in bytes.iter().enumerate().skip(open) {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    find_matching(text, open, b'{', b'}')
 }
 
 /// The stderr-emission macros a raw annotation-prefix literal must never
@@ -212,45 +207,213 @@ const RAW_EMISSION_MACROS: &[&str] = &["writeln!", "eprintln!"];
 /// `"warnings: N"` never matches).
 const RAW_PREFIX_NEEDLES: &[&str] = &["\"warning: ", "\"warn: ", "\"error: ", "\"note: "];
 
-/// Find the `)` matching the `(` at byte offset `open`, tracking string-quote
-/// state so a paren inside a `"..."` literal is never miscounted.
+/// Find the `)` matching the `(` at byte offset `open`. Sibling of
+/// [`find_matching_brace`]; both delegate to [`find_matching`].
 fn find_matching_paren(text: &str, open: usize) -> Option<usize> {
+    find_matching(text, open, b'(', b')')
+}
+
+/// Find the `close_byte` that matches the `open_byte` at byte offset `open`
+/// (brace-for-brace or paren-for-paren, tracked via `depth`), skipping every
+/// string, char literal, raw string, line comment, and block comment
+/// encountered along the way (`skip_lexical_token`) so a delimiter inside any
+/// of those five shapes is never miscounted. Returns `None` when `open` is
+/// not `open_byte`, or when depth never returns to zero before end-of-input.
+fn find_matching(text: &str, open: usize, open_byte: u8, close_byte: u8) -> Option<usize> {
     let bytes = text.as_bytes();
-    if bytes.get(open) != Some(&b'(') {
+    if bytes.get(open) != Some(&open_byte) {
         return None;
     }
     let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (i, &b) in bytes.iter().enumerate().skip(open) {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_string = false;
-            }
+    let mut i = open;
+    while i < bytes.len() {
+        if let Some(next) = skip_lexical_token(bytes, i) {
+            i = next;
             continue;
         }
-        match b {
-            b'"' => in_string = true,
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
+        let b = bytes[i];
+        if b == open_byte {
+            depth += 1;
+        } else if b == close_byte {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
             }
-            _ => {}
         }
+        i += 1;
     }
     None
 }
 
+/// Skips one lexical token that starts at byte offset `i`: a `//` line
+/// comment (to end of line), a nesting-aware `/*` block comment, a raw string
+/// (`r"..."` / `r#"..."#` / …, whose closer is matched by counting the same
+/// number of trailing `#`), a `"..."` string (with backslash-escape
+/// handling), or a char literal (`'{'`, `'"'`, `'\''`, `'\n'`, `'\xNN'`,
+/// `'\u{...}'`). Returns the offset just past the token when one of these
+/// five shapes starts at `i`, or `None` when `bytes[i]` is an ordinary byte
+/// the caller inspects itself — including a `'` that opens a lifetime
+/// (`'a`, `'static`) rather than a char literal: [`char_literal_end`] only
+/// recognizes a char literal when a closing `'` is found within its
+/// escape-or-single-character lookahead, so a lifetime is left alone.
+///
+/// An unterminated string, comment, or char literal is reported as running to
+/// end-of-input rather than failing here (this function has no file path or
+/// caller context to report against). The caller's own delimiter search then
+/// fails to find its target and returns `None`, and `production_source`'s
+/// fail-loud panic is what actually surfaces the desync — with the context
+/// this function lacks.
+fn skip_lexical_token(bytes: &[u8], i: usize) -> Option<usize> {
+    match bytes[i] {
+        b'/' if bytes.get(i + 1) == Some(&b'/') => Some(skip_line_comment(bytes, i)),
+        b'/' if bytes.get(i + 1) == Some(&b'*') => Some(skip_block_comment(bytes, i)),
+        b'r' => raw_string_hash_count(bytes, i).map(|hashes| skip_raw_string(bytes, i, hashes)),
+        b'"' => Some(skip_quoted_string(bytes, i)),
+        b'\'' => char_literal_end(bytes, i),
+        _ => None,
+    }
+}
+
+/// End of the `//` line comment starting at `i`: the newline, or
+/// end-of-input if the file has no trailing newline.
+fn skip_line_comment(bytes: &[u8], i: usize) -> usize {
+    let mut j = i + 2;
+    while j < bytes.len() && bytes[j] != b'\n' {
+        j += 1;
+    }
+    j
+}
+
+/// End of the `/*` block comment starting at `i`, one past its matching `*/`.
+/// Rust block comments nest, so this tracks nesting depth instead of stopping
+/// at the first `*/`.
+fn skip_block_comment(bytes: &[u8], i: usize) -> usize {
+    let mut depth = 1u32;
+    let mut j = i + 2;
+    while j < bytes.len() && depth > 0 {
+        if bytes[j..].starts_with(b"/*") {
+            depth += 1;
+            j += 2;
+        } else if bytes[j..].starts_with(b"*/") {
+            depth -= 1;
+            j += 2;
+        } else {
+            j += 1;
+        }
+    }
+    j
+}
+
+/// End of the `"..."` string starting at its opening quote `i`, one past the
+/// closing quote; a backslash-escaped quote (`\"`) does not close it early.
+fn skip_quoted_string(bytes: &[u8], i: usize) -> usize {
+    let mut j = i + 1;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'\\' => j += 2,
+            b'"' => return j + 1,
+            _ => j += 1,
+        }
+    }
+    j
+}
+
+/// `Some(hash_count)` when `bytes[i] == b'r'` opens a raw-string prefix
+/// (`r"`, `r#"`, `r##"`, …): `i` is preceded by a non-identifier byte or is at
+/// the start of the text (so a standalone `r`, not the tail of a longer
+/// identifier like `r2d2`), and is followed by zero or more `#` and then a
+/// `"`. `None` otherwise.
+fn raw_string_hash_count(bytes: &[u8], i: usize) -> Option<usize> {
+    if i > 0 {
+        let prev = bytes[i - 1];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return None;
+        }
+    }
+    let mut j = i + 1;
+    let mut hashes = 0usize;
+    while bytes.get(j) == Some(&b'#') {
+        hashes += 1;
+        j += 1;
+    }
+    (bytes.get(j) == Some(&b'"')).then_some(hashes)
+}
+
+/// End of the raw string opening at `i` (`bytes[i] == b'r'`) with `hashes`
+/// leading `#` characters, one past the closing `"` followed by the same
+/// number of `#`.
+fn skip_raw_string(bytes: &[u8], i: usize, hashes: usize) -> usize {
+    let content_start = i + 1 + hashes + 1; // `r` + `#`* + opening `"`
+    let mut j = content_start;
+    while j < bytes.len() {
+        if bytes[j] == b'"' {
+            let remainder = &bytes[j + 1..];
+            if remainder.len() >= hashes && remainder[..hashes].iter().all(|&b| b == b'#') {
+                return j + 1 + hashes;
+            }
+        }
+        j += 1;
+    }
+    bytes.len()
+}
+
+/// `Some(end)` when the `'` at `i` opens a char literal, one past its closing
+/// `'`. `None` when it instead opens a lifetime (`'a`, `'static`): a lifetime
+/// is never immediately followed by a closing `'` within the
+/// escape-or-single-character lookahead this checks, so requiring that
+/// closing `'` is what tells the two apart.
+fn char_literal_end(bytes: &[u8], i: usize) -> Option<usize> {
+    let after_quote = i + 1;
+    if bytes.get(after_quote) == Some(&b'\\') {
+        let escape = *bytes.get(after_quote + 1)?;
+        let end_of_escape = match escape {
+            b'x' => after_quote + 4,                              // `\xHH`
+            b'u' => skip_unicode_escape(bytes, after_quote + 2)?, // `\u{...}`
+            _ => after_quote + 2,                                 // `\\`, `\'`, `\n`, `\0`, ...
+        };
+        (bytes.get(end_of_escape) == Some(&b'\'')).then_some(end_of_escape + 1)
+    } else {
+        let ch_len = utf8_char_len(*bytes.get(after_quote)?);
+        let close = after_quote + ch_len;
+        (bytes.get(close) == Some(&b'\'')).then_some(close + 1)
+    }
+}
+
+/// End of a `\u{...}` escape's `{...}` body, whose `{` is expected at `open`:
+/// one past the closing `}`, or `None` if `open` is not `{` or `}` is never
+/// found.
+fn skip_unicode_escape(bytes: &[u8], open: usize) -> Option<usize> {
+    if bytes.get(open) != Some(&b'{') {
+        return None;
+    }
+    let mut j = open + 1;
+    while bytes.get(j).is_some_and(|&b| b != b'}') {
+        j += 1;
+    }
+    bytes.get(j)?;
+    Some(j + 1)
+}
+
+/// Byte length of the UTF-8 character whose first byte is `first`.
+fn utf8_char_len(first: u8) -> usize {
+    if first & 0b1000_0000 == 0 {
+        1
+    } else if first & 0b1110_0000 == 0b1100_0000 {
+        2
+    } else if first & 0b1111_0000 == 0b1110_0000 {
+        3
+    } else {
+        4
+    }
+}
+
 /// The balanced-paren argument body of every `writeln!(...)` / `eprintln!(...)`
 /// call in `text` (a raw stderr-emission call site, invariant 2's target).
-fn macro_call_bodies(text: &str) -> Vec<&str> {
+/// `path` is diagnostic-only, named in the panic if a call's matching `)`
+/// cannot be located — a source shape `find_matching_paren` cannot parse
+/// stops the scan here loudly rather than silently omitting the rest of the
+/// file's macro calls from invariant 2.
+fn macro_call_bodies<'a>(path: &Path, text: &'a str) -> Vec<&'a str> {
     let mut bodies = Vec::new();
     for macro_name in RAW_EMISSION_MACROS {
         let mut cursor = 0;
@@ -261,7 +424,14 @@ fn macro_call_bodies(text: &str) -> Vec<&str> {
                     bodies.push(&text[open + 1..close]);
                     cursor = close + 1;
                 }
-                None => break,
+                None => panic!(
+                    "typed_severity_guard: {}: byte {open} — could not locate the closing `)` \
+                     of a `{macro_name}(...)` call; the paren-matching scanner does not \
+                     recognize this source shape. Extend `skip_lexical_token` to cover it \
+                     rather than let this silently drop the rest of the file's macro calls \
+                     from invariant 2.",
+                    path.display()
+                ),
             }
         }
     }
@@ -280,7 +450,7 @@ fn production_source_keeps_code_after_an_early_cfg_test_item_in_scope() {
                    fn t() { let _ = format!(\"{:?}\", 1); }\n\
                }\n\
                fn b() { let _ = format!(\"{:?}\", 2); }\n";
-    let production = production_source(src);
+    let production = production_source(Path::new("<fixture>"), src);
     assert!(
         production.contains("fn a() {}") && production.contains("fn b()"),
         "production code before AND after the early item must survive: {production:?}"
@@ -307,12 +477,145 @@ fn production_source_still_excludes_a_trailing_cfg_test_module() {
                mod tests {\n    \
                    fn t() { let _ = format!(\"{:?}\", 1); }\n\
                }\n";
-    let production = production_source(src);
+    let production = production_source(Path::new("<fixture>"), src);
     assert!(production.contains("fn a()"));
     assert!(
         !production.contains(":?}"),
         "the trailing test module's Debug placeholder must not leak into production: \
          {production:?}"
+    );
+}
+
+/// Sensitivity check (1/5, NRN-448 review round): a char literal containing
+/// an open brace (`'{'`) inside an early `#[cfg(test)]` item's body must not
+/// desync the depth count that finds the item's own closing `}` — if it did,
+/// `fn b`'s planted `:?}` would be silently dropped from the production scan.
+#[test]
+fn production_source_skips_a_char_literal_containing_an_open_brace() {
+    let src = "fn a() {}\n\
+               #[cfg(test)]\n\
+               mod char_brace {\n    \
+                   fn t() { let c = '{'; let _ = c; }\n\
+               }\n\
+               fn b() { let _ = format!(\"{:?}\", 2); }\n";
+    let production = production_source(Path::new("<fixture>"), src);
+    assert!(
+        production.contains("fn b()") && production.contains(":?}"),
+        "a `'{{'` char literal must not desync brace counting and swallow the \
+         production code that follows: {production:?}"
+    );
+    assert!(
+        !production.contains("char_brace"),
+        "the cfg(test) item's own body must still be excluded: {production:?}"
+    );
+}
+
+/// Sensitivity check (2/5): a char literal containing a double quote (`'"'`,
+/// as in `assert_eq!(c, '"')`) must not be mistaken for the start of a
+/// `"..."` string — that would desync the in-string state and, again, drop
+/// `fn b`'s planted `:?}`.
+#[test]
+fn production_source_skips_a_char_literal_containing_a_quote() {
+    let src = "fn a() {}\n\
+               #[cfg(test)]\n\
+               mod char_quote {\n    \
+                   fn t() { let c = '\"'; assert_eq!(c, '\"'); }\n\
+               }\n\
+               fn b() { let _ = format!(\"{:?}\", 2); }\n";
+    let production = production_source(Path::new("<fixture>"), src);
+    assert!(
+        production.contains("fn b()") && production.contains(":?}"),
+        "a `'\"'` char literal must not be mistaken for a string literal, desyncing \
+         brace counting and swallowing the production code that follows: {production:?}"
+    );
+    assert!(!production.contains("char_quote"));
+}
+
+/// Sensitivity check (3/5): a `//` line comment mentioning a brace (`// opens
+/// a {`) must not have that brace counted as real source structure.
+#[test]
+fn production_source_skips_a_line_comment_containing_a_brace() {
+    let src = "fn a() {}\n\
+               #[cfg(test)]\n\
+               mod line_comment {\n    \
+                   fn t() { // opens a {\n        \
+                       let _ = 1;\n    \
+                   }\n\
+               }\n\
+               fn b() { let _ = format!(\"{:?}\", 2); }\n";
+    let production = production_source(Path::new("<fixture>"), src);
+    assert!(
+        production.contains("fn b()") && production.contains(":?}"),
+        "a `{{` inside a `//` line comment must not desync brace counting and swallow \
+         the production code that follows: {production:?}"
+    );
+    assert!(!production.contains("line_comment"));
+}
+
+/// Sensitivity check (4/5): a `/* { */` block comment must likewise not have
+/// its brace counted as real source structure.
+#[test]
+fn production_source_skips_a_block_comment_containing_a_brace() {
+    let src = "fn a() {}\n\
+               #[cfg(test)]\n\
+               mod block_comment {\n    \
+                   fn t() { /* { */ let _ = 1; }\n\
+               }\n\
+               fn b() { let _ = format!(\"{:?}\", 2); }\n";
+    let production = production_source(Path::new("<fixture>"), src);
+    assert!(
+        production.contains("fn b()") && production.contains(":?}"),
+        "a `{{` inside a `/* */` block comment must not desync brace counting and \
+         swallow the production code that follows: {production:?}"
+    );
+    assert!(!production.contains("block_comment"));
+}
+
+/// Sensitivity check (5/5): a raw string with an inner `"` (`r#"a "quote"#`)
+/// must not desync the in-string quote-parity state either.
+#[test]
+fn production_source_skips_a_raw_string_containing_a_quote() {
+    let src = "fn a() {}\n\
+               #[cfg(test)]\n\
+               mod raw_string {\n    \
+                   fn t() { let s = r#\"a \"quote\"#; let _ = s; }\n\
+               }\n\
+               fn b() { let _ = format!(\"{:?}\", 2); }\n";
+    let production = production_source(Path::new("<fixture>"), src);
+    assert!(
+        production.contains("fn b()") && production.contains(":?}"),
+        "a raw string's inner `\"` must not desync quote-parity tracking and swallow \
+         the production code that follows: {production:?}"
+    );
+    assert!(!production.contains("raw_string"));
+}
+
+/// Sensitivity check (6/6, CodeRabbit round on #248): a `;` inside an array
+/// type or repeat expression (`[u8; 4]`) must not be mistaken for a
+/// brace-free statement item's terminator — that is a false-FAIL direction:
+/// ending the item too early leaves its real, still-test-only body
+/// (including the `{...}` that follows) misclassified as production code,
+/// which would spuriously flag legitimate test-only source as a violation.
+#[test]
+fn production_source_treats_array_repeat_semicolons_as_nested_not_terminating() {
+    let src = "fn a() {}\n\
+               #[cfg(test)]\n\
+               fn h(buf: [u8; 4]) {\n    \
+                   const T: [u8; 4] = [0; 4];\n    \
+                   let _ = format!(\"{:?}\", buf);\n    \
+                   let _ = T;\n\
+               }\n\
+               fn b() { let _ = format!(\"{:?}\", 2); }\n";
+    let production = production_source(Path::new("<fixture>"), src);
+    assert!(
+        production.contains("fn b()") && production.contains(":?}"),
+        "an in-bracket `;` inside `[u8; 4]` must not end the cfg(test) item early: \
+         {production:?}"
+    );
+    assert!(
+        !production.contains("fn h") && !production.contains("const T"),
+        "the cfg(test) item's own body — including the code after its first in-bracket \
+         `;` — must still be excluded in full: {production:?}"
     );
 }
 
@@ -353,7 +656,7 @@ fn renderers_label_enums_via_serde_name_not_debug() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/display/render");
     let mut hits = Vec::new();
     scan_rs(&dir, &mut |path, text| {
-        if production_source(text).contains(":?}") {
+        if production_source(path, text).contains(":?}") {
             hits.push(path.display().to_string());
         }
     });
@@ -381,8 +684,8 @@ fn no_render_or_output_surface_emits_a_raw_stderr_prefix() {
     let mut hits = Vec::new();
     for dir in &dirs {
         scan_rs(dir, &mut |path, text| {
-            let production = production_source(text);
-            for body in macro_call_bodies(&production) {
+            let production = production_source(path, text);
+            for body in macro_call_bodies(path, &production) {
                 for needle in RAW_PREFIX_NEEDLES {
                     if body.contains(needle) {
                         hits.push(format!("{}: `{needle}`", path.display()));
