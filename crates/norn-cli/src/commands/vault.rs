@@ -96,7 +96,7 @@ pub struct UnregisterArgs {
     pub name: String,
 }
 
-/// `norn vault list [--format human|json]`.
+/// `norn vault list [--format records|json]`.
 #[derive(Args, Debug)]
 pub struct ListArgs {
     /// Output format.

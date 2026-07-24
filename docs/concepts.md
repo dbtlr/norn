@@ -103,7 +103,7 @@ Most commands accept `--format`, drawing from a command-specific set of formats 
 - `records` — human-readable, per-item blocks. The schema is not stable across point releases.
 - `paths` — one vault-relative path per line, where the command has a natural per-row path (best for piping into `xargs`, `fzf`, etc.).
 
-The default when `--format` is omitted varies by command: `find` and `validate` auto-detect (a human default on a terminal, a machine-readable default when piped); `count`, `apply`, and `config show`/`config validate` default to a fixed human-readable format regardless of TTY; `repair --plan` defaults to `report` on a terminal and `json` when piped. Pass an explicit `--format` for stable contracts — see each command's page for its exact set and default.
+The default when `--format` is omitted varies by command: `find` and `validate` auto-detect (a human default on a terminal, a machine-readable default when piped); `count`, `apply`, and `config show`/`config validate` default to a fixed human-readable format regardless of TTY; `repair --plan` defaults to `records` on a terminal and `json` when piped. Pass an explicit `--format` for stable contracts — see each command's page for its exact set and default.
 
 ## Next
 

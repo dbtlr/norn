@@ -51,7 +51,7 @@ norn cache status              # channel, path, size, doc/link/file counts, sche
 norn cache prune               # cross-vault GC; --dry-run to preview
 ```
 
-Every cache subcommand accepts the global `-C` and `--config` flags; `status` accepts `--format text|json` like other query commands.
+Every cache subcommand accepts the global `-C` and `--config` flags; `status` accepts `--format records|json` like other query commands.
 
 `cache clear` is the one exception to "every cache subcommand opens the cache": it deletes the vault's whole entry dir (every channel and schema database, plus legacy leftovers) purely from the vault's identity, without opening the database — the escape hatch that must work even when the cache is too broken to open at all. It refuses (exit `2`, nothing deleted) only while another process holds the entry lock. See [Clearing](commands/cache.md#clearing) for details.
 

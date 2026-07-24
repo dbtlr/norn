@@ -914,7 +914,11 @@ decision = "docs/decisions/0016-surface-neutral-command-core.md"
 # `--plan --format json` payload the `norn apply -` pipe consumes). The pinned
 # oracle IGNORES `--format` on the bare path and prints the same prose summary as
 # a bare invocation, so this is a rewrite-only, decided-better divergence. Only
-# the bare path changes; `--plan --format json` is unaffected. See
+# the bare path changes; `--plan --format json` is unaffected — it is scoped OUT
+# of this ruling entirely, not a case the ruling happens to leave alone: under
+# `--plan`, `json` is the `MigrationPlan` interchange artifact `norn apply -`
+# consumes, never a report projection, so the "JSON of what prints without
+# --format" rule that governs the bare path never applied to it. See
 # `crates/norn-cli/src/display/render/repair.rs` (`write_repair_summary_json`).
 [[entry]]
 id = "PD-144"

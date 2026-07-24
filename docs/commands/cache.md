@@ -67,7 +67,7 @@ Flags:
 
 - `--dry-run` — report what would be evicted without deleting anything.
 - `--retention <dur>` — age-eviction window override (`90d`-style: `<n>w`, `<n>d`, `<n>h`, `<n>m`). Precedence: this flag, then `cache.retention` in `.norn/config.yaml`, then the 90d default.
-- `--format text|json` — stdout format.
+- `--format records|json` — stdout format.
 
 Exit code is `0` on success, including when there is nothing to prune.
 
