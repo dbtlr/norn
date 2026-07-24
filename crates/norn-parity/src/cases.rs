@@ -2210,6 +2210,37 @@ const MUTATE_CASES: &[Case] = &[
         normalize: TRACE_NORM,
         plan: None,
     },
+    // new: an allowed_values violation on a confirmed create. NRN-430 (PD-145):
+    // the rewrite REFUSES at preflight (exit 2, write-free) where the oracle
+    // only WARNS post-apply and writes the schema-violating file (exit 0). The
+    // `task-rule` constrains `status` to backlog/active/done, so `status:someday`
+    // on a `type: task` create trips it; `title` satisfies the global required
+    // field. TRACE_NORM collapses the oracle's random applied trace id so the
+    // self-check (oracle vs. oracle, both apply identically) still Matches, while
+    // the gated oracle-vs-rewrite run diverges on both output and post-state tree.
+    Case {
+        id: "mutate-new-allowed-values-refusal-zoo",
+        argv: &[
+            "new",
+            "tasks/nrn430-policy.md",
+            "--field",
+            "type:task",
+            "--field",
+            "status:someday",
+            "--field",
+            "title:Policy",
+            "--yes",
+        ],
+        fixture: ZOO_1,
+        stdin: None,
+        mutating: true,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: TRACE_NORM,
+        plan: None,
+    },
     // set --push --format json, confirmed apply: pins the collapsed donor op
     // shape — a `--push` reports as `{"op":"set",...,"new":[…]}` (the whole list
     // after the append), not a distinct push op. Byte-compares the mutated file.

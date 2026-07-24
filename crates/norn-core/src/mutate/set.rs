@@ -278,7 +278,11 @@ fn synth(
 
     let (fields_typed, w) = coerce_kv_slice(&params.fields, force, cfg, &effective, true, false)?;
     warnings.extend(w);
-    let (push_typed, w) = coerce_kv_slice(&params.push, force, cfg, &effective, false, true)?;
+    // --push writes a new element into the list, so it enforces allowed_values
+    // element-wise (NRN-430): a pushed value outside its field's allowed set
+    // REFUSES, with --force the bypass. --pop only removes elements — a removal
+    // can never create a violation — so it stays exempt (enforce_allowed=false).
+    let (push_typed, w) = coerce_kv_slice(&params.push, force, cfg, &effective, true, true)?;
     warnings.extend(w);
     let (pop_typed, w) = coerce_kv_slice(&params.pop, force, cfg, &effective, false, true)?;
     warnings.extend(w);
@@ -302,7 +306,7 @@ fn synth(
                         field_type: ty,
                     });
                 }
-                warnings.push(force_bypass(&key, "type validation"));
+                warnings.push(coerce::force_bypass_warning(&key, "type validation"));
             }
         } else if !coerce::is_known_field(cfg, &effective, &key) {
             warnings.push(unknown_field(&key));
@@ -315,7 +319,10 @@ fn synth(
                         allowed: coerce::display_allowed(&allowed),
                     });
                 }
-                warnings.push(force_bypass(&key, "allowed-values validation"));
+                warnings.push(coerce::force_bypass_warning(
+                    &key,
+                    "allowed-values validation",
+                ));
             }
         }
         field_json_typed.push((key, parsed));
@@ -327,7 +334,10 @@ fn synth(
             if !force {
                 return Err(SetError::RequiredFieldRemoved { field: key.clone() });
             }
-            warnings.push(force_bypass(key, "required-field protection"));
+            warnings.push(coerce::force_bypass_warning(
+                key,
+                "required-field protection",
+            ));
         }
     }
 
@@ -523,7 +533,7 @@ fn coerce_kv_slice(
                 coerce::coerce_value_for_type(effective_ty, &raw, max).map_err(SetError::Coerce)?
             }
             Some(_) => {
-                w.push(force_bypass(&key, "type validation"));
+                w.push(coerce::force_bypass_warning(&key, "type validation"));
                 Value::String(raw.clone())
             }
             None => {
@@ -538,17 +548,16 @@ fn coerce_kv_slice(
             if let Some(allowed) = coerce::lookup_allowed_values(cfg, doc, &key) {
                 if !coerce::value_in_allowed(&coerced, &allowed) {
                     if !force {
-                        let value = coerced
-                            .as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| coerced.to_string());
                         return Err(SetError::ValueNotAllowed {
                             field: key.clone(),
-                            value,
+                            value: coerce::display_value(&coerced),
                             allowed: coerce::display_allowed(&allowed),
                         });
                     }
-                    w.push(force_bypass(&key, "allowed-values validation"));
+                    w.push(coerce::force_bypass_warning(
+                        &key,
+                        "allowed-values validation",
+                    ));
                 }
             }
         }
@@ -608,14 +617,6 @@ fn unknown_field(key: &str) -> MutationWarning {
         code: "unknown-field".into(),
         field: Some(key.to_string()),
         message: format!("field '{key}' not declared in schema"),
-    }
-}
-
-fn force_bypass(key: &str, what: &str) -> MutationWarning {
-    MutationWarning {
-        code: "force-bypass".into(),
-        field: Some(key.to_string()),
-        message: format!("--force bypassed {what} for '{key}'"),
     }
 }
 
@@ -712,10 +713,7 @@ impl std::fmt::Display for SetError {
                 field,
                 value,
                 allowed,
-            } => write!(
-                f,
-                "value '{value}' is not allowed for '{field}' (allowed: {allowed}); use --force to override"
-            ),
+            } => write!(f, "{}", coerce::value_not_allowed_message(field, value, allowed)),
             SetError::FieldJsonInvalid { field, detail } => {
                 write!(f, "--field-json value is not valid JSON ({field}): {detail}")
             }
@@ -925,6 +923,97 @@ mod tests {
             exec.report.error.as_ref().unwrap().code,
             "value-not-allowed"
         );
+    }
+
+    // ── NRN-430: --push enforces allowed_values element-wise; --pop is exempt ──
+
+    // A list field constrained by allowed_values: pushing an out-of-set element
+    // refuses, --force bypasses, and popping an element never refuses.
+    const PUSH_ALLOWED_CFG: &str = "validate:\n  rules:\n    - name: r\n      match:\n        path: \"**/*.md\"\n      field_types:\n        labels: list_of_strings\n      allowed_values:\n        labels: [red, green]\n";
+
+    #[test]
+    fn push_disallowed_element_refused() {
+        let (_t, root) = synth_vault(
+            Some(PUSH_ALLOWED_CFG),
+            &[("a.md", "---\nlabels:\n  - red\n---\n")],
+        );
+        let cache = built(&root);
+        let config = parse_cfg(PUSH_ALLOWED_CFG);
+        let params = SetParams {
+            target: "a.md".into(),
+            push: vec!["labels=purple".into()],
+            ..Default::default()
+        };
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Refused);
+        let err = exec.report.error.as_ref().unwrap();
+        assert_eq!(err.code, "value-not-allowed");
+        assert!(err.message.contains("purple"), "{}", err.message);
+        assert!(err.message.contains("--force"), "{}", err.message);
+    }
+
+    #[test]
+    fn push_disallowed_element_force_bypasses() {
+        let (_t, root) = synth_vault(
+            Some(PUSH_ALLOWED_CFG),
+            &[("a.md", "---\nlabels:\n  - red\n---\n")],
+        );
+        let cache = built(&root);
+        let config = parse_cfg(PUSH_ALLOWED_CFG);
+        let params = SetParams {
+            target: "a.md".into(),
+            push: vec!["labels=purple".into()],
+            force: true,
+            confirm: true,
+            ..Default::default()
+        };
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Applied);
+        assert!(exec
+            .report
+            .warnings
+            .iter()
+            .any(|w| w.code == "force-bypass" && w.field.as_deref() == Some("labels")));
+    }
+
+    #[test]
+    fn push_allowed_element_applies() {
+        let (_t, root) = synth_vault(
+            Some(PUSH_ALLOWED_CFG),
+            &[("a.md", "---\nlabels:\n  - red\n---\n")],
+        );
+        let cache = built(&root);
+        let config = parse_cfg(PUSH_ALLOWED_CFG);
+        let params = SetParams {
+            target: "a.md".into(),
+            push: vec!["labels=green".into()],
+            confirm: true,
+            ..Default::default()
+        };
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Applied);
+    }
+
+    #[test]
+    fn pop_is_exempt_from_allowed_values() {
+        // A stored value already outside the allowed set can still be popped —
+        // removal never creates a violation, so --pop stays unenforced.
+        let (_t, root) = synth_vault(
+            Some(PUSH_ALLOWED_CFG),
+            &[("a.md", "---\nlabels:\n  - red\n  - purple\n---\n")],
+        );
+        let cache = built(&root);
+        let config = parse_cfg(PUSH_ALLOWED_CFG);
+        let params = SetParams {
+            target: "a.md".into(),
+            pop: vec!["labels=purple".into()],
+            confirm: true,
+            ..Default::default()
+        };
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Applied);
+        let on_disk = std::fs::read_to_string(root.join("a.md").as_std_path()).unwrap();
+        assert!(!on_disk.contains("purple"), "purple should be popped");
     }
 
     #[test]

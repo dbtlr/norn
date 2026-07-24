@@ -304,8 +304,27 @@ fn post_create_validate(
         .filter_map(|w| w.field.as_deref())
         .collect();
 
+    // allowed_values is now enforced at preflight (NRN-430): a non-force create
+    // never reaches this pass with a violation (it refused), and a --force create
+    // already carries a `force-bypass` warning for the field. Drop the engine's
+    // `value-not-allowed` finding for a field already bypass-warned so the force
+    // path reports the bypass once rather than doubling it.
+    let force_bypassed: BTreeSet<&str> = existing_warnings
+        .iter()
+        .filter(|w| w.code == "force-bypass")
+        .filter_map(|w| w.field.as_deref())
+        .collect();
+
     let mut extra = Vec::new();
     for finding in findings.iter().filter(|f| f.path.as_str() == doc_path) {
+        if finding.code == "value-not-allowed"
+            && finding
+                .field
+                .as_deref()
+                .is_some_and(|f| force_bypassed.contains(f))
+        {
+            continue;
+        }
         if finding.code == "frontmatter-required-field-missing" {
             let Some(field) = finding.field.as_deref() else {
                 continue;
@@ -718,6 +737,51 @@ fn build_create(
         .cloned()
         .collect();
 
+    // allowed_values enforcement (NRN-430). Every field in the synthesized
+    // frontmatter is a fresh direct write, so a value outside a matching rule's
+    // allowed_values set REFUSES here at forecast/preflight — before any file
+    // lands — with --force the documented bypass. `build_create`'s type coercion
+    // never checked allowed_values (a validate-engine-only rule), so without this
+    // a clean forecast could precede a schema-violating create, defeating
+    // plan-then-apply. The allowed list rides in the refusal message so an agent
+    // can recover without a second query; the code/message converge on `set`'s
+    // `value-not-allowed` family. Every matching rule that declares
+    // allowed_values for the field is checked — not just the first — so two
+    // co-applying rules with different sets both gate the value; a scan
+    // stopping at the first declaring rule would let a value valid under it
+    // but rejected by a second rule pass preflight, surfacing only as the
+    // post-apply warning.
+    let mut allowed_bypass: Vec<MutationWarning> = Vec::new();
+    for (field, value) in &resolved_fm {
+        let mut bypassed = false;
+        for (rule, _) in &matched_rules {
+            let Some(allowed) = rule.allowed_values.get(field) else {
+                continue;
+            };
+            if coerce::value_in_allowed(value, allowed) {
+                continue;
+            }
+            if !params.force {
+                return Err(refusal(
+                    "value-not-allowed",
+                    coerce::value_not_allowed_message(
+                        field,
+                        &coerce::display_value(value),
+                        &coerce::display_allowed(allowed),
+                    ),
+                    Some(doc_path.to_string()),
+                ));
+            }
+            if !bypassed {
+                allowed_bypass.push(coerce::force_bypass_warning(
+                    field,
+                    "allowed-values validation",
+                ));
+                bypassed = true;
+            }
+        }
+    }
+
     let mut created: Vec<FrontmatterCreated> = Vec::new();
     for (field, value) in &resolved_fm {
         if operator_overrides.contains_key(field) {
@@ -748,8 +812,9 @@ fn build_create(
         }
     }
 
-    // Warnings (non-blocking).
-    let mut warnings: Vec<MutationWarning> = Vec::new();
+    // Warnings (non-blocking). The --force allowed-values bypasses computed above
+    // lead so a bypassed field is legible before the derived warnings.
+    let mut warnings: Vec<MutationWarning> = allowed_bypass;
     for field in unknown_fields {
         warnings.push(MutationWarning {
             code: "unknown-field".into(),
@@ -1221,13 +1286,9 @@ validate:
 
     // ── NRN-390: post-create validate pass ──────────────────────────────────
 
-    #[test]
-    fn post_create_validate_surfaces_disallowed_value() {
-        // `allowed_values` is a validate-engine-only rule: `build_create`'s own
-        // hand-computed warnings never check it, so before this pass a
-        // `--field status=someday` that violates it produced a false-clean
-        // envelope. Confirm the general validate pass now catches it.
-        let cfg = r#"
+    // ── NRN-430: allowed_values enforcement (refuse-preflight, --force bypass) ──
+
+    const ALLOWED_CFG: &str = r#"
 validate:
   rules:
     - name: r
@@ -1238,9 +1299,16 @@ validate:
           - backlog
           - done
 "#;
-        let (_t, root) = synth_vault(Some(cfg), &[]);
+
+    #[test]
+    fn disallowed_value_refuses_at_apply() {
+        // `allowed_values` is a validate-engine rule `build_create`'s type
+        // coercion never checked. Under NRN-430 a `--field status=someday`
+        // violation REFUSES at preflight rather than warn-then-apply, writing
+        // nothing. The refusal carries the allowed list so an agent can recover.
+        let (_t, root) = synth_vault(Some(ALLOWED_CFG), &[]);
         let cache = built(&root);
-        let config = parse_cfg(cfg);
+        let config = parse_cfg(ALLOWED_CFG);
         let params = NewParams {
             path: Some("foo.md".into()),
             fields: vec!["status=someday".into()],
@@ -1248,16 +1316,129 @@ validate:
             ..Default::default()
         };
         let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Refused);
+        assert!(!exec.report.applied);
+        assert!(
+            !root.join("foo.md").as_std_path().exists(),
+            "no file written"
+        );
+        let err = exec.report.error.as_ref().unwrap();
+        assert_eq!(err.code, "value-not-allowed");
+        assert!(err.message.contains("status"), "{}", err.message);
+        // The allowed list is carried in the refusal message (not a separate
+        // structured field), so an agent can recover without a second query.
+        assert!(err.message.contains("backlog"), "{}", err.message);
+        assert!(err.message.contains("done"), "{}", err.message);
+        assert!(err.message.contains("--force"), "{}", err.message);
+    }
+
+    #[test]
+    fn disallowed_value_refuses_at_forecast_defeating_plan_then_apply() {
+        // The audit's defeating case: before NRN-430 a forecast never checked
+        // allowed_values, so a clean forecast could precede a schema-violating
+        // create. Now the forecast itself refuses — the plan is honest.
+        let (_t, root) = synth_vault(Some(ALLOWED_CFG), &[]);
+        let cache = built(&root);
+        let config = parse_cfg(ALLOWED_CFG);
+        let params = NewParams {
+            path: Some("foo.md".into()),
+            fields: vec!["status=someday".into()],
+            confirm: false,
+            ..Default::default()
+        };
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Refused);
+        assert_eq!(
+            exec.report.error.as_ref().unwrap().code,
+            "value-not-allowed"
+        );
+    }
+
+    #[test]
+    fn disallowed_value_force_proceeds_with_bypass_warning() {
+        // --force bypasses the refusal and applies, surfacing exactly one
+        // force-bypass warning for the field (no duplicate value-not-allowed).
+        let (_t, root) = synth_vault(Some(ALLOWED_CFG), &[]);
+        let cache = built(&root);
+        let config = parse_cfg(ALLOWED_CFG);
+        let params = NewParams {
+            path: Some("foo.md".into()),
+            fields: vec!["status=someday".into()],
+            force: true,
+            confirm: true,
+            ..Default::default()
+        };
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
         assert_eq!(exec.report.outcome, MutationOutcome::Applied);
         assert!(exec.report.applied);
-        let warning = exec
+        let bypass: Vec<_> = exec
             .report
             .warnings
             .iter()
-            .find(|w| w.code == "value-not-allowed")
-            .expect("expected a value-not-allowed warning from the post-create validate pass");
-        assert_eq!(warning.field.as_deref(), Some("status"));
-        assert!(warning.message.contains("status"));
+            .filter(|w| w.code == "force-bypass" && w.field.as_deref() == Some("status"))
+            .collect();
+        assert_eq!(bypass.len(), 1, "one force-bypass warning for status");
+        assert!(
+            !exec
+                .report
+                .warnings
+                .iter()
+                .any(|w| w.code == "value-not-allowed"),
+            "the post-create pass must not double the bypassed field as value-not-allowed"
+        );
+    }
+
+    #[test]
+    fn preflight_checks_every_co_applying_rule_not_just_the_first() {
+        // Two co-applying rules declare DIFFERENT allowed_values for the same
+        // field: a path-scoped rule and an unconditional (every-document) rule.
+        // A value valid under the first-declared rule but rejected by the
+        // second must still refuse — a preflight that stopped at the first
+        // matching rule (via find_map) would let it through, surfacing the
+        // violation only as the old post-apply warning (NRN-430 fix round).
+        let cfg = r#"
+validate:
+  rules:
+    - name: path-rule
+      match:
+        path: "tasks/**/*.md"
+      allowed_values:
+        status:
+          - backlog
+          - active
+    - name: global-rule
+      allowed_values:
+        status:
+          - backlog
+          - done
+"#;
+        let (_t, root) = synth_vault(Some(cfg), &[]);
+        let cache = built(&root);
+        let config = parse_cfg(cfg);
+        let params = NewParams {
+            path: Some("tasks/foo.md".into()),
+            fields: vec!["status=active".into()],
+            parents: true,
+            confirm: true,
+            ..Default::default()
+        };
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Refused);
+        assert!(!exec.report.applied);
+        assert!(
+            !root.join("tasks/foo.md").as_std_path().exists(),
+            "no file written"
+        );
+        let err = exec.report.error.as_ref().unwrap();
+        assert_eq!(err.code, "value-not-allowed");
+        // The refusal names the SECOND (violated) rule's allowed set, not the
+        // first rule's (which `active` does satisfy).
+        assert!(err.message.contains("active"), "{}", err.message);
+        assert!(
+            err.message.contains("backlog") && err.message.contains("done"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

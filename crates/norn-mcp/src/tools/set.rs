@@ -150,6 +150,27 @@ mod tests {
     }
 
     #[test]
+    fn value_not_allowed_refusal_rides_the_mcp_envelope() {
+        // NRN-430: `set --field`/`--push` allowed-values refusals route through
+        // the same owner seam as the CLI, so `vault.set` surfaces the refusal
+        // identically — isError:true, with the coded error and the allowed list
+        // (carried in the message) preserved in structuredContent.
+        let mut r = report(MutationOutcome::Refused, false);
+        r.error = Some(norn_wire::CodedError {
+            code: "value-not-allowed".into(),
+            message: "value 'someday' is not allowed for 'status' (allowed: backlog, done); use --force to override".into(),
+            path: Some("notes/alpha.md".into()),
+        });
+        let result = envelope(true, r).into_call_tool_result().unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let sc = result.structured_content.unwrap();
+        assert_eq!(sc["report"]["error"]["code"], "value-not-allowed");
+        let msg = sc["report"]["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("backlog, done"), "{msg}");
+        assert!(msg.contains("--force"), "{msg}");
+    }
+
+    #[test]
     fn field_maps_to_wire_fields_and_confirm_carries() {
         let wire = to_wire(SetParams {
             target: "alpha".into(),
