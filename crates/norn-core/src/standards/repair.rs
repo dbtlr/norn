@@ -48,8 +48,6 @@ pub enum SkipReason {
     LinkDecisionNeeded,
     /// Finding has no matching repair rule in the configured rule set.
     NoRuleMatched,
-    /// Alias collides with an existing doc stem and cannot be safely rewritten.
-    AliasShadowed,
     /// Graph-derived diagnostic (e.g. dangling reference detected at graph build) without a repair path.
     GraphDiagnostic,
     /// Link-ambiguous: multiple resolution candidates, manual decision required.
@@ -69,7 +67,6 @@ impl SkipReason {
             SkipReason::MissingDefault => "missing-default",
             SkipReason::LinkDecisionNeeded => "link-decision-needed",
             SkipReason::NoRuleMatched => "no-rule-matched",
-            SkipReason::AliasShadowed => "alias-shadowed",
             SkipReason::GraphDiagnostic => "graph-diagnostic",
             SkipReason::AmbiguousTarget => "ambiguous-target",
             SkipReason::MissingHash => "missing-hash",
@@ -809,10 +806,7 @@ fn skip_reason_for_finding(finding: &Finding) -> SkipReason {
         | "frontmatter-forbidden-field"
         | "document-misrouted"
         | "frontmatter-reference-type"
-        | "frontmatter-alias-malformed"
-        | "frontmatter-alias-duplicate-across-docs"
         | "nonportable-filename" => SkipReason::NoRuleMatched,
-        "frontmatter-alias-shadowed-by-stem" => SkipReason::AliasShadowed,
         _ => SkipReason::GraphDiagnostic,
     }
 }
@@ -875,42 +869,6 @@ fn skipped_finding(
                 "add a move_document repair rule matching this finding's code".to_string(),
             ],
         ),
-        "frontmatter-alias-malformed" => (
-            "malformed alias entries cannot be repaired deterministically".to_string(),
-            vec![
-                format!("edit the '{field}' frontmatter list to contain only scalar strings"),
-                "rerun validate after fixing the entries".to_string(),
-            ],
-        ),
-        "frontmatter-alias-shadowed-by-stem" => {
-            let alias_value = finding.alias_value.as_deref().unwrap_or("");
-            let shadowing = finding
-                .shadowing_doc_path
-                .as_ref()
-                .map(|p| p.as_str())
-                .unwrap_or("");
-            (
-                "alias shadowed by a doc stem cannot be repaired deterministically".to_string(),
-                vec![
-                    format!(
-                        "remove or rename alias '{alias_value}' on this doc, or rename {shadowing} to free the stem"
-                    ),
-                    "rerun validate after fixing the conflict".to_string(),
-                ],
-            )
-        }
-        "frontmatter-alias-duplicate-across-docs" => {
-            let alias_value = finding.alias_value.as_deref().unwrap_or("");
-            (
-                "alias duplicated across docs cannot be repaired deterministically".to_string(),
-                vec![
-                    format!(
-                        "pick a canonical doc for alias '{alias_value}', remove the alias from the others"
-                    ),
-                    "rerun validate after fixing the conflict".to_string(),
-                ],
-            )
-        }
         "nonportable-filename" => (
             "filename portability is diagnosed, not auto-repaired (a rename cascades every backlink; that is a move, out of repair's scope)".to_string(),
             vec![
@@ -1715,24 +1673,22 @@ mod tests {
     }
 
     #[test]
-    fn skip_reason_has_eight_variants_with_stable_codes() {
+    fn skip_reason_has_seven_variants_with_stable_codes() {
         use SkipReason::*;
         let all = [
             MissingDefault,
             LinkDecisionNeeded,
             NoRuleMatched,
-            AliasShadowed,
             GraphDiagnostic,
             AmbiguousTarget,
             MissingHash,
             PreconditionFailed,
         ];
-        assert_eq!(all.len(), 8);
+        assert_eq!(all.len(), 7);
 
         assert_eq!(MissingDefault.code(), "missing-default");
         assert_eq!(LinkDecisionNeeded.code(), "link-decision-needed");
         assert_eq!(NoRuleMatched.code(), "no-rule-matched");
-        assert_eq!(AliasShadowed.code(), "alias-shadowed");
         assert_eq!(GraphDiagnostic.code(), "graph-diagnostic");
         assert_eq!(AmbiguousTarget.code(), "ambiguous-target");
         assert_eq!(MissingHash.code(), "missing-hash");

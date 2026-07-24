@@ -46,10 +46,16 @@ impl CacheOpenConfig {
     /// config (the owner reads `.norn/config.yaml` off disk, keeping norn-core
     /// IO-free). This is the single mapping from a vault's declared standards to
     /// the four knobs the cache engine accepts.
+    ///
+    /// The alias field is the fixed `aliases` convention (NRN-455), NOT read from
+    /// `config.links.alias_field` — that key is retired and inert (see
+    /// [`LinksConfig`](crate::standards::LinksConfig)). It drives only the derived
+    /// `Document::aliases` set feeding `repair`'s alias-hint; aliases no longer
+    /// participate in resolution or validation.
     pub fn from_vault_config(config: &crate::standards::VaultConfig) -> Self {
         let (index_set, index_set_hash) = crate::standards::resolved_index_set(config);
         Self {
-            alias_field: config.links.alias_field.clone(),
+            alias_field: Some(crate::graph::ALIAS_FRONTMATTER_FIELD.to_string()),
             files_ignore: config.files.ignore.clone(),
             index_set,
             index_set_hash,

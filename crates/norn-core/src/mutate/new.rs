@@ -296,7 +296,7 @@ fn post_create_validate(
     );
 
     let findings =
-        crate::standards::validate_with_compiled(&fresh_index, &cfg.validate, compiled, None);
+        crate::standards::validate_with_compiled(&fresh_index, &cfg.validate, compiled);
 
     let already_warned: BTreeSet<&str> = existing_warnings
         .iter()

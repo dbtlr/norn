@@ -23,15 +23,6 @@ pub fn fix_hint_for(code: &str) -> Option<&'static str> {
         "document-misrouted" => Some(
             "move the document under one of the allowed paths, or relax the rule's path constraint",
         ),
-        "frontmatter-alias-malformed" => {
-            Some("remove or fix the non-scalar entries in the alias field")
-        }
-        "frontmatter-alias-shadowed-by-stem" => {
-            Some("remove the alias (it never resolves) or rename the shadowing document")
-        }
-        "frontmatter-alias-duplicate-across-docs" => {
-            Some("remove the alias from all but one document so resolution is unambiguous")
-        }
         "link-target-missing" => {
             Some("fix the link target, or run `norn repair --plan` for a closest-match proposal")
         }
