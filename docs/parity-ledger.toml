@@ -939,6 +939,8 @@ surface = "get --help (OPTIONS block — new --no-pager flag)"
 cases = ["help-get"]
 old = "the OPTIONS block has no `--no-pager` flag; `get` has no pager at all"
 new = "the OPTIONS block lists `--no-pager` (\"Skip the pager even when stdout is a TTY\") — `get` now pages its `records` and `markdown` output on a TTY exactly like `find` pages its `records` output"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 
 # NRN-430 (one allowed-values enforcement policy across the write paths). The
 # RULING (2026-07-23): a schema-violating direct write REFUSES, with --force the
@@ -949,7 +951,7 @@ new = "the OPTIONS block lists `--no-pager` (\"Skip the pager even when stdout i
 # precede a schema-violating create — defeating plan-then-apply. Now the
 # synthesized frontmatter is validated at forecast/preflight: a value outside a
 # matching rule's allowed_values REFUSES (exit 2, write-free) with the allowed
-# list in the refusal envelope, `--force` bypassing to a warning. The pinned
+# list in the refusal message, `--force` bypassing to a warning. The pinned
 # oracle instead applies the create and emits a non-blocking value-not-allowed
 # warning (exit 0, file written), so this is a decided-better, rewrite-only
 # divergence on both output and post-state tree. Converges `new` onto the same
@@ -960,6 +962,6 @@ id = "PD-146"
 surface = "new allowed_values enforcement (schema-violating create refuses at preflight; --force bypasses)"
 cases = ["mutate-new-allowed-values-refusal-zoo"]
 old = "`new` never enforces allowed_values before writing: a `--field status=someday` outside the matching rule's allowed set passes type coercion, the create APPLIES (exit 0, file written), and the violation surfaces only as a non-blocking `value-not-allowed` warning from the post-create validate pass — and only on a confirmed apply, so a forecast reports clean"
-new = "the synthesized frontmatter is validated for allowed_values at forecast/preflight: a value outside a matching rule's allowed set REFUSES (`value-not-allowed`, exit 2, write-free) with the allowed list carried in the refusal envelope; `--force` bypasses to a `force-bypass` warning and applies. Enforcement is identical on the CLI `norn new` and the MCP `vault.new` (one owner seam)"
+new = "the synthesized frontmatter is validated for allowed_values at forecast/preflight: a value outside a matching rule's allowed set REFUSES (`value-not-allowed`, exit 2, write-free) with the allowed list carried in the refusal message; `--force` bypasses to a `force-bypass` warning and applies. Enforcement is identical on the CLI `norn new` and the MCP `vault.new` (one owner seam)"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
