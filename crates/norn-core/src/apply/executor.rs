@@ -476,12 +476,18 @@ pub fn apply_migration_plan(
         })
         .collect();
 
-    // NRN-183: collapse the tri-state into one machine-readable field. A
-    // runtime op-failure (`failed > 0`) maps to `failed` (exit 1); otherwise the
-    // apply/dry-run succeeded (`applied`, exit 0). The `refused` outcome (exit 2)
-    // is produced only by `build_refusal_report` on a precondition refusal.
+    // NRN-183 / NRN-161: collapse the exit states into one machine-readable
+    // field. A runtime op-failure (`failed > 0`) maps to `failed` (exit 1); a
+    // clean dry-run preview to `forecast` (exit 0, wrote nothing); a clean
+    // confirmed write to `applied` (exit 0). The `refused` outcome (exit 2) is
+    // produced only by `build_refusal_report` on a precondition refusal — a
+    // dry-run that WOULD refuse still reaches that path (any tracked failure with
+    // nothing written diverts above), so `forecast` here means "would apply
+    // cleanly", never "would refuse".
     let outcome = if failed > 0 {
         norn_wire::ApplyOutcome::Failed
+    } else if ctx.dry_run {
+        norn_wire::ApplyOutcome::Forecast
     } else {
         norn_wire::ApplyOutcome::Applied
     };

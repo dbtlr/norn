@@ -480,10 +480,314 @@ mod tests {
             &mut sink(),
         )
         .unwrap();
-        assert_eq!(exec.report.outcome, ApplyOutcome::Applied);
+        assert_eq!(exec.report.outcome, ApplyOutcome::Forecast);
         assert!(exec.report.dry_run);
         assert!(root.join("b.md").as_std_path().exists());
         assert!(!root.join("renamed.md").as_std_path().exists());
         assert!(exec.touched_paths.is_empty());
+    }
+
+    /// The move op's per-op cascade summary from a report (moves plan exactly one
+    /// op).
+    fn cascade_of(report: &ApplyReport) -> norn_wire::CascadeSummary {
+        report.operations[0]
+            .cascade
+            .clone()
+            .expect("a move op carries a cascade summary")
+    }
+
+    /// NRN-161 gap 2 (the sharpest same-snapshot case): a backlink inside a
+    /// frontmatter value that apply SKIPS via would-corrupt-frontmatter must be
+    /// forecast as skipped too. Before the fix the dry-run hard-coded every
+    /// affected backlink as `rewritten` (skipped/failed empty), so the forecast
+    /// over-counted `applied`. Runs the SAME move as a dry-run and as a confirmed
+    /// apply against identical snapshots and asserts identical cascade
+    /// classification.
+    #[test]
+    fn forecast_cascade_counts_match_apply_for_would_corrupt_frontmatter() {
+        // Moving `Parent` to a stem carrying a YAML-structural byte (`"`) rewrites
+        // `[[Parent]]` to `[[Parent "Two"]]`. Inside b.md's double-quoted
+        // frontmatter value that breaks the block, so apply SKIPS it; the body
+        // backlink in c.md rewrites cleanly.
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            ("b.md", "---\nup: \"[[Parent]]\"\n---\nbody\n"),
+            ("c.md", "---\ntype: note\n---\nsee [[Parent]]\n"),
+        ];
+        let dst = "Parent \"Two\".md";
+
+        // Forecast (dry-run) on one snapshot.
+        let (_t1, root1) = synth_vault(docs);
+        let cache1 = built(&root1);
+        let forecast = execute(
+            &cache1,
+            None,
+            &params("Parent", dst, false),
+            TODAY,
+            &mut sink(),
+        )
+        .unwrap()
+        .report;
+
+        // Confirmed apply on an identical snapshot.
+        let (_t2, root2) = synth_vault(docs);
+        let cache2 = built(&root2);
+        let applied = execute(
+            &cache2,
+            None,
+            &params("Parent", dst, true),
+            TODAY,
+            &mut sink(),
+        )
+        .unwrap()
+        .report;
+
+        assert_eq!(forecast.outcome, ApplyOutcome::Forecast);
+        assert_eq!(applied.outcome, ApplyOutcome::Applied);
+
+        let f = cascade_of(&forecast);
+        let a = cascade_of(&applied);
+        assert_eq!(
+            (f.planned, f.applied, f.skipped, f.failed),
+            (a.planned, a.applied, a.skipped, a.failed),
+            "forecast cascade counts must match apply: forecast={f:?} apply={a:?}"
+        );
+        // And concretely: the frontmatter backlink is skipped, the body one lands.
+        assert_eq!(a.applied, 1, "only the safe body backlink rewrites");
+        assert_eq!(
+            a.skipped, 1,
+            "the frontmatter-corrupting backlink is skipped"
+        );
+    }
+
+    /// NRN-161 snapshot-reconstruction BOUNDARY (over-optimistic direction): the
+    /// forecast reconstructs a backlinker's frontmatter from the parsed index and
+    /// re-serializes it CANONICALLY (double-quoted), while apply splices the raw
+    /// on-disk bytes. A single-quoted on-disk value (norn-native state — `set` and
+    /// the splice both write single quotes) whose rewrite target carries an
+    /// apostrophe reconstructs to a double-quoted scalar that TOLERATES the
+    /// apostrophe (forecast: rewrite), but the raw single-quoted splice does NOT
+    /// (apply: skip `would-corrupt-frontmatter`). This pins that DIVERGENCE as a
+    /// documented boundary: the forecast over-counts `applied` where apply skips.
+    /// A future change that retains on-disk quoting style in the cache would close
+    /// the gap and MUST update this test (the counts would then match).
+    #[test]
+    fn forecast_diverges_over_optimistic_on_single_quoted_apostrophe_target() {
+        // b.md's `up` is SINGLE-quoted on disk; the move target `Parent's` carries
+        // an apostrophe.
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            ("b.md", "---\nup: '[[Parent]]'\n---\nbody\n"),
+        ];
+        let dst = "Parent's.md";
+
+        let (_t1, root1) = synth_vault(docs);
+        let cache1 = built(&root1);
+        let forecast = execute(
+            &cache1,
+            None,
+            &params("Parent", dst, false),
+            TODAY,
+            &mut sink(),
+        )
+        .unwrap()
+        .report;
+
+        let (_t2, root2) = synth_vault(docs);
+        let cache2 = built(&root2);
+        let applied = execute(
+            &cache2,
+            None,
+            &params("Parent", dst, true),
+            TODAY,
+            &mut sink(),
+        )
+        .unwrap()
+        .report;
+
+        let f = cascade_of(&forecast);
+        let a = cascade_of(&applied);
+        // Forecast: the canonical double-quoted reconstruction accepts the
+        // apostrophe, so it counts the backlink as a would-rewrite.
+        assert_eq!(
+            (f.applied, f.skipped),
+            (1, 0),
+            "forecast is over-optimistic: {f:?}"
+        );
+        // Apply: the raw single-quoted splice cannot hold the apostrophe, so it
+        // skips would-corrupt-frontmatter.
+        assert_eq!(
+            (a.applied, a.skipped),
+            (0, 1),
+            "apply skips would-corrupt-frontmatter: {a:?}"
+        );
+        assert_ne!(
+            (f.applied, f.skipped),
+            (a.applied, a.skipped),
+            "this pins the KNOWN snapshot-reconstruction divergence; if it now \
+             matches, the cache retains on-disk quoting — update this boundary test"
+        );
+    }
+
+    /// NRN-161 snapshot-reconstruction BOUNDARY (pessimistic mirror): the same
+    /// canonical-reconstruction seam, opposite direction. A single-quoted on-disk
+    /// value whose rewrite target carries a DOUBLE-quote reconstructs to a
+    /// double-quoted scalar the inner quote BREAKS (forecast: skip
+    /// `would-corrupt-frontmatter`), but the raw single-quoted splice tolerates the
+    /// double-quote (apply: rewrite). Pins the pessimistic divergence — forecast
+    /// under-counts `applied`. Same future-change caveat as its over-optimistic
+    /// sibling.
+    #[test]
+    fn forecast_diverges_pessimistic_on_single_quoted_double_quote_target() {
+        // b.md's `up` is SINGLE-quoted on disk; the move target carries a `"`.
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            ("b.md", "---\nup: '[[Parent]]'\n---\nbody\n"),
+        ];
+        let dst = "Parent \"Two\".md";
+
+        let (_t1, root1) = synth_vault(docs);
+        let cache1 = built(&root1);
+        let forecast = execute(
+            &cache1,
+            None,
+            &params("Parent", dst, false),
+            TODAY,
+            &mut sink(),
+        )
+        .unwrap()
+        .report;
+
+        let (_t2, root2) = synth_vault(docs);
+        let cache2 = built(&root2);
+        let applied = execute(
+            &cache2,
+            None,
+            &params("Parent", dst, true),
+            TODAY,
+            &mut sink(),
+        )
+        .unwrap()
+        .report;
+
+        let f = cascade_of(&forecast);
+        let a = cascade_of(&applied);
+        // Forecast: the canonical double-quoted reconstruction breaks on the inner
+        // double-quote, so it skips.
+        assert_eq!(
+            (f.applied, f.skipped),
+            (0, 1),
+            "forecast is pessimistic: {f:?}"
+        );
+        // Apply: the raw single-quoted splice holds the double-quote, so it lands.
+        assert_eq!(
+            (a.applied, a.skipped),
+            (1, 0),
+            "apply lands the single-quoted rewrite: {a:?}"
+        );
+        assert_ne!(
+            (f.applied, f.skipped),
+            (a.applied, a.skipped),
+            "this pins the KNOWN snapshot-reconstruction divergence; if it now \
+             matches, the cache retains on-disk quoting — update this boundary test"
+        );
+    }
+
+    /// NRN-161: a recursive folder move whose destination lands INSIDE the source's
+    /// own subtree (`move a a/z`) is a move-into-self — it must refuse at plan
+    /// expansion, identically on the dry-run forecast and the confirmed apply,
+    /// rather than garble the tree or partially fail at apply time.
+    #[test]
+    fn folder_move_into_own_subtree_refuses_on_both_paths() {
+        let docs: &[(&str, &str)] = &[
+            ("a/x.md", "---\ntype: note\n---\n# X\n"),
+            ("a/z/y.md", "---\ntype: note\n---\n# Y\n"),
+        ];
+        for confirm in [false, true] {
+            let (_t, root) = synth_vault(docs);
+            let cache = built(&root);
+            let mut p = params("a", "a/z", confirm);
+            p.recursive = true;
+            let report = execute(&cache, None, &p, TODAY, &mut sink())
+                .unwrap()
+                .report;
+            assert_eq!(
+                report.outcome,
+                ApplyOutcome::Refused,
+                "move-into-self must refuse (confirm={confirm})"
+            );
+            assert_eq!(report.exit_code(), 2);
+            let failed_op = report
+                .operations
+                .iter()
+                .find(|o| o.error.is_some())
+                .expect("a refusal names the offending op");
+            assert_eq!(
+                failed_op.error.as_ref().unwrap().code,
+                "move-destination-inside-source"
+            );
+            // Nothing moved: the source tree is intact.
+            assert!(root.join("a/x.md").as_std_path().exists());
+            assert!(root.join("a/z/y.md").as_std_path().exists());
+            assert!(!root.join("a/z/x.md").as_std_path().exists());
+        }
+    }
+
+    /// NRN-161 gap 3: a folder move whose destination lands on a document KNOWN to
+    /// the index is a collision the forecast must surface — refused at plan
+    /// expansion (which runs on the dry-run too), not only when apply hits the
+    /// live file. Consults the index, never the filesystem.
+    #[test]
+    fn folder_move_forecasts_destination_collision() {
+        let docs: &[(&str, &str)] = &[
+            ("src/a.md", "---\ntype: note\n---\n# A\n"),
+            // The destination `dst/a.md` is already an indexed document.
+            ("dst/a.md", "---\ntype: note\n---\n# occupied\n"),
+        ];
+        let (_t, root) = synth_vault(docs);
+        let cache = built(&root);
+        let mut p = params("src", "dst", false);
+        p.recursive = true;
+        let report = execute(&cache, None, &p, TODAY, &mut sink())
+            .unwrap()
+            .report;
+
+        assert_eq!(
+            report.outcome,
+            ApplyOutcome::Refused,
+            "an index-known destination collision must be forecast as a refusal"
+        );
+        assert_eq!(report.exit_code(), 2);
+        let failed_op = report
+            .operations
+            .iter()
+            .find(|o| o.error.is_some())
+            .expect("a refusal names the offending op");
+        assert_eq!(
+            failed_op.error.as_ref().unwrap().code,
+            "move-destination-exists"
+        );
+        // The occupying document is untouched.
+        assert!(root.join("dst/a.md").as_std_path().exists());
+        assert!(root.join("src/a.md").as_std_path().exists());
+    }
+
+    /// Control for gap 3: `--force` overwrites, so an occupied destination is not a
+    /// collision — the folder move forecasts cleanly.
+    #[test]
+    fn folder_move_force_does_not_forecast_collision() {
+        let docs: &[(&str, &str)] = &[
+            ("src/a.md", "---\ntype: note\n---\n# A\n"),
+            ("dst/a.md", "---\ntype: note\n---\n# occupied\n"),
+        ];
+        let (_t, root) = synth_vault(docs);
+        let cache = built(&root);
+        let mut p = params("src", "dst", false);
+        p.recursive = true;
+        p.force = true;
+        let report = execute(&cache, None, &p, TODAY, &mut sink())
+            .unwrap()
+            .report;
+        assert_eq!(report.outcome, ApplyOutcome::Forecast);
     }
 }
