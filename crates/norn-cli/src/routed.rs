@@ -36,6 +36,15 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
         .map_err(|e| Diagnostic::new(format!("cannot read the current directory: {e}")))?;
     let home = ConfigHome::from_env().map_err(|e| config_error_diagnostic(&e))?;
 
+    // Selector precedence (H3b, ADR 0020 amendment): `-C`/`--cwd` always wins
+    // over `--vault NAME` — the resolver below returns on the explicit-path
+    // branch without ever consulting the name. That precedence is silent
+    // otherwise, so surface it here: a `--vault` the caller expected to route
+    // by name is not silently ignored with no signal.
+    if let Some(warning) = selector_precedence_warning(global) {
+        eprintln!("{warning}");
+    }
+
     let input = ResolveInput {
         explicit_path: global.cwd.clone(),
         explicit_name: global.vault.clone(),
@@ -120,6 +129,19 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
         .wait_until_ready(MAX_WAIT)
         .map_err(|e| client_error_diagnostic(&e))?;
     Ok(session)
+}
+
+/// The selector-precedence advisory (H3b, ADR 0020 amendment): when both
+/// `-C`/`--cwd` and `--vault NAME` are given, `-C` always wins (the resolver
+/// never even looks the name up). Returns the `warning:`-prefixed line to
+/// print when that override actually happened, or `None` when only one — or
+/// neither — selector was given.
+fn selector_precedence_warning(global: &GlobalArgs) -> Option<String> {
+    let name = global.vault.as_ref()?;
+    global.cwd.as_ref()?;
+    Some(format!(
+        "warning: --vault {name} is overridden by -C/--cwd (the explicit path always wins)"
+    ))
 }
 
 /// The instant, pre-summon vault-root check for the direct-path resolution vias
@@ -317,6 +339,34 @@ mod tests {
 
         let io = client_error_diagnostic(&ClientError::Io(std::io::Error::other("boom")));
         assert!(io.hints().is_empty(), "a raw IO error adds no filler hint");
+    }
+
+    fn global_args(cwd: Option<&str>, vault: Option<&str>) -> GlobalArgs {
+        GlobalArgs {
+            cwd: cwd.map(PathBuf::from),
+            verbose: false,
+            no_cache_refresh: false,
+            color: crate::cli::ColorWhen::Auto,
+            vault: vault.map(str::to_string),
+            help_short: false,
+            help_long: false,
+            dynamic_fields: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn selector_precedence_warns_only_when_both_selectors_are_given() {
+        // H3b (ADR 0020 amendment): `-C` always wins over `--vault`, silently
+        // — this is the one diagnostic surfacing that override.
+        let both = global_args(Some("/some/vault"), Some("atlas"));
+        let warning = selector_precedence_warning(&both).expect("both given must warn");
+        assert!(warning.starts_with("warning: "));
+        assert!(warning.contains("--vault atlas"));
+        assert!(warning.contains("-C"));
+
+        assert!(selector_precedence_warning(&global_args(Some("/some/vault"), None)).is_none());
+        assert!(selector_precedence_warning(&global_args(None, Some("atlas"))).is_none());
+        assert!(selector_precedence_warning(&global_args(None, None)).is_none());
     }
 
     #[test]
