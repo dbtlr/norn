@@ -6,6 +6,7 @@
 
 use crate::domain::Document;
 use crate::standards::{FieldTypeSpec, ValidateRule, VaultConfig};
+use norn_wire::MutationWarning;
 use serde_json::Value;
 
 /// A schema-coercion refusal for a single `--field` value. `code()` gives the
@@ -283,6 +284,34 @@ pub fn display_allowed(allowed: &[Value]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Render a single JSON scalar for a refusal message: a JSON string unwraps to
+/// its bare text (`foo`, not `"foo"`); every other scalar uses JSON's own
+/// display.
+pub fn display_value(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string())
+}
+
+/// The `set`/`new` "value not allowed" refusal prose: one function both verbs
+/// call for the same condition, so the message never drifts between them.
+pub fn value_not_allowed_message(field: &str, value: &str, allowed: &str) -> String {
+    format!(
+        "value '{value}' is not allowed for '{field}' (allowed: {allowed}); use --force to override"
+    )
+}
+
+/// The `--force` bypass warning both verbs emit when a schema check is
+/// overridden rather than enforced.
+pub fn force_bypass_warning(field: &str, what: &str) -> MutationWarning {
+    MutationWarning {
+        code: "force-bypass".into(),
+        field: Some(field.to_string()),
+        message: format!("--force bypassed {what} for '{field}'"),
+    }
 }
 
 /// Build the post-state document for schema resolution: overlay the batch's

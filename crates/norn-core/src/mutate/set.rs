@@ -306,7 +306,7 @@ fn synth(
                         field_type: ty,
                     });
                 }
-                warnings.push(force_bypass(&key, "type validation"));
+                warnings.push(coerce::force_bypass_warning(&key, "type validation"));
             }
         } else if !coerce::is_known_field(cfg, &effective, &key) {
             warnings.push(unknown_field(&key));
@@ -319,7 +319,10 @@ fn synth(
                         allowed: coerce::display_allowed(&allowed),
                     });
                 }
-                warnings.push(force_bypass(&key, "allowed-values validation"));
+                warnings.push(coerce::force_bypass_warning(
+                    &key,
+                    "allowed-values validation",
+                ));
             }
         }
         field_json_typed.push((key, parsed));
@@ -331,7 +334,10 @@ fn synth(
             if !force {
                 return Err(SetError::RequiredFieldRemoved { field: key.clone() });
             }
-            warnings.push(force_bypass(key, "required-field protection"));
+            warnings.push(coerce::force_bypass_warning(
+                key,
+                "required-field protection",
+            ));
         }
     }
 
@@ -527,7 +533,7 @@ fn coerce_kv_slice(
                 coerce::coerce_value_for_type(effective_ty, &raw, max).map_err(SetError::Coerce)?
             }
             Some(_) => {
-                w.push(force_bypass(&key, "type validation"));
+                w.push(coerce::force_bypass_warning(&key, "type validation"));
                 Value::String(raw.clone())
             }
             None => {
@@ -542,17 +548,16 @@ fn coerce_kv_slice(
             if let Some(allowed) = coerce::lookup_allowed_values(cfg, doc, &key) {
                 if !coerce::value_in_allowed(&coerced, &allowed) {
                     if !force {
-                        let value = coerced
-                            .as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| coerced.to_string());
                         return Err(SetError::ValueNotAllowed {
                             field: key.clone(),
-                            value,
+                            value: coerce::display_value(&coerced),
                             allowed: coerce::display_allowed(&allowed),
                         });
                     }
-                    w.push(force_bypass(&key, "allowed-values validation"));
+                    w.push(coerce::force_bypass_warning(
+                        &key,
+                        "allowed-values validation",
+                    ));
                 }
             }
         }
@@ -612,14 +617,6 @@ fn unknown_field(key: &str) -> MutationWarning {
         code: "unknown-field".into(),
         field: Some(key.to_string()),
         message: format!("field '{key}' not declared in schema"),
-    }
-}
-
-fn force_bypass(key: &str, what: &str) -> MutationWarning {
-    MutationWarning {
-        code: "force-bypass".into(),
-        field: Some(key.to_string()),
-        message: format!("--force bypassed {what} for '{key}'"),
     }
 }
 
@@ -716,10 +713,7 @@ impl std::fmt::Display for SetError {
                 field,
                 value,
                 allowed,
-            } => write!(
-                f,
-                "value '{value}' is not allowed for '{field}' (allowed: {allowed}); use --force to override"
-            ),
+            } => write!(f, "{}", coerce::value_not_allowed_message(field, value, allowed)),
             SetError::FieldJsonInvalid { field, detail } => {
                 write!(f, "--field-json value is not valid JSON ({field}): {detail}")
             }

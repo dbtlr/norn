@@ -745,37 +745,41 @@ fn build_create(
     // a clean forecast could precede a schema-violating create, defeating
     // plan-then-apply. The allowed list rides in the refusal message so an agent
     // can recover without a second query; the code/message converge on `set`'s
-    // `value-not-allowed` family.
+    // `value-not-allowed` family. Every matching rule that declares
+    // allowed_values for the field is checked — not just the first — so two
+    // co-applying rules with different sets both gate the value; a scan
+    // stopping at the first declaring rule would let a value valid under it
+    // but rejected by a second rule pass preflight, surfacing only as the
+    // post-apply warning.
     let mut allowed_bypass: Vec<MutationWarning> = Vec::new();
     for (field, value) in &resolved_fm {
-        let Some(allowed) = matched_rules
-            .iter()
-            .find_map(|(rule, _)| rule.allowed_values.get(field))
-        else {
-            continue;
-        };
-        if coerce::value_in_allowed(value, allowed) {
-            continue;
+        let mut bypassed = false;
+        for (rule, _) in &matched_rules {
+            let Some(allowed) = rule.allowed_values.get(field) else {
+                continue;
+            };
+            if coerce::value_in_allowed(value, allowed) {
+                continue;
+            }
+            if !params.force {
+                return Err(refusal(
+                    "value-not-allowed",
+                    coerce::value_not_allowed_message(
+                        field,
+                        &coerce::display_value(value),
+                        &coerce::display_allowed(allowed),
+                    ),
+                    Some(doc_path.to_string()),
+                ));
+            }
+            if !bypassed {
+                allowed_bypass.push(coerce::force_bypass_warning(
+                    field,
+                    "allowed-values validation",
+                ));
+                bypassed = true;
+            }
         }
-        if !params.force {
-            let shown = value
-                .as_str()
-                .map(str::to_string)
-                .unwrap_or_else(|| value.to_string());
-            return Err(refusal(
-                "value-not-allowed",
-                format!(
-                    "value '{shown}' is not allowed for '{field}' (allowed: {}); use --force to override",
-                    coerce::display_allowed(allowed)
-                ),
-                Some(doc_path.to_string()),
-            ));
-        }
-        allowed_bypass.push(MutationWarning {
-            code: "force-bypass".into(),
-            field: Some(field.clone()),
-            message: format!("--force bypassed allowed-values validation for '{field}'"),
-        });
     }
 
     let mut created: Vec<FrontmatterCreated> = Vec::new();
@@ -1321,7 +1325,8 @@ validate:
         let err = exec.report.error.as_ref().unwrap();
         assert_eq!(err.code, "value-not-allowed");
         assert!(err.message.contains("status"), "{}", err.message);
-        // The allowed list rides in the envelope (message), machine-recoverable.
+        // The allowed list is carried in the refusal message (not a separate
+        // structured field), so an agent can recover without a second query.
         assert!(err.message.contains("backlog"), "{}", err.message);
         assert!(err.message.contains("done"), "{}", err.message);
         assert!(err.message.contains("--force"), "{}", err.message);
@@ -1380,6 +1385,59 @@ validate:
                 .iter()
                 .any(|w| w.code == "value-not-allowed"),
             "the post-create pass must not double the bypassed field as value-not-allowed"
+        );
+    }
+
+    #[test]
+    fn preflight_checks_every_co_applying_rule_not_just_the_first() {
+        // Two co-applying rules declare DIFFERENT allowed_values for the same
+        // field: a path-scoped rule and an unconditional (every-document) rule.
+        // A value valid under the first-declared rule but rejected by the
+        // second must still refuse — a preflight that stopped at the first
+        // matching rule (via find_map) would let it through, surfacing the
+        // violation only as the old post-apply warning (NRN-430 fix round).
+        let cfg = r#"
+validate:
+  rules:
+    - name: path-rule
+      match:
+        path: "tasks/**/*.md"
+      allowed_values:
+        status:
+          - backlog
+          - active
+    - name: global-rule
+      allowed_values:
+        status:
+          - backlog
+          - done
+"#;
+        let (_t, root) = synth_vault(Some(cfg), &[]);
+        let cache = built(&root);
+        let config = parse_cfg(cfg);
+        let params = NewParams {
+            path: Some("tasks/foo.md".into()),
+            fields: vec!["status=active".into()],
+            parents: true,
+            confirm: true,
+            ..Default::default()
+        };
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Refused);
+        assert!(!exec.report.applied);
+        assert!(
+            !root.join("tasks/foo.md").as_std_path().exists(),
+            "no file written"
+        );
+        let err = exec.report.error.as_ref().unwrap();
+        assert_eq!(err.code, "value-not-allowed");
+        // The refusal names the SECOND (violated) rule's allowed set, not the
+        // first rule's (which `active` does satisfy).
+        assert!(err.message.contains("active"), "{}", err.message);
+        assert!(
+            err.message.contains("backlog") && err.message.contains("done"),
+            "{}",
+            err.message
         );
     }
 

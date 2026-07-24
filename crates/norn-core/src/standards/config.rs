@@ -849,14 +849,19 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
                 continue;
             }
             if let Some(allowed) = rule.allowed_values.get(field) {
-                let ok = allowed
-                    .iter()
-                    .any(|a| crate::standards::predicates::frontmatter_value_matches(value, a));
-                if !ok {
+                // Element-wise, array-aware: reuses the same predicate the
+                // write path enforces (`set`/`new`'s `value_in_allowed`) so a
+                // valid list default (e.g. `labels: [red]` against
+                // `allowed_values.labels: [red, green]`) is not rejected —
+                // `frontmatter_value_matches` alone answers "is this ONE value
+                // one of the allowed options" and is false for any list value.
+                if !crate::mutate::coerce::value_in_allowed(value, allowed) {
                     return Err(ConfigError::Invalid {
                         source_path: source_path.to_owned(),
                         message: format!(
-                            "rule {rule_label}: frontmatter_defaults.{field} is not in this rule's allowed_values"
+                            "rule {rule_label}: frontmatter_defaults.{field} value '{}' is not in this rule's allowed_values ({})",
+                            crate::mutate::coerce::display_value(value),
+                            crate::mutate::coerce::display_allowed(allowed)
                         ),
                     });
                 }
@@ -1130,12 +1135,43 @@ mod tests {
             msg.contains("frontmatter_defaults.status") && msg.contains("allowed_values"),
             "got: {msg}"
         );
+        // The offending value and the allowed set are both named, matching the
+        // write-path refusal's actionability (NRN-430 fix round).
+        assert!(msg.contains("someday"), "got: {msg}");
+        assert!(
+            msg.contains("backlog") && msg.contains("done"),
+            "got: {msg}"
+        );
     }
 
     #[test]
     fn default_within_allowed_values_loads() {
         let yaml = "validate:\n  rules:\n    - name: r\n      allowed_values:\n        status: [backlog, done]\n      frontmatter_defaults:\n        status: backlog\n";
         assert!(parse(yaml).is_ok());
+    }
+
+    #[test]
+    fn list_default_within_allowed_values_loads() {
+        // The lint must be array-aware: a list-typed default whose every
+        // element is allowed is valid, even though the raw default is itself
+        // a list (not a member of `allowed_values` verbatim). Reimplementing
+        // this check ad hoc instead of via the shared `value_in_allowed`
+        // predicate previously false-rejected every list default (NRN-430 fix
+        // round).
+        let yaml = "validate:\n  rules:\n    - name: r\n      allowed_values:\n        labels: [red, green]\n      frontmatter_defaults:\n        labels: [red]\n";
+        assert!(parse(yaml).is_ok(), "{:?}", parse(yaml).err());
+    }
+
+    #[test]
+    fn list_default_with_disallowed_element_is_rejected() {
+        // A list default with even one out-of-set element is self-contradicting
+        // and must fail to load, same as a scalar default.
+        let yaml = "validate:\n  rules:\n    - name: r\n      allowed_values:\n        labels: [red, green]\n      frontmatter_defaults:\n        labels: [red, blue]\n";
+        let msg = parse(yaml).unwrap_err().to_string();
+        assert!(
+            msg.contains("frontmatter_defaults.labels") && msg.contains("allowed_values"),
+            "got: {msg}"
+        );
     }
 
     #[test]

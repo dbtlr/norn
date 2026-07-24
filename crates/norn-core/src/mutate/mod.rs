@@ -6,7 +6,7 @@
 //! [`norn_wire::ApplyReport`], which the owner
 //! serializes onto the wire as an opaque JSON value.
 pub mod apply;
-mod coerce;
+pub(crate) mod coerce;
 pub mod delete;
 pub mod edit;
 pub mod move_doc;
