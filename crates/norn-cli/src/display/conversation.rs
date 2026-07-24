@@ -16,8 +16,6 @@ use std::io::{self, Write};
 
 use norn_wire::{ApplyReport, Note, Severity};
 
-use super::PROGRAM;
-
 /// The closed stderr-annotation prefix an annotation renders with. The
 /// conversation channel speaks exactly three prefixes — `note:` (informational,
 /// exit 0), `warning:` (a non-fatal issue, exit 0), and `error:` (a fatal
@@ -108,11 +106,12 @@ impl<'a> Conversation<'a> {
     /// One `norn: <msg>` diagnostic headline on stderr — the prefixed form for
     /// the handful of renderer-internal status lines (`vault list`'s empty and
     /// serialize-failure cases) that carry the program prefix rather than the
-    /// bare annotation shape. Mirrors
-    /// [`Presenter::diagnostic`](super::Presenter::diagnostic)'s bytes so the
-    /// stderr headline can never drift between the two entry points.
+    /// bare annotation shape. Renders through the same
+    /// [`diagnostic_line`](super::diagnostic_line) call as
+    /// [`Presenter::diagnostic`](super::Presenter::diagnostic), so the stderr
+    /// headline can never drift between the two entry points.
     pub fn diagnostic(&mut self, msg: &str) {
-        let _ = writeln!(self.err, "{PROGRAM}: {msg}");
+        let _ = super::diagnostic_line(self.err, msg);
     }
 
     /// The cascade-failure warnings (real FS errors that left backlinks

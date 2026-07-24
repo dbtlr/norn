@@ -39,6 +39,14 @@ pub use output::{
 pub use presenter::{Presenter, HINT, PROGRAM};
 pub use sink::Sink;
 
+/// One `norn: <msg>` diagnostic headline, written verbatim to `w`. The one
+/// byte layout [`Presenter::diagnostic`](presenter::Presenter::diagnostic) and
+/// [`Conversation::diagnostic`](conversation::Conversation::diagnostic) both
+/// call, so the headline can never drift between the two entry points.
+pub(crate) fn diagnostic_line(w: &mut dyn std::io::Write, msg: &str) -> std::io::Result<()> {
+    writeln!(w, "{PROGRAM}: {msg}")
+}
+
 /// The user-facing label for a serde-kebab enum value — its serialized name.
 ///
 /// A records renderer that needs the printed word for an [`OpStatus`] /

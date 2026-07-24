@@ -59,7 +59,7 @@ impl<O: Write, E: Write> Presenter<O, E> {
     /// tty-independent (agents read pipes), and nothing here ever touches
     /// stdout — the payload stream stays clean in every format.
     pub fn present_diagnostic(&mut self, diag: &Diagnostic) {
-        let _ = writeln!(self.err, "{PROGRAM}: {}", diag.message());
+        let _ = super::diagnostic_line(&mut self.err, diag.message());
         for hint in diag.hints() {
             let _ = writeln!(self.err, "{HINT}: {hint}");
         }
