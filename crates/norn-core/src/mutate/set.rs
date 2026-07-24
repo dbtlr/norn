@@ -1250,11 +1250,23 @@ mod tests {
         };
         let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
         assert!(exec.report.applied);
-        let on_disk = std::fs::read_to_string(root.join("a.md").as_std_path()).unwrap();
-        assert!(on_disk.contains("tags:"), "{on_disk}");
 
-        // Rebuild the cache post-write and validate the doc `set` just wrote.
+        // Rebuild the cache post-write and inspect the cached frontmatter
+        // directly — a `contains("tags:")` substring check on the raw file
+        // would also pass a scalar `tags: a` write, which is exactly the
+        // coercion regression this test guards against.
         cache.full_build(&root).unwrap();
+        let doc = cache
+            .document_by_path(camino::Utf8Path::new("a.md"))
+            .unwrap()
+            .expect("a.md is in the cache");
+        let tags = doc
+            .frontmatter
+            .as_ref()
+            .and_then(|fm| fm.get("tags"))
+            .cloned();
+        assert_eq!(tags, Some(serde_json::json!(["a"])), "{doc:?}");
+
         let validate_params = norn_wire::ValidateParams::default();
         let result = crate::read::validate::execute(&cache, Some(&config), &validate_params, TODAY)
             .unwrap()

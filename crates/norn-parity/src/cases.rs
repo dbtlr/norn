@@ -420,7 +420,7 @@ const VALIDATE_CASES: &[Case] = &[
     // this fully-valid value `value-not-allowed`; the rewrite reports the
     // vault clean. A single doc, single finding (oracle side) — deterministic
     // without the raw-order caveat bare `--format json` otherwise carries.
-    // DIVERGES; pinned by PD-146.
+    // DIVERGES; pinned by PD-147.
     Case {
         id: "validate-list-allowed-values-elementwise",
         argv: &["validate", "--format", "json"],

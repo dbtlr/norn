@@ -112,17 +112,19 @@ pub(crate) fn check_forbidden_frontmatter(
 }
 
 /// `allowed_values` matches an array field ELEMENT-WISE, one finding per
-/// violating element — the same decision `mutate::coerce::value_in_allowed`
-/// makes on the write path, shared here rather than mirrored so the two
-/// engines cannot drift. A scalar field matches whole (unchanged: one finding
-/// if the value isn't in the set). Config already rejects a non-scalar
-/// `allowed_values` entry (`standards::config`'s scalar-only check), so
-/// element-wise is the only coherent semantics for a list-valued field —
-/// matching it as a whole against a set of scalars could never succeed. An
-/// empty array yields no findings (there is no element to violate the set);
-/// a mixed array flags only its invalid elements, each as its own finding
-/// carrying that element's value (mirroring `check_field_references`'
-/// per-violating-item granularity for a list-valued field).
+/// violating element, via `mutate::coerce::matches_one_allowed` — the same
+/// non-recursive scalar-match core the write path's `value_in_allowed` uses
+/// for its own array arm, shared here rather than mirrored so the two engines
+/// cannot drift. A scalar field matches whole (one finding if the value isn't
+/// in the set). Config already rejects a non-scalar `allowed_values` entry
+/// (`standards::config`'s scalar-only check), so element-wise is the only
+/// coherent semantics for a list-valued field — matching it as a whole
+/// against a set of scalars could never succeed. An empty array yields no
+/// findings (there is no element to violate the set); a mixed array flags
+/// only its invalid elements, each as its own finding carrying that element's
+/// value (mirroring `check_field_references`' per-violating-item granularity
+/// for a list-valued field). An element that is itself an array (nested)
+/// never matches a scalar allowed entry and is always flagged.
 pub(crate) fn check_allowed_values(
     document: &Document,
     values: &HashMap<String, Vec<Value>>,
@@ -141,7 +143,7 @@ pub(crate) fn check_allowed_values(
         match actual {
             Value::Array(items) => {
                 for item in items {
-                    if !crate::mutate::coerce::value_in_allowed(item, allowed_values) {
+                    if !crate::mutate::coerce::matches_one_allowed(item, allowed_values) {
                         findings.push(Finding::frontmatter_disallowed_value(
                             document.path.clone(),
                             rule.map(str::to_string),
@@ -565,6 +567,30 @@ mod tests {
             .map(|f| f.actual_value.as_ref().and_then(|v| v.as_str()).unwrap())
             .collect();
         assert_eq!(flagged, vec!["bogus", "also-bogus"]);
+    }
+
+    #[test]
+    fn nested_array_element_rejected_by_both_validate_and_mutation() {
+        // The per-element loop used to call the RECURSIVE `value_in_allowed`
+        // per element, so a nested-array element ([[a, b]]) was itself
+        // unpacked and matched element-wise — quietly ACCEPTED — while
+        // mutation's whole-value `value_in_allowed` call REJECTS the same
+        // field value. Both engines now share the non-recursive
+        // `matches_one_allowed` helper, so a nested-array element is rejected
+        // identically on both paths.
+        let allowed = allowed_values("tags", "          - a\n          - b\n");
+        let doc = doc_with_frontmatter(json!({"tags": [["a", "b"]]}));
+
+        let findings = check_allowed_values(&doc, &allowed, None);
+        assert_eq!(findings.len(), 1, "validate flags the nested-array element");
+        assert_eq!(findings[0].code, "value-not-allowed");
+        assert_eq!(findings[0].field.as_deref(), Some("tags"));
+
+        let allowed_values_vec = allowed.get("tags").expect("tags entry present");
+        assert!(
+            !crate::mutate::coerce::value_in_allowed(&json!([["a", "b"]]), allowed_values_vec),
+            "mutation refuses the same nested-array value"
+        );
     }
 
     #[test]
