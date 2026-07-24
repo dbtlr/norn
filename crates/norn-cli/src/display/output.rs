@@ -68,6 +68,8 @@ pub struct FindView {
     /// frontmatter row.
     pub sort_field: Option<String>,
     pub format: FormatChoice,
+    /// `--no-pager`: suppress the pager (NRN-454) even on a long TTY render.
+    pub no_pager: bool,
 }
 
 /// `get`'s renderable report plus projection parameters.
@@ -79,6 +81,8 @@ pub struct GetView {
     /// warning, the `get` counterpart to `FindView::sort_field`).
     pub sort_field: Option<String>,
     pub format: FormatChoice,
+    /// `--no-pager` (NRN-454): suppress the pager even on a long TTY render.
+    pub no_pager: bool,
 }
 
 /// `count`'s renderable report.

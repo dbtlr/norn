@@ -284,6 +284,7 @@ mod tests {
             cols: vec![],
             all_cols: false,
             sort_field: None,
+            no_pager: false,
             format: FormatChoice {
                 explicit: Some(Format::Paths),
                 spec: FormatSpec {

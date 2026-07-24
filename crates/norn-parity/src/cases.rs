@@ -249,6 +249,23 @@ const HELP_CASES: &[Case] = &[
         normalize: NO_NORM,
         plan: None,
     },
+    // `get --help` diverges from the oracle beyond the standard GLOBAL
+    // OPTIONS reshape (PD-102): the rewrite's `get` gains a `--no-pager` flag
+    // (NRN-454) the oracle's `get` never had, so the OPTIONS block carries one
+    // extra row. See PD-144.
+    Case {
+        id: "help-get",
+        argv: &["get", "--help"],
+        fixture: HELP_FIXTURE,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
 ];
 
 /// validate ports for real (NRN-381): the read-side standards engine + verb.

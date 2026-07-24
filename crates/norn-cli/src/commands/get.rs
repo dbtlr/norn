@@ -6,7 +6,10 @@
 //! link sets, hash/stem, and body when asked); `run` returns the `GetReport` as an
 //! [`Output`], and the display layer projects `--col` / `--all-cols` / `--section`
 //! / `--format` (NRN-370). `--format markdown` prints
-//! the exact source bytes the owner read from disk (ADR 0014).
+//! the exact source bytes the owner read from disk (ADR 0014). `--no-pager`
+//! (NRN-454) is a new grammar surface: a whole document is the strongest
+//! long-form case, so `get` pages its `records` and `markdown` output on a
+//! TTY exactly like `find` already pages its `records` output.
 
 use clap::Args;
 use norn_wire::{GetParams, SortPaginateParams};
@@ -80,6 +83,12 @@ pub struct GetArgs {
     /// Output format. Default records; markdown returns one exact source file.
     #[arg(long, value_enum, default_value_t = GetFormat::Records, help_heading = "Output")]
     pub format: GetFormat,
+
+    /// Skip the pager even when stdout is a TTY (NRN-454). `get` renders whole
+    /// documents — the strongest long-form case — so it pages its `records`
+    /// and `markdown` output exactly like `find` pages its `records` output.
+    #[arg(long = "no-pager", help_heading = "Output")]
+    pub no_pager: bool,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +172,7 @@ pub fn run(args: &GetArgs, global: &GlobalArgs) -> Result<Output, Diagnostic> {
         cols: args.col.clone(),
         sections: args.section.clone(),
         sort_field: args.paging.sort.clone(),
+        no_pager: args.no_pager,
         format: FormatChoice {
             explicit: Some(args.format.into()),
             spec: FormatSpec {

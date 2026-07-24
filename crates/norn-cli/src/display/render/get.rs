@@ -345,6 +345,7 @@ mod tests {
             cols: vec![],
             sections: vec![],
             sort_field: None,
+            no_pager: false,
             format: FormatChoice {
                 explicit: Some(explicit),
                 spec: FormatSpec {
