@@ -65,11 +65,12 @@ pub struct CaseOutcome {
     /// like `post_state`: the verdict already folded this into match/
     /// diverged/drift.
     pub mcp_divergence: Option<mcp::McpDivergence>,
-    /// How large the observed divergence is, in regions (`crate::extent`):
-    /// 0 for a Match, and for anything else the count the covering ledger
-    /// entry must declare. Reported for an uncovered case so the entry that
-    /// covers it can be authored from the run rather than by hand.
-    pub extent: usize,
+    /// How large the observed divergence is, per channel
+    /// (`crate::extent`): zero for a Match, and for anything else the extent
+    /// the covering ledger entry must declare. Reported for an uncovered
+    /// case so the entry that covers it can be authored from the run rather
+    /// than by hand.
+    pub extent: extent::Extent,
     /// Set only in `Mode::All` when an MCP case could not be driven to a
     /// comparable result at all (a timeout, a premature EOF, a malformed
     /// frame — see `mcp::McpError`) — rendered as a runner-error row instead
@@ -78,16 +79,23 @@ pub struct CaseOutcome {
     pub runner_error: Option<String>,
 }
 
+/// One cited case whose observed extent disagrees with what its entry
+/// declares.
+pub struct ExtentGapCase {
+    pub case_id: &'static str,
+    pub declared: extent::Extent,
+    pub observed: extent::Extent,
+}
+
 /// A ledger entry whose declared divergence extent disagrees with what the
-/// run observed on one of its cited cases: the entry covers a divergence of
-/// a different size than the one described in its `old`/`new` text.
+/// run observed: the entry covers a divergence of a different shape than the
+/// one its `old`/`new` text describes. Reported per ENTRY — recording the fix
+/// is one edit however many of its cases disagree.
 pub struct ExtentGap {
     pub entry_id: String,
-    pub case_id: &'static str,
-    pub declared: usize,
-    pub observed: usize,
-    /// The entry's whole `observed` table as this run measured it — the line
-    /// to record once the diff has been re-read.
+    pub cases: Vec<ExtentGapCase>,
+    /// The entry's whole `observed` line as this run measured it — what to
+    /// record once the diff has been re-read.
     pub replacement: String,
 }
 
@@ -144,6 +152,12 @@ pub enum RunError {
     /// describe the host.
     ForeignEnvironment {
         stderr: String,
+    },
+    /// A case whose two sides differ measured an extent of zero, so no
+    /// ledger entry could honestly declare it: `observed = {}` says nothing
+    /// differs. A measurement bug, not a parity result.
+    UnmeasuredDivergence {
+        case_id: &'static str,
     },
     /// A binary was killed by a signal rather than exiting — cannot be
     /// compared as a verdict, so the whole run aborts.
@@ -229,6 +243,11 @@ impl std::fmt::Display for RunError {
                  that the client still finds (its version-skew notice lands on stderr); a stray \
                  NORN_ROOT / NORN_CONFIG_DIR is the other. Stop the daemon (`norn service stop`) \
                  and re-run. Oracle stderr was:\n{stderr}"
+            ),
+            RunError::UnmeasuredDivergence { case_id } => write!(
+                f,
+                "case `{case_id}` differs but measured zero divergence regions, so no ledger \
+                 entry could declare it honestly — the extent measurement is wrong, not the case"
             ),
             RunError::Signaled {
                 binary_label,
@@ -489,34 +508,47 @@ fn substitute_plan_argv(argv: &[&str], plan_path: &Path) -> Vec<String> {
 /// their extent is unmeasured, not zero.
 fn extent_gaps(
     ledger: &Ledger,
-    observed: &std::collections::BTreeMap<&'static str, usize>,
+    observed: &std::collections::BTreeMap<&'static str, extent::Extent>,
+    stale: &[String],
 ) -> Vec<ExtentGap> {
     let mut gaps = Vec::new();
     for entry in &ledger.entries {
-        let ran: Vec<(&'static str, usize)> = entry
+        // A stale entry's every ran case matched, so each would report a gap
+        // whose paste line is `observed = {}` — a line the ledger's own guard
+        // rejects, because the remedy for a divergence that is GONE is
+        // deleting the entry, not recording a zero. The stale report says
+        // exactly that; saying it twice, differently, is worse than once.
+        if stale.contains(&entry.id) {
+            continue;
+        }
+        let ran: Vec<(&'static str, extent::Extent)> = entry
             .cases
             .iter()
             .filter_map(|c| observed.get_key_value(c.as_str()))
-            .map(|(id, count)| (*id, *count))
+            .map(|(id, e)| (*id, *e))
             .collect();
         if ran.is_empty() {
             continue;
         }
-        // One replacement line per entry, carrying every case that ran —
-        // recording it is a single edit however many cases disagree.
-        let replacement = crate::ledger::Entry::render_observed(&ran);
-        for (case_id, observed_extent) in ran {
-            let declared = entry.declared_extent(case_id);
-            if declared != observed_extent {
-                gaps.push(ExtentGap {
-                    entry_id: entry.id.clone(),
-                    case_id,
-                    declared,
-                    observed: observed_extent,
-                    replacement: replacement.clone(),
-                });
-            }
+        let disagreeing: Vec<ExtentGapCase> = ran
+            .iter()
+            .filter(|(case_id, observed_extent)| entry.declared_extent(case_id) != *observed_extent)
+            .map(|(case_id, observed_extent)| ExtentGapCase {
+                case_id,
+                declared: entry.declared_extent(case_id),
+                observed: *observed_extent,
+            })
+            .collect();
+        if disagreeing.is_empty() {
+            continue;
         }
+        let measured: std::collections::BTreeMap<&str, extent::Extent> =
+            ran.iter().map(|(id, e)| (*id, *e)).collect();
+        gaps.push(ExtentGap {
+            entry_id: entry.id.clone(),
+            replacement: entry.render_observed(&measured),
+            cases: disagreeing,
+        });
     }
     gaps
 }
@@ -576,7 +608,7 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
     let mut outcomes = Vec::new();
     let mut ran_ids: BTreeSet<&str> = BTreeSet::new();
     let mut diverged_ids: BTreeSet<&str> = BTreeSet::new();
-    let mut observed_extents: std::collections::BTreeMap<&'static str, usize> =
+    let mut observed_extents: std::collections::BTreeMap<&'static str, extent::Extent> =
         std::collections::BTreeMap::new();
 
     let candidate_binary: &Path = if self_check {
@@ -685,9 +717,13 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                 // `select_cases`) or both sides are the oracle (which must
                 // never fail to drive), so this arm is unreachable in
                 // practice for those modes today.
-                Err(source) if matches!(config.mode, Mode::All) => {
-                    (Verdict::Drift, None, None, Some(source.to_string()), 0)
-                }
+                Err(source) if matches!(config.mode, Mode::All) => (
+                    Verdict::Drift,
+                    None,
+                    None,
+                    Some(source.to_string()),
+                    extent::Extent::default(),
+                ),
                 Err(source) => {
                     return Err(RunError::Mcp {
                         case_id: case.id,
@@ -812,6 +848,13 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
         if let Verdict::Diverged { .. } = &verdict {
             diverged_ids.insert(case.id);
         }
+        // A case that differs must measure as differing, or the ledger could
+        // cover it with `observed = {}` — a declaration that nothing differs,
+        // gating a real divergence. The floor in `extent::stream_regions`
+        // keeps this reachable only through a measurement bug.
+        if !matches!(verdict, Verdict::Match) && runner_error.is_none() && extent.is_zero() {
+            return Err(RunError::UnmeasuredDivergence { case_id: case.id });
+        }
         observed_extents.insert(case.id, extent);
         outcomes.push(CaseOutcome {
             case_id: case.id,
@@ -834,7 +877,7 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
     };
     let extent_gaps = match &ledger {
         None => Vec::new(),
-        Some(l) => extent_gaps(l, &observed_extents),
+        Some(l) => extent_gaps(l, &observed_extents, &stale_entries),
     };
 
     Ok(RunReport {

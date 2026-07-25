@@ -270,7 +270,7 @@ old = "oracle writes ORACLE"
 new = "candidate writes CANDIDATE"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = {{ "{MUT_CASE_ID}" = 1 }}
+observed = {{ "{MUT_CASE_ID}" = {{ tree = 1 }} }}
 "#
         ),
     );

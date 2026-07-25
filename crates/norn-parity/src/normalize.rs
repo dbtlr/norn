@@ -42,6 +42,20 @@ pub enum Normalization {
     /// (operations, cascade, outcome) byte-exactly. Only for `--format json`
     /// cascade cases; records omits `plan_hash`.
     PlanHash,
+    /// Drop the `self-update` row from a top-level `--help` COMMANDS block,
+    /// on both sides.
+    ///
+    /// The pinned oracle lists `self-update` only when it can find the
+    /// release-installer receipt it was installed with (under `$HOME`), and
+    /// accepts the command either way. The harness spawns into a cleared
+    /// environment where that receipt is unreachable, and the CI musl
+    /// artifact does not carry one — so whether the row renders is a
+    /// property of the environment and the build, while the rewrite lists it
+    /// unconditionally. A ledger extent is a platform-invariant number, so
+    /// the row is removed from both sides rather than counted differently on
+    /// each. The oracle's behavior is recorded in PD-101's text, which is
+    /// what a normalization step can never do.
+    SelfUpdateCommandRow,
 }
 
 /// The normalization steps applied to every case today.
@@ -89,9 +103,21 @@ pub fn normalize_text(text: &str, vault_roots: &[&Path], steps: &[Normalization]
                 // `"plan_hash": "<hex>"` (a space after the colon).
                 out = strip_hex_run_after(&out, "\"plan_hash\": \"");
             }
+            Normalization::SelfUpdateCommandRow => {
+                out = drop_command_row(&out, "self-update");
+            }
         }
     }
     out
+}
+
+/// Remove every line whose first token is `name` — a COMMANDS row in a help
+/// page. Line terminators are preserved verbatim (`split_inclusive`), so this
+/// removes rows and changes nothing else about the text's bytes.
+fn drop_command_row(text: &str, name: &str) -> String {
+    text.split_inclusive('\n')
+        .filter(|line| line.split_whitespace().next() != Some(name))
+        .collect()
 }
 
 /// Remove the run of ascii-hexdigits immediately following each occurrence of
@@ -173,6 +199,34 @@ mod tests {
         assert_eq!(normalize_text(oracle, &[], TRACE), rewrite);
         // The rewrite's already-empty id is a no-op (idempotent).
         assert_eq!(normalize_text(rewrite, &[], TRACE), rewrite);
+    }
+
+    const SELF_UPDATE: &[Normalization] = &[Normalization::SelfUpdateCommandRow];
+
+    #[test]
+    fn self_update_row_is_dropped_from_a_commands_block() {
+        let listed = "COMMANDS\n    cache             Manage the cache\n    self-update       Update norn to the latest GitHub release\n    mcp               Run the MCP server\n";
+        let hidden = "COMMANDS\n    cache             Manage the cache\n    mcp               Run the MCP server\n";
+        assert_eq!(normalize_text(listed, &[], SELF_UPDATE), hidden);
+        // Idempotent: a side that never rendered the row is untouched.
+        assert_eq!(normalize_text(hidden, &[], SELF_UPDATE), hidden);
+    }
+
+    #[test]
+    fn self_update_normalization_leaves_other_mentions_alone() {
+        // Only a row whose FIRST token is the command name is a COMMANDS row;
+        // prose naming it in passing is real help text.
+        let text = "    update            Run self-update to fetch a release\nself-update-ish     Not the command\n";
+        assert_eq!(normalize_text(text, &[], SELF_UPDATE), text);
+    }
+
+    #[test]
+    fn self_update_normalization_preserves_a_missing_trailing_newline() {
+        let text = "    cache   Manage the cache\n    self-update  Update\n    mcp   Serve";
+        assert_eq!(
+            normalize_text(text, &[], SELF_UPDATE),
+            "    cache   Manage the cache\n    mcp   Serve"
+        );
     }
 
     #[test]

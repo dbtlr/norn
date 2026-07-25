@@ -14,7 +14,7 @@
 # new = "what the rewrite does"
 # reason = "decided-better"          # or "discovered-inconsistency"
 # decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-# observed = { "find-json-basic" = 2 }   # divergence extent, in regions
+# observed = { "find-json-basic" = { stdout = 2 } }   # divergence extent
 #
 # ID ALLOCATION — take the number of the TASK you are adding the entry under.
 # Task NRN-471 allocates `PD-471`; a task adding a second entry suffixes a
@@ -35,11 +35,28 @@
 # a citation says nothing about WHAT differs — so without this an entry
 # describing one difference silently covers every other difference that later
 # lands on the same surface. It records how many REGIONS the divergence spans
-# on each cited case: one maximal run of differing lines per stream, one for
-# an exit-code difference, one per post-mutation tree path that differs, and
-# — for an MCP case — one per differing response frame, extra response id and
-# duplicate response id (`crates/norn-parity/src/extent.rs`). A cited case
-# absent from the table declares zero regions: it is expected to match.
+# on each cited case, PER CHANNEL: one maximal run of differing lines on
+# `stdout` / `stderr`, `exit` for an exit-code difference, `tree` per
+# post-mutation vault path that differs, `mcp` per differing response frame,
+# extra response id and duplicate response id
+# (`crates/norn-parity/src/extent.rs`). Channels are separate numbers because
+# a single total lets a region vanish from one channel while another appears
+# and still read as unchanged. A cited case absent from the table declares
+# zero regions: it is expected to match.
+#
+# What the number is, precisely:
+#
+# - a TRIPWIRE on the divergence's SHAPE, not a measure of its meaning. A
+#   region appearing or vanishing fails the run; a same-size reshaping WITHIN
+#   one channel does not, and nothing machine-checks the prose;
+# - not a quota of sentences. `old`/`new` must describe every CAUSE; one cause
+#   can spray many regions (PD-151 is one decision and eight regions, and is
+#   right to describe it once);
+# - PLATFORM-INVARIANT. A count that differs between macOS and Linux is a bug
+#   in the case or its normalization — never a number to encode. `help-bare`
+#   is the worked example: see PD-101 and
+#   `Normalization::SelfUpdateCommandRow`;
+# - only meaningful from a clean run — see step 0.
 #
 # Authoring an entry, or reacting to a gap the run reports:
 #
@@ -58,17 +75,24 @@
 #      table is printed under "ledger extent gaps", with the `observed` line
 #      to record;
 #   3. re-read the actual diff for every region before recording the line —
-#      `old`/`new` must describe ALL of them, since one entry is the only
+#      `old`/`new` must describe every CAUSE, since one entry is the only
 #      description that case will ever have. A region count that changed
 #      means the divergence changed, not that a number needs bumping.
+#
+#   A divergence that is GONE has no line to record: when every cited case
+#   that ran now matches, the entry is stale and the remedy is deleting it
+#   (or restoring the case that proved it), never recording `observed = {}`.
 #
 # Runner-side rules (crates/norn-parity/src/ledger.rs), all enforced:
 # - Unknown `reason`, a missing required field, a duplicate entry id (so a
 #   collided id fails loudly rather than shadowing), or an entry citing an
 #   unknown case id is a load error (runner exit 2).
-# - An `observed` key the entry does not cite is a load error; a declared
-#   extent that disagrees with the observed one fails the run (exit 1),
-#   exactly as a stale entry does.
+# - An `observed` key the entry does not cite, or an extent naming a channel
+#   other than stdout / stderr / exit / tree / mcp, is a load error; a
+#   declared extent that disagrees with the observed one fails the run
+#   (exit 1), exactly as a stale entry does. A case that differs but measures
+#   zero regions aborts the run (exit 2): no entry could declare it
+#   honestly.
 # - An entry may only cite cases whose surface is already ported (the case's
 #   own `ported` flag). Divergence can only be observed on a ported surface,
 #   so an entry for an unported one is premature — a load error (exit 2).
@@ -108,10 +132,10 @@ id = "PD-101"
 surface = "--help (top-level command list + GLOBAL OPTIONS)"
 cases = ["help-bare"]
 old = "the 22-command list ends at `audit` with no registered-vault namespace; GLOBAL OPTIONS lists `--config` and has no `--vault`; the `-C/--cwd` description is truncated at 70 chars with an ellipsis in `--help`"
-new = "a `vault` namespace (register/unregister/list/set) is listed after `audit`, exposing the ADR 0017 registry; GLOBAL OPTIONS drops `--config` and adds `--vault NAME`; the `-C/--cwd` description is shown in FULL (unclamped) in `--help`, only the concise line in `-h` (NRN-335)"
+new = "a `vault` namespace (register/unregister/list/set) is listed after `audit`, exposing the ADR 0017 registry; GLOBAL OPTIONS drops `--config` and adds `--vault NAME`; the `-C/--cwd` description is shown in FULL (unclamped) in `--help`, only the concise line in `-h` (NRN-335). A FOURTH difference is normalized away rather than gated here: the rewrite always lists a `self-update` COMMANDS row, while the pinned oracle lists it only where it finds the release-installer receipt it was installed with (present beside a `$HOME` install, absent under the harness's cleared environment and absent from the CI musl artifact) — and accepts the command either way. That row's presence tracks the environment and the build rather than either binary, and an extent is a platform-invariant number, so `Normalization::SelfUpdateCommandRow` removes the row from BOTH sides for this case"
 reason = "decided-better"
 decision = "docs/decisions/0017-registered-vaults-summoned-owners.md"
-observed = { "help-bare" = 4 }
+observed = { "help-bare" = { stdout = 3 } }
 
 # The per-command GLOBAL OPTIONS change (NRN-345) on the two ported subcommand
 # help surfaces. Both drop `--config` and gain `--vault NAME`; neither has a
@@ -124,7 +148,7 @@ old = "GLOBAL OPTIONS lists `--config <YAML config file>` and has no `--vault`; 
 new = "GLOBAL OPTIONS drops `--config` (config is resolver-derived under ADR 0017) and adds `--vault NAME` (registered-vault targeting the summoner consumes); `-C/--cwd` shows its full description unclamped in `--help` (NRN-335); on `find --help` the Sort-and-paging / Output help text also changes — `--no-limit` and `--all-cols` state last-wins and `--starts-at` states zero-indexing / Default 0 (NRN-331 / NRN-332)"
 reason = "decided-better"
 decision = "docs/decisions/0017-registered-vaults-summoned-owners.md"
-observed = { "help-validate" = 3, "help-find" = 5 }
+observed = { "help-validate" = { stdout = 3 }, "help-find" = { stdout = 5 } }
 
 # ADR 0019 (code blocks are opaque): a `^block-id` defined only INSIDE a fenced
 # code block is literal sample text, not an anchor, so a `[[Note#^id]]` reference
@@ -140,7 +164,7 @@ old = "a `^block-id` inside a fenced code block is a real anchor, so `[[code-anc
 new = "code is opaque (ADR 0019): the code-fenced `^blkincode` is not an anchor, so the reference is unresolved (block-ref-missing)"
 reason = "decided-better"
 decision = "docs/decisions/0019-code-blocks-are-opaque.md"
-observed = { "text-edge-code-fenced-block-id-link" = 1 }
+observed = { "text-edge-code-fenced-block-id-link" = { stdout = 1 } }
 
 # NRN-349 (BOM recognition): a leading UTF-8 BOM before the `---` fence no longer
 # hides the frontmatter. The oracle reads a BOM'd doc as frontmatter-less (its
@@ -155,7 +179,7 @@ old = "a leading UTF-8 BOM hides the frontmatter: the block is unrecognized, so 
 new = "the BOM is skipped before the fence (NRN-349): the frontmatter is recognized and its fields are queryable, and body starts after the closing fence"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "text-edge-bom-doc-all-cols" = 1 }
+observed = { "text-edge-bom-doc-all-cols" = { stdout = 1 } }
 
 # NRN-332: `--starts-at` is re-indexed from 1-indexed (with a 0→1 floor) to a
 # plain ZERO-indexed offset (default 0). Agents assume zero-indexing; the
@@ -170,7 +194,7 @@ old = "`--starts-at` is 1-indexed with a silent floor (`0` and `1` both mean the
 new = "`--starts-at` is a zero-indexed offset, default 0, no floor; `--starts-at 1 --limit 1` skips the first document and returns the SECOND (NRN-332)"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "read-find-starts-at-zero-indexed-zoo" = 1 }
+observed = { "read-find-starts-at-zero-indexed-zoo" = { stdout = 1 } }
 
 # NRN-331: competing flags follow merge-queue semantics — the LAST operation on
 # the command line wins — instead of hard-erroring. `--limit` and `--no-limit`
@@ -186,7 +210,7 @@ old = "`--limit N --no-limit` is a hard conflict: the oracle exits 2 with `the a
 new = "`--limit N --no-limit` is accepted last-wins (NRN-331): `--no-limit` given last wins → unlimited, exit 0. The CLI resolves the order into one wire value; on the wire `no_limit` wins when both arrive"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "read-find-limit-nolimit-last-wins-zoo" = 3 }
+observed = { "read-find-limit-nolimit-last-wins-zoo" = { stdout = 1, stderr = 1, exit = 1 } }
 
 # NRN-356: Markdown-link destinations follow URL-parser rules (RFC 3986 /
 # WHATWG). The fragment is split from the RAW reference BEFORE percent-decoding,
@@ -204,7 +228,7 @@ old = "decode-then-split: `note%23draft.md` decodes first, so the `#` splits it 
 new = "split-then-decode (NRN-356): the fragment is split off the raw reference before decoding, so `note%23draft.md` stays one path segment named `note#draft.md`; `#^blk1` classifies as a block ref (like the wikilink path) that resolves against the target's `^blk1` block-id (a resolved outgoing link)"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "url-edge-decode-split-blockref" = 1 }
+observed = { "url-edge-decode-split-blockref" = { stdout = 1 } }
 
 # NRN-357: external-vs-local classification of a Markdown destination follows URL
 # rules — any valid RFC 3986 scheme (case-insensitive), a protocol-relative
@@ -222,7 +246,7 @@ old = "a hand-rolled lowercase prefix list classifies only `http://`/`https://`/
 new = "URL-rules classification (NRN-357): any case-insensitive RFC 3986 scheme, a protocol-relative `//`, or a Windows drive-letter path is external and excluded from the link model, so none of these destinations appear as links at all; a destination whose first segment contains a colon (e.g. `note:draft.md`) also reads as scheme-qualified and classifies external — disambiguate a literal colon-named vault file with a `./` prefix"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "url-edge-scheme-classification" = 1 }
+observed = { "url-edge-scheme-classification" = { stdout = 1 } }
 
 # NRN-361 (the soft-landing error doctrine): errors educate, never stop-sign.
 # The rewrite's diagnostic surface diverges from the oracle's on stderr — a
@@ -246,7 +270,7 @@ old = "a user error prints an unprefixed, terse line to stderr: `no document mat
 new = "every user error is a soft landing (NRN-361): a stable `norn:`-prefixed headline (`norn: no document matched path or stem: <t>`, `norn: invalid config <path>: …`, `norn: unknown field `titel``) plus, where a near-miss exists, a leading/standalone did-you-mean `hint:` line (`unknown --col facet '.headngs' — did you mean '.headings'? …`; `hint: did you mean `title`?`) — via the one `closest` heuristic. The unknown-dynamic-field rejection (NRN-367) is this same surface now that the owner-side gate is wired live. stdout stays payload-only in every format"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "err-links-to-unresolvable-zoo" = 1, "err-col-facet-did-you-mean-zoo" = 1, "err-malformed-config" = 1, "err-unknown-dynamic-field-did-you-mean-zoo" = 1 }
+observed = { "err-links-to-unresolvable-zoo" = { stderr = 1 }, "err-col-facet-did-you-mean-zoo" = { stderr = 1 }, "err-malformed-config" = { stderr = 1 }, "err-unknown-dynamic-field-did-you-mean-zoo" = { stderr = 1 } }
 
 # NRN-365 (grammar-wide last-wins): a repeated scalar flag is merge-queue
 # semantics — the last occurrence wins — not a hard error. The single lever is
@@ -264,7 +288,7 @@ old = "a repeated scalar flag is a hard conflict: `find --limit 5 --limit 1` exi
 new = "a repeated scalar flag is last-wins (NRN-365, `args_override_self` on the root propagated to every subcommand): `find --limit 5 --limit 1` resolves to limit 1, exit 0, the single sorted path on stdout"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "err-repeated-limit-last-wins-zoo" = 3 }
+observed = { "err-repeated-limit-last-wins-zoo" = { stdout = 1, stderr = 1, exit = 1 } }
 
 # NRN-388 (unified mutation-warning envelope): the donor's per-kind `--format
 # json` warning object is internally inconsistent — `new` tags an unknown field
@@ -283,7 +307,7 @@ old = "the per-kind warning object is inconsistent across verbs/kinds: `new` emi
 new = "one unified envelope for every warning kind (NRN-388): `{ \"code\": \"unknown-field\", \"field\": \"bogus\", \"message\": \"field 'bogus' not declared in schema\" }` — a stable kebab `code`, the optional scoped `field`, and an operator-facing `message` (see `crates/norn-wire/src/mutate.rs`, `MutationWarning`)"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "mutate-new-unknown-field-warning-json-zoo" = 6, "mcp-tools-call-set-unknown-field-warning-zoo" = 1, "mcp-tools-call-new-forecast-zoo" = 1 }
+observed = { "mutate-new-unknown-field-warning-json-zoo" = { stdout = 6 }, "mcp-tools-call-set-unknown-field-warning-zoo" = { mcp = 1 }, "mcp-tools-call-new-forecast-zoo" = { mcp = 1 } }
 
 # NRN-371 (non-mapping frontmatter promotes): a frontmatter block that parses to
 # a YAML null — a bare `null`/`~` scalar or a comment-only block — is an
@@ -304,7 +328,7 @@ old = "a field `set` against a frontmatter block that parses to YAML null (a bar
 new = "the null block promotes to an empty mapping (NRN-371) and the field splices in, exit 0, the tree mutated (a comment-only block keeps its comment and gains the field after it) — a valid input yielding a valid output, closing the new→set null-frontmatter roundtrip (see `crates/norn-frontmatter/src/frontmatter/edit.rs`)"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "mutate-set-null-block-promote" = 4, "mutate-set-comment-block-promote" = 4 }
+observed = { "mutate-set-null-block-promote" = { stdout = 1, stderr = 1, exit = 1, tree = 1 }, "mutate-set-comment-block-promote" = { stdout = 1, stderr = 1, exit = 1, tree = 1 } }
 
 # NRN-405 (a reviewed plan must execute as declared): a change op's
 # `fields.operation` is the value that drives the executor's write dispatch. When
@@ -326,7 +350,7 @@ old = "a change op whose `fields.operation` disagrees with its `kind` silently d
 new = "the mismatch is refused before any dispatch: `error: op.fields.operation 'remove_frontmatter' conflicts with op.kind 'set_frontmatter'`, exit 2, write-free — a reviewed plan must execute as its `kind` declares, so silent reinterpretation is removed"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "apply-authored-kind-operation-mismatch-refusal-zoo" = 1 }
+observed = { "apply-authored-kind-operation-mismatch-refusal-zoo" = { stderr = 1 } }
 
 # NRN-405 (malformed-plan diagnostics): a user-authored plan that is malformed —
 # an unknown op kind, a structural op missing a required field, a non-object
@@ -353,7 +377,7 @@ old = "every malformed-plan refusal flattens to `code: internal-error` (the type
 new = "the typed error survives to the envelope: an unknown op kind reports `code: unknown-operation-kind`, and the missing-field / non-object / kind-operation-mismatch / wrong-typed-member family reports `code: malformed-plan` — a machine-branchable signal that the plan, not norn, is at fault. Exit 2 unchanged; the unknown-kind and missing-field messages are unchanged, and a wrong-typed-member decode failure additionally names the kind (`op.fields for <kind> could not be decoded: <serde text>`)"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "apply-authored-unknown-kind-refusal-json-zoo" = 1, "apply-authored-missing-field-refusal-json-zoo" = 1, "apply-authored-wrong-typed-field-refusal-json-zoo" = 1 }
+observed = { "apply-authored-unknown-kind-refusal-json-zoo" = { stdout = 1 }, "apply-authored-missing-field-refusal-json-zoo" = { stdout = 1 }, "apply-authored-wrong-typed-field-refusal-json-zoo" = { stdout = 1 } }
 
 # NRN-437 (a section edit must not corrupt valid CommonMark): the section
 # resolver derives a section's body start as "the byte after the first newline
@@ -386,7 +410,7 @@ old = "the section body start is the byte after the heading marker's first newli
 new = "the body start is the parser's heading-construct end (past the SETEXT underline), and an op inserting body content after a heading with no trailing newline emits the missing line terminator first (NRN-437): the SETEXT underline is preserved (`Alpha\\n-----\\nREPLACED.` / the inserted line lands below the underline) and the EOF heading stays a heading (`## Tail\\nNEW.` / `## Tail\\n- item`) — a valid CommonMark heading survives the edit"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "edit-setext-replace-section-diverge" = 2, "edit-setext-insert-after-heading-diverge" = 1, "edit-eof-heading-replace-section-diverge" = 2, "edit-eof-heading-append-to-section-diverge" = 2, "edit-eof-heading-insert-after-heading-diverge" = 2 }
+observed = { "edit-setext-replace-section-diverge" = { stdout = 1, tree = 1 }, "edit-setext-insert-after-heading-diverge" = { tree = 1 }, "edit-eof-heading-replace-section-diverge" = { stdout = 1, tree = 1 }, "edit-eof-heading-append-to-section-diverge" = { stdout = 1, tree = 1 }, "edit-eof-heading-insert-after-heading-diverge" = { stdout = 1, tree = 1 } }
 
 # NRN-424 (one span-based wikilink rewriter): three independent `[[..]]`
 # rewriters disagreed with the authoritative parser (`parse_wikilinks`, which is
@@ -412,7 +436,7 @@ old = "the cascade rewrites an embed backlink with a `raw.strip_prefix(\"[[\")` 
 new = "the cascade rebuilds the link through the parser (`reconstruct_wikilink`), preserving the embed marker and the alias: `![[embed-target|Display]]` → `![[embed-moved|Display]]` (move) / `![[redirect-target|Display]]` (delete redirect)"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "wl-move-embed-backlink-diverge" = 1, "wl-delete-embed-backlink-diverge" = 1 }
+observed = { "wl-move-embed-backlink-diverge" = { tree = 1 }, "wl-delete-embed-backlink-diverge" = { tree = 1 } }
 
 # PD-117 — NRN-432: neither applier respected code opacity. Same mechanism (a
 # code-fenced `[[old]]` is literal sample text), two engines: the move cascade's
@@ -425,7 +449,7 @@ old = "the rewriters are not code-opaque: with a fenced `[[fence-target]]` sampl
 new = "both route through the code-aware parser (`parse_wikilinks`), which excludes fenced / inline-code ranges (ADR 0019): the fenced sample is never touched and only the real prose backlink is rewritten"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "wl-move-code-fence-shadow-diverge" = 1, "wl-rewrite-wikilink-code-fence-shadow-diverge" = 1 }
+observed = { "wl-move-code-fence-shadow-diverge" = { tree = 1 }, "wl-rewrite-wikilink-code-fence-shadow-diverge" = { tree = 1 } }
 
 # PD-118 — NRN-433: the rewrite-wikilink verb split the target on a bare `^`.
 [[entry]]
@@ -436,7 +460,7 @@ old = "`split_target_suffix` splits the target at the first `#` OR `^`, but a ba
 new = "matching uses the parser's decomposition (split on `#` only), so the whole `a^b` target matches and `[[a^b]]` is rewritten to `[[caret-renamed]]`"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "wl-rewrite-wikilink-caret-stem-diverge" = 1 }
+observed = { "wl-rewrite-wikilink-caret-stem-diverge" = { tree = 1 } }
 
 # PD-119 — NRN-424 (decided-better): interior-whitespace canonicalization on
 # rewrite. The unified rewriter reconstructs a link from the parser's decomposed
@@ -460,7 +484,7 @@ old = "the ad-hoc rewriters preserve a link's interior whitespace verbatim, inco
 new = "the reconstructed link emits the parser-trimmed target and alias, canonicalizing interior whitespace: `[[spaced-target | Display Name]]` → `[[spaced-moved|Display Name]]`, and `[[ padded-target ]]` matches on the trimmed target and rewrites to `[[padded-renamed]]` (the phantom no-op is fixed)"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "wl-move-spaced-alias-diverge" = 1, "wl-rewrite-wikilink-padded-target-diverge" = 1 }
+observed = { "wl-move-spaced-alias-diverge" = { tree = 1 }, "wl-rewrite-wikilink-padded-target-diverge" = { tree = 1 } }
 
 # PD-120 — NRN-424 (decided-better): refuse/skip a rename to an UNREPRESENTABLE
 # wikilink target. A target carrying a wikilink delimiter (`|`/`#`/`[`/`]`) cannot
@@ -482,7 +506,7 @@ old = "a rename whose new target carries a `|`/`#`/`[`/`]` is emitted verbatim, 
 new = "the target is checked for representability first: the rewrite-wikilink verb REFUSES the whole op (exit 2, `unrepresentable-rewrite-target`, write-free) and the move cascade SKIPS the backlink (`would-corrupt-wikilink`), leaving `[[unrepr-target]]` intact and detectable by `validate` rather than corrupted"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "wl-rewrite-wikilink-unrepresentable-refusal" = 4, "wl-move-unrepresentable-skip-diverge" = 2 }
+observed = { "wl-rewrite-wikilink-unrepresentable-refusal" = { stdout = 1, stderr = 1, exit = 1, tree = 1 }, "wl-move-unrepresentable-skip-diverge" = { stdout = 1, tree = 1 } }
 
 # PD-121 — ADR 0022 (decided-better): strict op-payload decode. Every migration
 # op payload is a typed struct decoded ONCE, strictly — a present-but-wrong-typed
@@ -504,7 +528,7 @@ old = "a present-but-wrong-typed op field is silently coerced to a default: `mov
 new = "each wrong-typed field refuses at plan decode with `code: malformed-plan` and a message naming the field (`op.fields for <kind> could not be decoded: field \\`force\\` must be a boolean` / `field \\`rewrite_to\\` must be a string` / `invalid type: integer \\`5\\`, expected a string`), exit 2, write-free — a reviewed plan never executes on a coerced value, so the delete-with-typo data loss the oracle silently applies is refused"
 reason = "decided-better"
 decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
-observed = { "apply-authored-wrong-typed-bool-refusal-zoo" = 1, "apply-authored-wrong-typed-rewrite-to-refusal-zoo" = 4, "apply-authored-wrong-typed-document-hash-refusal-zoo" = 1 }
+observed = { "apply-authored-wrong-typed-bool-refusal-zoo" = { stderr = 1 }, "apply-authored-wrong-typed-rewrite-to-refusal-zoo" = { stdout = 1, stderr = 1, exit = 1, tree = 1 }, "apply-authored-wrong-typed-document-hash-refusal-zoo" = { stderr = 1 } }
 
 # PD-122 — ADR 0022 (decided-better): the flat finding contract. Validation
 # findings serialize as one flat, closed struct — `{ path, code, severity,
@@ -532,7 +556,7 @@ old = "each finding serializes an untagged per-variant body flattened onto `{cod
 new = "each finding serializes the flat closed contract `{ path, code, severity, message, rule?, field?, target?, candidates?, next_actions? }`: `path`-first field order, absent optionals omitted rather than `null`, `candidates` as plain vault-path strings, no internal `link` / diagnostic model and no variant-specific frontmatter fields — the detail that carried fix-vs-skip value folded into `message`, the rest dropped"
 reason = "decided-better"
 decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
-observed = { "validate-code-filter-zoo" = 3, "validate-jsonl-code-zoo" = 1, "mcp-tools-call-validate-code-zoo" = 1 }
+observed = { "validate-code-filter-zoo" = { stdout = 3 }, "validate-jsonl-code-zoo" = { stdout = 1 }, "mcp-tools-call-validate-code-zoo" = { mcp = 1 } }
 
 # NRN-427 / NRN-428 (ADR 0023, decided-better): query predicate input strictness.
 # The pinned oracle accepts two unparseable predicate inputs silently, both at
@@ -559,7 +583,7 @@ old = "an unparseable predicate value is accepted silently at exit 0: a non-`tod
 new = "each unparseable predicate input refuses at `build_document_query` with exit 2: a date value that is neither `today` nor a valid ISO 8601 date/datetime reports `invalid --before date value 'yesterday': expected \\`today\\`, an ISO 8601 date (YYYY-MM-DD), or an ISO 8601 datetime`, and a malformed `--path` glob reports `invalid --path glob '{unclosed': <reason>` — no silently-wrong or silently-empty result set"
 reason = "decided-better"
 decision = "docs/decisions/0023-query-predicate-strictness.md"
-observed = { "read-find-bad-date-value-refuses-clean" = 3, "read-find-malformed-path-glob-refuses-clean" = 3 }
+observed = { "read-find-bad-date-value-refuses-clean" = { stdout = 1, stderr = 1, exit = 1 }, "read-find-malformed-path-glob-refuses-clean" = { stdout = 1, stderr = 1, exit = 1 } }
 
 # NRN-426 (ADR 0023 amendment 2026-07-22): predicate value TYPING. The pinned
 # oracle eagerly types every parseable `--eq`/`--not-eq`/`--in`/`--not-in` value
@@ -580,7 +604,7 @@ old = "value-comparison predicates eager-type the token before SQL: `--eq zip:07
 new = "the schema is the type authority where declared and undeclared/disagreeing fields dual-type: `--eq zip:07030` matches either the string \"07030\" or the number 7030 (returns alpha); `--not-eq zip:07030` excludes either representation (drops alpha, returns every other doc; docs missing the field stay included); a value-comparison predicate on the declared-date `due` field with a non-ISO value refuses at exit 2 naming the field, the declared type, and the value"
 reason = "decided-better"
 decision = "docs/decisions/0023-query-predicate-strictness.md"
-observed = { "read-find-eq-numeric-quoted-value-zoo" = 2, "read-find-not-eq-numeric-quoted-value-zoo" = 2, "read-find-declared-date-eq-refuses-zoo" = 3 }
+observed = { "read-find-eq-numeric-quoted-value-zoo" = { stdout = 2 }, "read-find-not-eq-numeric-quoted-value-zoo" = { stdout = 2 }, "read-find-declared-date-eq-refuses-zoo" = { stdout = 1, stderr = 1, exit = 1 } }
 
 # NRN-436 (ADR 0022 amendment, discovered-inconsistency): coded refusals across
 # the apply envelope. Several authored-plan refusals were bare `anyhow::bail!`
@@ -611,7 +635,7 @@ old = "every one of these refusals flattens to `code: internal-error` (the bare 
 new = "each refusal carries a typed, machine-branchable code: `create-destination-exists` and `create-parent-missing` (both additionally echoing the offending vault-relative `path`), `malformed-plan` for the non-object frontmatter and the duplicate op id, and `invalid-precondition` for the empty stem selector — `internal-error` is reserved for genuine norn defects. Exit 2 and every message are unchanged"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
-observed = { "apply-authored-create-destination-exists-refusal-json-zoo" = 1, "apply-authored-create-parent-missing-refusal-json-zoo" = 1, "apply-authored-create-nonobject-frontmatter-refusal-json-zoo" = 1, "apply-authored-empty-stem-precondition-refusal-json-zoo" = 1, "apply-authored-duplicate-op-id-refusal-json-zoo" = 1 }
+observed = { "apply-authored-create-destination-exists-refusal-json-zoo" = { stdout = 1 }, "apply-authored-create-parent-missing-refusal-json-zoo" = { stdout = 1 }, "apply-authored-create-nonobject-frontmatter-refusal-json-zoo" = { stdout = 1 }, "apply-authored-empty-stem-precondition-refusal-json-zoo" = { stdout = 1 }, "apply-authored-duplicate-op-id-refusal-json-zoo" = { stdout = 1 } }
 
 # NRN-406 (ADR 0024, decided-better): the one-applier fold records each op's
 # outcome truly instead of reconstructing it from the telemetry event log. The
@@ -633,7 +657,7 @@ old = "the report reconstructs per-op status from the event log and under-counts
 new = "the applier records each op's outcome as it happens, so the report tells the truth: `applied: 2  skipped: 0` with the two distinct resolved summaries `create seq/task-1.md` and `create seq/task-2.md` — matching the (unchanged) post-state"
 reason = "decided-better"
 decision = "docs/decisions/0024-one-applier-repair-as-planner.md"
-observed = { "apply-authored-sequenced-seq-creates-zoo" = 2 }
+observed = { "apply-authored-sequenced-seq-creates-zoo" = { stdout = 2 } }
 
 # NRN-406 (ADR 0024, decided-better): partial apply is the semantics. A per-op
 # failure no longer aborts the remaining plan — independent ops proceed, the
@@ -654,7 +678,7 @@ old = "the applier aborts the whole plan at the first per-op failure: op0 `appli
 new = "the failed op is recorded and INDEPENDENT ops still run: op0 `applied`, op1 `failed`, op2 `applied` — `applied: 2  remaining: 0`, exit 1 — and both `nrn406-first.md` and `nrn406-third.md` land on disk (a truthful partial apply)"
 reason = "decided-better"
 decision = "docs/decisions/0024-one-applier-repair-as-planner.md"
-observed = { "apply-authored-independent-files-proceed-zoo" = 3 }
+observed = { "apply-authored-independent-files-proceed-zoo" = { stdout = 2, tree = 1 } }
 
 # NRN-151 (ADR 0024, decided-better): destructive/structural ops carry a
 # plan-time compare-and-swap hash, and a delete's hash is REQUIRED. A
@@ -676,7 +700,7 @@ old = "a `delete_document` op with no `document_hash` is accepted: the delete fo
 new = "the op is refused fail-closed: `code: delete-hash-required` naming the offending path (exit 2), at a plan-level barrier before any write — a delete must carry the plan-time hash it will compare-and-swap"
 reason = "decided-better"
 decision = "docs/decisions/0024-one-applier-repair-as-planner.md"
-observed = { "apply-authored-delete-hash-required-refusal-json-zoo" = 4 }
+observed = { "apply-authored-delete-hash-required-refusal-json-zoo" = { stdout = 3, exit = 1 } }
 
 # NRN-151 (ADR 0024, decided-better): a `move_document` op now carries an
 # OPTIONAL plan-time `document_hash`, and when present it is a pre-rename
@@ -697,7 +721,7 @@ old = "a `move_document` op is never fingerprinted, so a plan-time `document_has
 new = "a present `document_hash` is a pre-rename compare-and-swap: a stale hash refuses `stale-document-hash` (exit 2) before the rename, the same drift-refusal class the delete and content paths already enforce (an absent hash still proceeds unchecked)"
 reason = "decided-better"
 decision = "docs/decisions/0024-one-applier-repair-as-planner.md"
-observed = { "apply-authored-move-stale-hash-refusal-json-zoo" = 5 }
+observed = { "apply-authored-move-stale-hash-refusal-json-zoo" = { stdout = 4, exit = 1 } }
 
 # NRN-164 (ADR 0010, decided-better): the section resolver accepts ATX-prefixed
 # heading anchors. It tries the anchor EXACTLY first (preserving every working
@@ -718,7 +742,7 @@ old = "the section resolver requires the bare heading text: a `replace_section` 
 new = "the resolver tries the anchor exactly, then strips a leading ATX prefix (and any trailing closer) on the miss and matches on heading TEXT (level is syntax noise): `## Section One` resolves the `Section One` section and the edit applies (exit 0)"
 reason = "decided-better"
 decision = "docs/decisions/0010-cli-grammar-forgiving-inputs.md"
-observed = { "edit-atx-prefixed-heading-anchor-diverge" = 4 }
+observed = { "edit-atx-prefixed-heading-anchor-diverge" = { stdout = 1, stderr = 1, exit = 1, tree = 1 } }
 
 # NRN-407 (ADR 0022, decided-better): the read-verb annotation channel converges
 # onto the closed `{note, warning, error}` stderr prefix set, driven by a typed
@@ -739,7 +763,7 @@ old = "an ambiguous stem prints `note: '<stem>' resolved to N docs` and an unres
 new = "both render on the closed `warning:` prefix: the ambiguity is a `warning`-severity typed note and the `--col`/`--sort` annotation speaks the one closed vocabulary; stdout / exit / post-state unchanged, only the stderr prefix diverges"
 reason = "decided-better"
 decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
-observed = { "read-get-ambiguous-json-zoo" = 1, "read-get-unknown-col-warning-zoo" = 1 }
+observed = { "read-get-ambiguous-json-zoo" = { stderr = 1 }, "read-get-unknown-col-warning-zoo" = { stderr = 1 } }
 
 # NRN-407 (ADR 0022, decided-better): a records-format op / precondition status
 # label is the value's serde-kebab name (via the one `serde_label` renderer),
@@ -758,7 +782,7 @@ old = "a not-run op label is the `Debug`-lowercased variant, printing `[notrun]`
 new = "the label is the serde-kebab name, printing `[not-run]` — the same string as the `OpStatus::NotRun` wire value; only this records-body label diverges (exit 2, write-free on both)"
 reason = "decided-better"
 decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
-observed = { "apply-authored-precondition-mismatch-refusal-zoo" = 1 }
+observed = { "apply-authored-precondition-mismatch-refusal-zoo" = { stdout = 1 } }
 
 # NRN-407 (ADR 0022, decided-better): the MCP `vault.get` diagnostics cross as
 # typed `{severity, code, message}` notes, so a client decides `isError` and
@@ -775,7 +799,7 @@ old = "`structuredContent.notes` is an array of prose strings (e.g. `\"error: '<
 new = "`structuredContent.notes` is an array of typed `{severity, code, message}` objects; the `isError: true` bit is unchanged (derived from the `error`-severity note), only the notes payload shape diverges"
 reason = "decided-better"
 decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
-observed = { "mcp-tools-call-get-missing-zoo" = 1 }
+observed = { "mcp-tools-call-get-missing-zoo" = { mcp = 1 } }
 
 # NRN-417: the service-local `--vault <PATH>` flag was a fossil. It shared a
 # clap arg id with the global `--vault <NAME>` selector (ADR 0017), and the
@@ -800,7 +824,7 @@ old = "the oracle has a service-local `--vault <PATH>` and no global `--vault`: 
 new = "the service-local `--vault <PATH>` is deleted (NRN-417); `--vault` is unambiguously the global `Option<String>` NAME selector (ADR 0017) everywhere, which `service` never consults: both orderings now parse cleanly and reach the same uniform not-yet-ported outcome (exit 1, `` `service` is not yet ported in this build ``) — a wholly different stderr in both cases, and a different exit code (1, not 2) in the before-subcommand ordering"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "err-service-status-local-vault-flag-deleted-zoo" = 1, "err-service-vault-global-flag-before-subcommand-zoo" = 2 }
+observed = { "err-service-status-local-vault-flag-deleted-zoo" = { stderr = 1 }, "err-service-vault-global-flag-before-subcommand-zoo" = { stderr = 1, exit = 1 } }
 
 # NRN-408 (ADR 0016, decided-better): one mutation-report JSON serializer policy.
 # Every mutation verb's `--format json` — `set` / `new` / `edit` and the cascade
@@ -825,7 +849,7 @@ old = "the JSON shape is a per-verb zoo: an applied `set --format json` is compa
 new = "every mutation verb's `--format json` emits the FULL report envelope on every outcome path, pretty-printed in serde struct-field order with one trailing newline: an applied `set` report is now pretty rather than compact, and every refusal (`set` / `new` / `edit` / `move`) carries the whole report (`outcome: refused` plus the coded error in its failed op / `error` field) instead of a bare fragment or bare prose — one shape a consumer parses on every verb and outcome; exit codes are unchanged (2 on refusal, 0 otherwise)"
 reason = "decided-better"
 decision = "docs/decisions/0016-surface-neutral-command-core.md"
-observed = { "mutate-set-push-apply-json-zoo" = 1, "mutate-set-refusal-json-zoo" = 1, "mutate-new-refusal-json-zoo" = 2, "edit-refusal-json-zoo" = 2, "mutate-move-refusal-json-zoo" = 1 }
+observed = { "mutate-set-push-apply-json-zoo" = { stdout = 1 }, "mutate-set-refusal-json-zoo" = { stdout = 1 }, "mutate-new-refusal-json-zoo" = { stdout = 1, stderr = 1 }, "edit-refusal-json-zoo" = { stdout = 1, stderr = 1 }, "mutate-move-refusal-json-zoo" = { stdout = 1 } }
 
 # NRN-408 (ADR 0016, decided-better): `MutationOutcome::Forecast`. A `set` / `new`
 # / `edit` dry-run (a `confirm: false` preview that writes nothing) now reports
@@ -849,7 +873,7 @@ old = "a `set` / `new` / `edit` dry-run forecast reports `outcome: applied` whil
 new = "a forecast reports `outcome: forecast` (present-tense honest, distinct from a confirmed `applied`), on both the CLI `edit --dry-run --format json` (now also pretty per PD-135) and the MCP `vault.set` forecast `structuredContent`; a consumer tells a preview from a real write by `outcome` alone"
 reason = "decided-better"
 decision = "docs/decisions/0016-surface-neutral-command-core.md"
-observed = { "edit-json-ops-forecast-zoo" = 1, "mcp-tools-call-set-forecast-zoo" = 1 }
+observed = { "edit-json-ops-forecast-zoo" = { stdout = 1 }, "mcp-tools-call-set-forecast-zoo" = { mcp = 1 } }
 
 # NRN-399 (ADR 0024, decided-better): the MCP `vault.repair` structuredContent is
 # the rewrite's richer `RepairReport` — the deterministic `plan`, the per-code
@@ -869,7 +893,7 @@ old = "`structuredContent` carries only `{plan, has_diagnostic_errors}`; a clien
 new = "`structuredContent` carries the deterministic `plan` plus `findings_by_code` / `findings_total` / `total_docs` and the rich `skipped_detail` (reason code, candidate paths, operator next-actions per skipped finding — the ADR 0024 first-consumer surface); the plan's non-deterministic `generated_at` is the only field the harness normalizes"
 reason = "decided-better"
 decision = "docs/decisions/0024-one-applier-repair-as-planner.md"
-observed = { "mcp-tools-call-repair-code-zoo" = 1 }
+observed = { "mcp-tools-call-repair-code-zoo" = { mcp = 1 } }
 
 # NRN-414 (decided-better): a missing `-C`/NORN_ROOT vault root is classified as
 # a USER error surfaced instantly, not a low-level canonicalization failure and
@@ -888,7 +912,7 @@ old = "the oracle grounds the `-C` path and fails at the low-level canonicalize 
 new = "the rewrite's client-side precheck refuses instantly before summoning any owner: `norn: vault root does not exist: <path> (from -C)` on stderr — naming the actual path and the via — exit 1, no owner spawned and no socket dialed"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "err-missing-vault-root-zoo" = 1 }
+observed = { "err-missing-vault-root-zoo" = { stderr = 1 } }
 
 # NRN-402 (ADR 0018, discovered-inconsistency): the `delete` ambiguous-stem
 # refusal message renders the REAL candidate paths. The oracle resolves the
@@ -909,7 +933,7 @@ old = "an ambiguous `delete <stem>` refuses `target-ambiguous` with `document re
 new = "the same refusal renders the REAL sorted candidate paths (`… → [\"archive2/duplicate.md\", \"notes/duplicate.md\"]`), threaded through a structured `TargetResolution::Ambiguous`, so a caller sees exactly which documents collide; code / exit / write-free behavior unchanged"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "mutate-delete-ambiguous-refusal-zoo" = 1 }
+observed = { "mutate-delete-ambiguous-refusal-zoo" = { stderr = 1 } }
 
 # NRN-402 / NRN-44 (ADR 0018, discovered-inconsistency): the `--col` "not present
 # in any matching document" warning is guarded to the FULL, non-empty result set
@@ -929,7 +953,7 @@ old = "the `--col field ... not present in any matching document` warning fires 
 new = "the bare-field warning returns early when the page is truncated (`returned < total`) or the match set is empty, so it fires only when every matching document was actually inspected and genuinely lacks the field; the unknown-facet check stays unconditional"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "read-find-col-truncated-page-suppressed-zoo" = 1, "read-find-col-zero-match-suppressed-zoo" = 1 }
+observed = { "read-find-col-truncated-page-suppressed-zoo" = { stderr = 1 }, "read-find-col-zero-match-suppressed-zoo" = { stderr = 1 } }
 
 # NRN-400 (decided-better): the `tools/list` catalog now serves all 14 tool
 # names (`vault.audit` is the 14th, ported this task), so the rewrite's published
@@ -951,7 +975,7 @@ old = "the full `tools/list` catalog is 14 tools whose `get` `inputSchema` docum
 new = "the catalog is the same 14 tools, but `get`'s published `inputSchema` documents `starts_at` as a zero-indexed default (`default: 0`, NRN-332) — the MCP-surface face of PD-105; the remaining catalog delta is incidental prose (descriptions / typed-note schemas)"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "mcp-initialize-tools-list-zoo" = 1 }
+observed = { "mcp-initialize-tools-list-zoo" = { mcp = 1 } }
 
 # `edit --help` is the ONE entry covering that whole page (a case resolves to
 # exactly one entry), so this describes all seven regions it differs in, not
@@ -980,7 +1004,7 @@ old = "the page opens with the long-about body (op reference, heading-addressing
 new = "the page prints the short about line and goes straight to USAGE (no long-about body); OPTIONS omits `--ops-file` entirely — a command-local hidden arg is filtered the same way a hidden global already was; `--yes` and `--dry-run` use the verb-neutral 'the change' wording every mutation verb shares and `--format` reads 'Output format; `json` emits the mutation-report envelope' (NRN-416); GLOBAL OPTIONS drops `--config`, shows `-C/--cwd` in full, and adds `--vault NAME` (the PD-102 reshape)"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "help-edit" = 7 }
+observed = { "help-edit" = { stdout = 7 } }
 # NRN-161 (ADR 0016, decided-better): cascade-verb dry-run reports `outcome:
 # forecast`. This closes the one-cycle split convention PD-136 shipped: `set` /
 # `new` / `edit` previews reported `outcome: forecast`, but the cascade verbs
@@ -1007,7 +1031,7 @@ old = "a cascade-verb (`move` / `delete` / `rewrite-wikilink` / `apply`) dry-run
 new = "a clean cascade dry-run reports `outcome: forecast` (present-tense honest, distinct from a confirmed `applied`), on both the CLI `--dry-run --format json` `ApplyReport` and the MCP `vault.move` / `vault.delete` forecast result; the `dry_run: true` flag is retained and now consistent with `outcome`, so `outcome == \"forecast\"` is one preview signal across all seven mutation verbs. Exit codes and the applied/skipped/failed counts are unchanged"
 reason = "decided-better"
 decision = "docs/decisions/0016-surface-neutral-command-core.md"
-observed = { "mutate-move-dry-run-json-zoo" = 1, "apply-authored-add-frontmatter-plan-dry-run-json-zoo" = 1, "mcp-tools-call-move-forecast-zoo" = 1, "mcp-tools-call-delete-forecast-zoo" = 1 }
+observed = { "mutate-move-dry-run-json-zoo" = { stdout = 1 }, "apply-authored-add-frontmatter-plan-dry-run-json-zoo" = { stdout = 1 }, "mcp-tools-call-move-forecast-zoo" = { mcp = 1 }, "mcp-tools-call-delete-forecast-zoo" = { mcp = 1 } }
 
 # NRN-416 (format vocabulary convergence). The RULING (2026-07-23): `--format
 # json` returns the JSON representation of whatever the invocation prints WITHOUT
@@ -1032,7 +1056,7 @@ old = "bare `repair --format json` ignores `--format` and prints the human prose
 new = "bare `repair --format json` emits the findings-summary report envelope as JSON — `findings_total`, `total_docs`, the sorted `findings_by_code` tally, and the `operations`/`skipped` counts — the JSON of what the bare invocation prints without `--format`, never the MigrationPlan (that stays `--plan --format json`)"
 reason = "decided-better"
 decision = "docs/decisions/0021-verbs-return-one-layer-renders.md"
-observed = { "repair-summary-json-zoo" = 1 }
+observed = { "repair-summary-json-zoo" = { stdout = 1 } }
 # `get --help` is the ONE entry covering that whole page, so this describes all
 # six regions it differs in:
 #
@@ -1054,7 +1078,7 @@ old = "the OPTIONS block has no `--no-pager` flag (`get` has no pager at all); `
 new = "the OPTIONS block lists `--no-pager` (\"Skip the pager even when stdout is a TTY\") — `get` pages its `records` and `markdown` output on a TTY exactly like `find` pages its `records` output; `--no-limit` and `--all-cols` state last-wins and `--starts-at` states zero-indexing / Default 0 (NRN-331 / NRN-332); GLOBAL OPTIONS drops `--config`, shows `-C/--cwd` in full, and adds `--vault NAME` (the PD-102 reshape)"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "help-get" = 6 }
+observed = { "help-get" = { stdout = 6 } }
 
 # NRN-430 (one allowed-values enforcement policy across the write paths). The
 # RULING (2026-07-23): a schema-violating direct write REFUSES, with --force the
@@ -1079,7 +1103,7 @@ old = "`new` never enforces allowed_values before writing: a `--field status=som
 new = "the synthesized frontmatter is validated for allowed_values at forecast/preflight: a value outside a matching rule's allowed set REFUSES (`value-not-allowed`, exit 2, write-free) with the allowed list carried in the refusal message; `--force` bypasses to a `force-bypass` warning and applies. Enforcement is identical on the CLI `norn new` and the MCP `vault.new` (one owner seam)"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "mutate-new-allowed-values-refusal-zoo" = 4 }
+observed = { "mutate-new-allowed-values-refusal-zoo" = { stdout = 1, stderr = 1, exit = 1, tree = 1 } }
 
 # NRN-429 (ruling settled by the NRN-430 grill, 2026-07-23): `allowed_values`
 # on an array-valued field now matches ELEMENT-WISE, matching mutation's own
@@ -1099,7 +1123,7 @@ old = "`allowed_values` matches an array-valued field WHOLE against the configur
 new = "`allowed_values` matches an array-valued field ELEMENT-WISE — one finding per violating element, none when every element is allowed (an empty array yields no findings); a scalar field is unaffected, matching whole as before"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "validate-list-allowed-values-elementwise" = 1 }
+observed = { "validate-list-allowed-values-elementwise" = { stdout = 1 } }
 
 # NRN-455 — alias participation in link/get resolution is CUT (resolution ladder
 # is path → stem only). The oracle (0.48.1) resolves an alias-only wikilink via
@@ -1117,7 +1141,7 @@ old = "`get bee` resolves via the alias fallback (`notes/beta.md` declares `alia
 new = "`get`'s resolution ladder is path → stem only (NRN-455); `bee` matches no path or stem, so `get bee` resolves to no doc and emits a `target-not-found` error note. `aliases` stays queryable via `find`"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "read-get-alias-json-zoo" = 3 }
+observed = { "read-get-alias-json-zoo" = { stdout = 1, stderr = 1, exit = 1 } }
 
 [[entry]]
 id = "PD-149"
@@ -1127,7 +1151,7 @@ old = "`notes/gamma.md`'s `[[bee]]` resolves via `notes/beta.md`'s alias, so it 
 new = "aliases do not participate in resolution (NRN-455), so `[[bee]]` is `link-target-missing` on `notes/gamma.md` — one more warning-severity finding, one more affected path, and a higher warning tally than the oracle reports. The `clean` profile omits the alias pair entirely (`Profile::alias_link` is false there) so its finding-free invariant holds under the rewrite too — only the zoo fixture demonstrates this divergence"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "validate-summary-zoo" = 4, "validate-summary-records-zoo" = 2, "validate-paths-zoo" = 1, "validate-severity-summary-zoo" = 4 }
+observed = { "validate-summary-zoo" = { stdout = 4 }, "validate-summary-records-zoo" = { stdout = 2 }, "validate-paths-zoo" = { stdout = 1 }, "validate-severity-summary-zoo" = { stdout = 4 } }
 
 [[entry]]
 id = "PD-150"
@@ -1137,7 +1161,7 @@ old = "the oracle resolves `notes/gamma.md`'s `[[bee]]` via alias, so repair see
 new = "`[[bee]]` is dangling and uniquely matches `notes/beta.md`'s alias, so repair plans a built-in `rewrite_link` op (`bee` → the `beta` stem, `built-in:alias-stem`, alias-suggestion footnote) — one more finding, one more planned operation, and `notes/gamma.md` in the affected paths (NRN-455). The `clean` profile omits the alias pair (`Profile::alias_link` is false there), so it stays finding-free and this entry no longer needs to cover it"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "repair-summary-zoo" = 3, "repair-plan-paths-zoo" = 1, "repair-plan-report-zoo" = 4 }
+observed = { "repair-summary-zoo" = { stdout = 3 }, "repair-plan-paths-zoo" = { stdout = 1 }, "repair-plan-report-zoo" = { stdout = 4 } }
 
 [[entry]]
 id = "PD-151"
@@ -1147,4 +1171,4 @@ old = "`find --all-cols` on the zoo emits `notes/gamma.md`'s `[[bee]]` among its
 new = "aliases do not participate in resolution (NRN-455), so `notes/gamma.md`'s `[[bee]]` renders as an unresolved link in the all-columns projection instead of a resolved one"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "read-find-all-cols-json-zoo" = 8 }
+observed = { "read-find-all-cols-json-zoo" = { stdout = 8 } }

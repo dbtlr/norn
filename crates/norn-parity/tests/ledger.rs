@@ -82,7 +82,7 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // unmeasured entry is back to covering its case by citation alone.
     for entry in &ledger.entries {
         assert!(
-            entry.observed.values().any(|regions| *regions > 0),
+            entry.observed.values().any(|extent| !extent.is_zero()),
             "entry {} declares no divergence extent — run the gated comparison and record the \
              `observed` line it reports",
             entry.id
@@ -785,7 +785,7 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "help-validate" = 2 }
+observed = { "help-validate" = { stdout = 2 } }
 "#;
     let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
@@ -808,7 +808,7 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "help-bare" = "two" }
+observed = { "help-bare" = { stdout = "two" } }
 "#;
     let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
@@ -837,14 +837,14 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = { "help-bare" = 4 }
+observed = { "help-bare" = { stdout = 4 } }
 "#;
     let ledger = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap();
     let entry = ledger.entry_for_case("help-bare").unwrap();
-    assert_eq!(entry.declared_extent("help-bare"), 4);
-    assert_eq!(
-        entry.declared_extent("help-validate"),
-        0,
+    assert_eq!(entry.declared_extent("help-bare").stdout, 4);
+    assert_eq!(entry.declared_extent("help-bare").total(), 4);
+    assert!(
+        entry.declared_extent("help-validate").is_zero(),
         "a cited case the table omits is expected to match"
     );
 }

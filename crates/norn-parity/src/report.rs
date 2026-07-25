@@ -75,7 +75,8 @@ pub fn render(report: &RunReport, mode: Mode) -> String {
     ));
     if !report.stale_entries.is_empty() {
         out.push_str(&format!(
-            "stale entries (all cited cases currently match — entries cannot rot): {}\n",
+            "stale entries (every cited case that ran now matches — the divergence is gone; \
+             delete the entry): {}\n",
             report.stale_entries.join(", ")
         ));
     }
@@ -96,14 +97,21 @@ fn render_extent_gaps(out: &mut String, report: &RunReport) {
         return;
     }
     out.push_str(
-        "ledger extent gaps (the divergence changed size — re-read the diff, \
+        "ledger extent gaps (the divergence changed shape — re-read the diff, \
          rewrite `old`/`new`, then record):\n",
     );
     for gap in &report.extent_gaps {
-        out.push_str(&format!(
-            "  {} {}: declared {} region(s), observed {} — {}\n",
-            gap.entry_id, gap.case_id, gap.declared, gap.observed, gap.replacement
-        ));
+        out.push_str(&format!("  {}:\n", gap.entry_id));
+        for case in &gap.cases {
+            out.push_str(&format!(
+                "    {}: declared {}, observed {}\n",
+                case.case_id,
+                case.declared.render(),
+                case.observed.render()
+            ));
+        }
+        // One line per ENTRY, not per case: recording it is a single edit.
+        out.push_str(&format!("    {}\n", gap.replacement));
     }
 }
 
@@ -123,8 +131,9 @@ fn render_uncovered_extents(out: &mut String, report: &RunReport) {
     out.push_str("uncovered divergence extents (for the entry that will cover them):\n");
     for outcome in uncovered {
         out.push_str(&format!(
-            "  {}: {} region(s)\n",
-            outcome.case_id, outcome.extent
+            "  \"{}\" = {}\n",
+            outcome.case_id,
+            outcome.extent.render()
         ));
     }
 }

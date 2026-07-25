@@ -123,7 +123,7 @@ old = "help text"
 new = "echo of argv"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = {{ "{FAB_CASE_ID}" = 1 }}
+observed = {{ "{FAB_CASE_ID}" = {{ stdout = 1 }} }}
 "#
         ),
     );
@@ -227,7 +227,7 @@ old = "help text"
 new = "echo of argv"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = {{ "{FAB_CASE_ID}" = 2 }}
+observed = {{ "{FAB_CASE_ID}" = {{ stdout = 2 }} }}
 "#
         ),
     );
@@ -246,15 +246,16 @@ observed = {{ "{FAB_CASE_ID}" = 2 }}
         vec!["TEST-UNDERDESCRIBED".to_string()],
         "the case still resolves to its entry — the extent gap is reported separately"
     );
-    assert_eq!(report.extent_gaps.len(), 1, "one entry, one case, one gap");
+    assert_eq!(report.extent_gaps.len(), 1, "one entry, one gap block");
     let gap = &report.extent_gaps[0];
     assert_eq!(gap.entry_id, "TEST-UNDERDESCRIBED");
-    assert_eq!(gap.case_id, FAB_CASE_ID);
-    assert_eq!(gap.declared, 2);
-    assert_eq!(gap.observed, 1);
+    assert_eq!(gap.cases.len(), 1, "one cited case disagrees");
+    assert_eq!(gap.cases[0].case_id, FAB_CASE_ID);
+    assert_eq!(gap.cases[0].declared.stdout, 2);
+    assert_eq!(gap.cases[0].observed.stdout, 1);
     assert_eq!(
         gap.replacement,
-        format!("observed = {{ \"{FAB_CASE_ID}\" = 1 }}"),
+        format!("observed = {{ \"{FAB_CASE_ID}\" = {{ stdout = 1 }} }}"),
         "the gap carries the line to record once the diff has been re-read"
     );
     assert_eq!(
@@ -286,7 +287,7 @@ old = "help text"
 new = "help text"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = {{ "{FAB_CASE_ID}" = 3 }}
+observed = {{ "{FAB_CASE_ID}" = {{ stdout = 3 }} }}
 "#
         ),
     );
@@ -302,12 +303,10 @@ observed = {{ "{FAB_CASE_ID}" = 3 }}
     let report = run::run_suites(&config, FAB_SUITES).expect("run should succeed");
 
     assert_eq!(report.stale_entries, vec!["TEST-STALE-EXTENT".to_string()]);
-    assert_eq!(report.extent_gaps.len(), 1);
-    assert_eq!(report.extent_gaps[0].declared, 3);
-    assert_eq!(report.extent_gaps[0].observed, 0);
-    assert_eq!(
-        report.extent_gaps[0].replacement, "observed = {}",
-        "nothing diverges, so the line to record is the empty table"
+    assert!(
+        report.extent_gaps.is_empty(),
+        "the stale report already says the divergence is gone; a gap row telling the author to \
+         record `observed = {{}}` would contradict it (and the ledger guard rejects that line)"
     );
     assert_eq!(report.exit_code(), 1);
 }

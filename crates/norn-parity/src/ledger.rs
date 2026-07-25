@@ -11,6 +11,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
+use crate::extent::Extent;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reason {
     DecidedBetter,
@@ -36,28 +38,42 @@ pub struct Entry {
     pub new: String,
     pub reason: Reason,
     pub decision: String,
-    /// How large the divergence is on each cited case, in regions (see
-    /// `crate::extent`). Citation alone would let a divergence grow past
-    /// what `old`/`new` describe; the runner compares the count observed on
-    /// every cited case against this and fails when they disagree. A cited
-    /// case absent here declares zero regions — it is expected to match.
-    pub observed: std::collections::BTreeMap<String, usize>,
+    /// How large the divergence is on each cited case, per channel, in
+    /// regions (see `crate::extent`). Citation alone would let a divergence
+    /// grow past what `old`/`new` describe; the runner compares the extent
+    /// observed on every cited case against this and fails when they
+    /// disagree. A cited case absent here declares zero regions — it is
+    /// expected to match.
+    pub observed: std::collections::BTreeMap<String, Extent>,
 }
 
 impl Entry {
-    /// The divergence extent this entry declares for `case_id`, in regions.
-    /// A cited case the `observed` table omits declares zero.
-    pub fn declared_extent(&self, case_id: &str) -> usize {
-        self.observed.get(case_id).copied().unwrap_or(0)
+    /// The divergence extent this entry declares for `case_id`. A cited case
+    /// the `observed` table omits declares zero on every channel.
+    pub fn declared_extent(&self, case_id: &str) -> Extent {
+        self.observed.get(case_id).copied().unwrap_or_default()
     }
 
-    /// The `observed` table as it would be written in the ledger, so a run
-    /// that finds a disagreement can print the line to record.
-    pub fn render_observed(extents: &[(&str, usize)]) -> String {
-        let body: Vec<String> = extents
+    /// The whole `observed` line as it would be written in the ledger, so a
+    /// run that finds a disagreement can print the line to record.
+    ///
+    /// `measured` covers the cases this run actually ran. A cited case that
+    /// did NOT run keeps its declared extent: the run has nothing to say
+    /// about a case a suite filter or a mode excluded, and dropping it would
+    /// make a partial run's paste line a silent deletion.
+    pub fn render_observed(&self, measured: &std::collections::BTreeMap<&str, Extent>) -> String {
+        let body: Vec<String> = self
+            .cases
             .iter()
-            .filter(|(_, count)| *count > 0)
-            .map(|(case, count)| format!("\"{case}\" = {count}"))
+            .map(|case| {
+                let extent = measured
+                    .get(case.as_str())
+                    .copied()
+                    .unwrap_or_else(|| self.declared_extent(case));
+                (case, extent)
+            })
+            .filter(|(_, extent)| !extent.is_zero())
+            .map(|(case, extent)| format!("\"{case}\" = {}", extent.render()))
             .collect();
         if body.is_empty() {
             "observed = {}".to_string()
@@ -122,6 +138,13 @@ pub enum LedgerError {
         entry: String,
         case: String,
     },
+    /// An `observed` extent names a channel the runner does not measure, so
+    /// nothing would ever be compared against it.
+    ObservedUnknownChannel {
+        entry: String,
+        case: String,
+        channel: String,
+    },
     UnportedCaseId {
         entry: String,
         case: String,
@@ -164,6 +187,15 @@ impl std::fmt::Display for LedgerError {
             LedgerError::ObservedUncitedCase { entry, case } => write!(
                 f,
                 "entry {entry}: `observed` measures case `{case}`, which the entry does not cite"
+            ),
+            LedgerError::ObservedUnknownChannel {
+                entry,
+                case,
+                channel,
+            } => write!(
+                f,
+                "entry {entry}: `observed.{case}` names channel `{channel}`, which is not one of \
+                 stdout / stderr / exit / tree / mcp"
             ),
             LedgerError::EmptyCases { entry } => write!(
                 f,
@@ -239,16 +271,18 @@ fn get_str_array(
     }
 }
 
-/// Read the `observed` table: case id -> divergence extent in regions. The
+/// Read the `observed` table: case id -> per-channel divergence extent. The
 /// field is required (an entry that measures nothing would be back to
 /// covering by citation alone) but may be empty — an entry authored before
-/// its first run declares `observed = {}` and the run reports the counts to
+/// its first run declares `observed = {}` and the run reports the extents to
 /// record.
 fn get_extent_table(
+    entry_id: &str,
     table: &toml::Table,
     context: &str,
-) -> Result<std::collections::BTreeMap<String, usize>, LedgerError> {
+) -> Result<std::collections::BTreeMap<String, Extent>, LedgerError> {
     const FIELD: &str = "observed";
+    const SHAPE: &str = "a table of case id -> { <channel> = <region count> }";
     let raw = match table.get(FIELD) {
         None => {
             return Err(LedgerError::MissingField {
@@ -261,22 +295,38 @@ fn get_extent_table(
             return Err(LedgerError::WrongType {
                 context: context.to_string(),
                 field: FIELD,
-                expected: "a table of case id -> region count",
+                expected: SHAPE,
             })
         }
     };
     let mut extents = std::collections::BTreeMap::new();
     for (case, value) in raw {
-        let count =
-            value
-                .as_integer()
-                .filter(|n| *n >= 0)
-                .ok_or_else(|| LedgerError::WrongType {
-                    context: context.to_string(),
-                    field: FIELD,
-                    expected: "a table of case id -> region count (a non-negative integer)",
-                })?;
-        extents.insert(case.clone(), count as usize);
+        let channels = value.as_table().ok_or_else(|| LedgerError::WrongType {
+            context: context.to_string(),
+            field: FIELD,
+            expected: SHAPE,
+        })?;
+        let mut extent = Extent::default();
+        for (channel, count) in channels {
+            let slot =
+                extent
+                    .channel_mut(channel)
+                    .ok_or_else(|| LedgerError::ObservedUnknownChannel {
+                        entry: entry_id.to_string(),
+                        case: case.clone(),
+                        channel: channel.clone(),
+                    })?;
+            *slot =
+                count
+                    .as_integer()
+                    .filter(|n| *n >= 0)
+                    .ok_or_else(|| LedgerError::WrongType {
+                        context: context.to_string(),
+                        field: FIELD,
+                        expected: SHAPE,
+                    })? as usize;
+        }
+        extents.insert(case.clone(), extent);
     }
     Ok(extents)
 }
@@ -345,7 +395,7 @@ impl Ledger {
             let new = get_str(table, &context, "new")?;
             let reason_str = get_str(table, &context, "reason")?;
             let decision = get_str(table, &context, "decision")?;
-            let observed = get_extent_table(table, &context)?;
+            let observed = get_extent_table(&id, table, &context)?;
             for case in observed.keys() {
                 if !cases.contains(case) {
                     return Err(LedgerError::ObservedUncitedCase {

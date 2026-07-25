@@ -201,7 +201,11 @@ const HELP_CASES: &[Case] = &[
         expect_oracle_exit: 0,
         requires_doc: None,
         requires_code: None,
-        normalize: NO_NORM,
+        // The oracle renders its `self-update` COMMANDS row only where it can
+        // find its installer receipt, so the row's presence is a property of
+        // the environment and the build rather than of either binary — see
+        // `Normalization::SelfUpdateCommandRow`.
+        normalize: &[Normalization::SelfUpdateCommandRow],
         plan: None,
     },
     Case {

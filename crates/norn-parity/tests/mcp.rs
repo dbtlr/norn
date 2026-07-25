@@ -267,7 +267,7 @@ old = "tools: []"
 new = "tools: [vault.other]"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = {{ "{MCP_CASE_ID}" = 1 }}
+observed = {{ "{MCP_CASE_ID}" = {{ mcp = 1 }} }}
 "#
         ),
     );
