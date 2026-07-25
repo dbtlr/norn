@@ -17,16 +17,38 @@ use crate::cases::Case;
 /// vault that is not its fixture. Neither is a property of the two binaries,
 /// which is the only thing a parity run is entitled to measure.
 ///
-/// `HOME` and the XDG bases point into a scratch tree the run owns, so a
-/// registry, cache or config a binary creates for itself is created fresh
-/// and thrown away with the run. `NORN_ROOT` and `NORN_CONFIG_DIR` are
-/// removed explicitly after the allowlist is applied: `env_clear` already
-/// drops them, and the explicit removal keeps them dropped if the allowlist
-/// ever widens.
+/// "Both sides get the same value" is NOT enough to forward a variable. The
+/// two binaries do not read the environment the same way, so a variable one
+/// side branches on and the other ignores turns the host into an input:
+///
+/// - the LOCALE is pinned, not forwarded. The rewrite selects glyphs from
+///   `LC_ALL` -> `LC_CTYPE` -> `LANG` and falls back to ASCII off a
+///   non-UTF-8 locale (`norn-cli`'s `output::glyphs`); the pinned oracle
+///   emits unicode unconditionally. Forwarding the host's locale therefore
+///   makes several cases differ on a developer's machine and match on a CI
+///   image, and silently bakes whatever locale the tables were recorded
+///   under into the ledger. `LC_ALL=C.UTF-8` is set and `LANG`/`LC_CTYPE`
+///   are removed, so both sides always render the same glyph set. The
+///   rewrite's adaptive fallback is deliberately not exercised by parity —
+///   see the locale ruling in `docs/parity-ledger.toml`'s header;
+/// - `HOME` and the XDG bases point into a scratch tree the run owns, so a
+///   registry, cache, config, socket or log a binary creates for itself is
+///   created fresh and thrown away with the run. `XDG_RUNTIME_DIR` gets its
+///   own SHORT temp dir rather than a path under the fixture cache: it holds
+///   the `AF_UNIX` socket a summoned vault owner binds, and a fixture-cache
+///   path plus that socket's name overruns `sun_path` — see
+///   `norn_fixtures::testing::short_runtime_dir`, which picks the base and
+///   refuses a path that could not work;
+/// - `NORN_ROOT` and `NORN_CONFIG_DIR` are removed explicitly after the
+///   allowlist is applied. `env_clear` already drops them; the explicit
+///   removal keeps them dropped if the allowlist ever widens.
 pub struct SpawnEnv {
     home: PathBuf,
     cache: PathBuf,
     config: PathBuf,
+    /// Owned so the sockets and logs a daemon-capable binary opens under it
+    /// are removed when the run ends.
+    runtime: tempfile::TempDir,
 }
 
 impl SpawnEnv {
@@ -40,26 +62,32 @@ impl SpawnEnv {
         for dir in [&home, &cache, &config] {
             std::fs::create_dir_all(dir)?;
         }
+        let runtime = norn_fixtures::testing::short_runtime_dir("norn-parity-")?;
         Ok(SpawnEnv {
             home,
             cache,
             config,
+            runtime,
         })
     }
 
     fn apply(&self, command: &mut Command) {
         command.env_clear();
-        // PATH so a binary can find anything it shells out to; the locale and
-        // TMPDIR because a process needs somewhere to write and a charset to
-        // format with. Every one of these is identical for both sides.
-        for passthrough in ["PATH", "LANG", "LC_ALL", "TMPDIR"] {
+        // PATH so a binary can find anything it shells out to, and TMPDIR
+        // because a process needs somewhere to write. Nothing else is
+        // forwarded — see the type doc.
+        for passthrough in ["PATH", "TMPDIR"] {
             if let Some(value) = std::env::var_os(passthrough) {
                 command.env(passthrough, value);
             }
         }
+        command.env("LC_ALL", "C.UTF-8");
+        command.env_remove("LANG");
+        command.env_remove("LC_CTYPE");
         command.env("HOME", &self.home);
         command.env("XDG_CACHE_HOME", &self.cache);
         command.env("XDG_CONFIG_HOME", &self.config);
+        command.env("XDG_RUNTIME_DIR", self.runtime.path());
         command.env_remove("NORN_ROOT");
         command.env_remove("NORN_CONFIG_DIR");
     }

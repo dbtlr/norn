@@ -310,3 +310,115 @@ observed = {{ "{FAB_CASE_ID}" = {{ stdout = 3 }} }}
     );
     assert_eq!(report.exit_code(), 1);
 }
+
+const FILTERED_CASE_ID: &str = "fab-help-other";
+
+/// Two suites, one case each, both running `--help`. A `--suite` filter can
+/// then run one cited case and skip the other.
+static TWO_SUITES: &[Suite] = &[
+    Suite {
+        name: "fabricated",
+        cases: &[Case {
+            id: FAB_CASE_ID,
+            argv: &["--help"],
+            fixture: CLEAN_1,
+            stdin: None,
+            mutating: false,
+            ported: true,
+            expect_oracle_exit: 0,
+            requires_doc: None,
+            requires_code: None,
+            normalize: &[],
+            plan: None,
+        }],
+    },
+    Suite {
+        name: "filtered-out",
+        cases: &[Case {
+            id: FILTERED_CASE_ID,
+            argv: &["--help"],
+            fixture: CLEAN_1,
+            stdin: None,
+            mutating: false,
+            ported: true,
+            expect_oracle_exit: 0,
+            requires_doc: None,
+            requires_code: None,
+            normalize: &[],
+            plan: None,
+        }],
+    },
+];
+
+#[test]
+fn a_filtered_run_reports_possibly_stale_and_keeps_the_corrective_gap_row() {
+    if common::oracle_missing("verdicts") {
+        return;
+    }
+    let ledger_dir = tempfile::TempDir::new().unwrap();
+    let ledger_path = ledger_dir.path().join("ledger.toml");
+    common::write_ledger(
+        &ledger_path,
+        &format!(
+            r#"
+[meta]
+oracle_version = "0.48.1"
+
+[[entry]]
+id = "TEST-PARTIAL"
+surface = "help (fabricated)"
+cases = ["{FAB_CASE_ID}", "{FILTERED_CASE_ID}"]
+old = "help text"
+new = "help text"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {{ "{FAB_CASE_ID}" = {{ stdout = 1 }}, "{FILTERED_CASE_ID}" = {{ stdout = 1 }} }}
+"#
+        ),
+    );
+
+    // rewrite := the oracle, so the ONE case the filter runs matches. The
+    // other cited case never runs, and might still diverge.
+    let filter = vec!["fabricated".to_string()];
+    let config = RunConfig {
+        mode: Mode::Gated,
+        oracle: Path::new("norn"),
+        rewrite: Path::new("norn"),
+        ledger_path: &ledger_path,
+        suite_filter: &filter,
+    };
+    let report = run::run_suites(&config, TWO_SUITES).expect("run should succeed");
+
+    assert_eq!(report.outcomes.len(), 1, "the filter ran one case");
+    assert!(
+        report.stale_entries.is_empty(),
+        "a filtered run must not call an entry dead on evidence it did not gather"
+    );
+    assert_eq!(
+        report.unverified_stale_entries,
+        vec!["TEST-PARTIAL".to_string()],
+        "it is reported as possibly stale instead"
+    );
+    // The corrective row survives: the case that DID run matched, so its
+    // declared extent is wrong regardless of the filter.
+    assert_eq!(report.extent_gaps.len(), 1);
+    let gap = &report.extent_gaps[0];
+    assert_eq!(gap.cases.len(), 1);
+    assert_eq!(gap.cases[0].case_id, FAB_CASE_ID);
+    assert!(gap.cases[0].observed.is_zero());
+    assert_eq!(
+        gap.replacement,
+        format!("observed = {{ \"{FILTERED_CASE_ID}\" = {{ stdout = 1 }} }}"),
+        "the un-run case keeps its declared extent; only the case this run measured changes"
+    );
+
+    let rendered = norn_parity::report::render(&report, Mode::Gated);
+    assert!(
+        rendered.contains("possibly stale") && rendered.contains("re-run unfiltered"),
+        "the softer line names what to do, got:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("delete the entry"),
+        "deleting is the CONFIRMED remedy and must not be advised here, got:\n{rendered}"
+    );
+}

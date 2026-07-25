@@ -101,7 +101,15 @@ pub struct ExtentGap {
 
 pub struct RunReport {
     pub outcomes: Vec<CaseOutcome>,
+    /// Entries proven dead by this run: every cited case ran and every one
+    /// of them matched. Deleting the entry is the remedy, and the run fails
+    /// until someone does (ADR 0018: entries cannot rot).
     pub stale_entries: Vec<String>,
+    /// Entries whose ran cases all matched but whose cited set was not fully
+    /// executed — a `--suite`-filtered run cannot tell a dead entry from one
+    /// whose surviving divergence it never ran. Advisory only: it does not
+    /// fail the run, because a filtered run has not earned that verdict.
+    pub unverified_stale_entries: Vec<String>,
     /// Entries whose declared extent no longer matches the observed one.
     pub extent_gaps: Vec<ExtentGap>,
     pub oracle_version: String,
@@ -405,6 +413,17 @@ const PREFLIGHT_FIXTURE: cases::Fixture = cases::Fixture {
 /// daemon adding one stderr line to every oracle case makes 44 cases drift,
 /// and a self-check stays green throughout because both sides are the oracle
 /// and both carry the line.
+///
+/// Its scope is deliberately narrow, and worth stating so nobody reads it as
+/// a general environment audit: ONE verb, on ONE fixture, on the ORACLE side,
+/// watching ONE stream. It catches the loud shape (something is talking on
+/// stderr) and nothing subtler — a host influence that changes stdout, or
+/// that only appears under another verb, still reaches the run.
+///
+/// There is no override, by design. A future oracle that legitimately writes
+/// to stderr here makes every extent in the ledger untrustworthy until
+/// someone looks, so the fix is a deliberate code change with that judgment
+/// recorded, not a flag a green build can be bought with.
 fn require_quiet_environment(
     oracle: &Path,
     fixture_cache: &mut FixtureCache,
@@ -513,11 +532,14 @@ fn extent_gaps(
 ) -> Vec<ExtentGap> {
     let mut gaps = Vec::new();
     for entry in &ledger.entries {
-        // A stale entry's every ran case matched, so each would report a gap
-        // whose paste line is `observed = {}` — a line the ledger's own guard
-        // rejects, because the remedy for a divergence that is GONE is
-        // deleting the entry, not recording a zero. The stale report says
-        // exactly that; saying it twice, differently, is worse than once.
+        // A CONFIRMED stale entry's every cited case ran and matched, so each
+        // would report a gap whose paste line is `observed = {}` — a line the
+        // ledger's own guard rejects, because the remedy for a divergence
+        // that is gone is deleting the entry, not recording a zero. The stale
+        // report says exactly that; saying it twice, differently, is worse
+        // than once. An UNVERIFIED entry is not suppressed: its gap row is
+        // the corrective information a filtered run can still offer (which
+        // cited case matched), and deleting the entry is not the advice.
         if stale.contains(&entry.id) {
             continue;
         }
@@ -850,8 +872,16 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
         }
         // A case that differs must measure as differing, or the ledger could
         // cover it with `observed = {}` — a declaration that nothing differs,
-        // gating a real divergence. The floor in `extent::stream_regions`
-        // keeps this reachable only through a measurement bug.
+        // gating a real divergence.
+        //
+        // `extent::stream_regions` floors a byte-differing stream at 1, and
+        // the tree/mcp/exit channels count concrete items, so every way a
+        // case can be non-matching already contributes a region: this is
+        // unreachable as the code stands. It is kept as insurance on that
+        // invariant rather than as a live path — the floor is one `max(1)`
+        // deep inside the counter, and losing it would otherwise be silent
+        // here (`extent::tests::the_floor_holds_for_every_differing_shape`
+        // pins the same invariant from the other side).
         if !matches!(verdict, Verdict::Match) && runner_error.is_none() && extent.is_zero() {
             return Err(RunError::UnmeasuredDivergence { case_id: case.id });
         }
@@ -867,14 +897,15 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
         });
     }
 
-    let stale_entries: Vec<String> = match &ledger {
+    let all_stale = match &ledger {
         None => Vec::new(),
-        Some(l) => l
-            .stale_entries(&ran_ids, &diverged_ids)
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect(),
+        Some(l) => l.stale_entries(&ran_ids, &diverged_ids),
     };
+    let (confirmed, unverified): (Vec<_>, Vec<_>) =
+        all_stale.into_iter().partition(|s| s.every_cited_case_ran);
+    let stale_entries: Vec<String> = confirmed.into_iter().map(|s| s.entry_id).collect();
+    let unverified_stale_entries: Vec<String> =
+        unverified.into_iter().map(|s| s.entry_id).collect();
     let extent_gaps = match &ledger {
         None => Vec::new(),
         Some(l) => extent_gaps(l, &observed_extents, &stale_entries),
@@ -883,6 +914,7 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
     Ok(RunReport {
         outcomes,
         stale_entries,
+        unverified_stale_entries,
         extent_gaps,
         oracle_version,
     })

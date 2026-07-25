@@ -500,12 +500,20 @@ impl Ledger {
         self.case_index.get(case_id).map(|&i| &self.entries[i])
     }
 
-    /// Entry ids that are stale after this run: cited by at least one case
-    /// that ran (`ran`), but none of those cases actually diverged
-    /// (`diverged`). ADR 0018: "entries cannot rot" — an entry whose cases
-    /// all currently match must fail the run just as loudly as an
-    /// uncovered drift.
-    pub fn stale_entries(&self, ran: &BTreeSet<&str>, diverged: &BTreeSet<&str>) -> Vec<&str> {
+    /// Entries whose divergence appears to be GONE after this run: cited by
+    /// at least one case that ran (`ran`), and none of the cases that ran
+    /// actually diverged (`diverged`). ADR 0018: "entries cannot rot" — an
+    /// entry whose cases all currently match must fail the run just as
+    /// loudly as an uncovered drift.
+    ///
+    /// The two verdicts are separated by whether the run could SEE the whole
+    /// entry. `Stale::Confirmed` means every cited case ran and every one of
+    /// them matched, so the entry is provably dead and deleting it is the
+    /// remedy. `Stale::Unverified` means some cited case never ran (a
+    /// `--suite` filter, a mode that skipped it): the cases that did run
+    /// matched, but a case that did not run may still diverge, and telling
+    /// an author to delete an entry on that evidence is wrong.
+    pub fn stale_entries(&self, ran: &BTreeSet<&str>, diverged: &BTreeSet<&str>) -> Vec<Stale> {
         let mut stale = Vec::new();
         for entry in &self.entries {
             let cited_and_ran: Vec<&str> = entry
@@ -517,13 +525,26 @@ impl Ledger {
             if cited_and_ran.is_empty() {
                 continue;
             }
-            let any_diverged = cited_and_ran.iter().any(|c| diverged.contains(c));
-            if !any_diverged {
-                stale.push(entry.id.as_str());
+            if cited_and_ran.iter().any(|c| diverged.contains(c)) {
+                continue;
             }
+            stale.push(Stale {
+                entry_id: entry.id.clone(),
+                every_cited_case_ran: cited_and_ran.len() == entry.cases.len(),
+            });
         }
         stale
     }
+}
+
+/// A ledger entry none of whose ran cases diverged — see
+/// [`Ledger::stale_entries`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stale {
+    pub entry_id: String,
+    /// `false` when a `--suite` filter (or a mode) kept some cited case from
+    /// running, so the entry cannot be judged dead on this run's evidence.
+    pub every_cited_case_ran: bool,
 }
 
 fn entries_id_at(entries: &[Entry], index: usize) -> String {

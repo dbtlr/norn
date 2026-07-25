@@ -75,9 +75,16 @@ pub fn render(report: &RunReport, mode: Mode) -> String {
     ));
     if !report.stale_entries.is_empty() {
         out.push_str(&format!(
-            "stale entries (every cited case that ran now matches — the divergence is gone; \
+            "stale entries (every cited case ran and now matches — the divergence is gone; \
              delete the entry): {}\n",
             report.stale_entries.join(", ")
+        ));
+    }
+    if !report.unverified_stale_entries.is_empty() {
+        out.push_str(&format!(
+            "possibly stale (the cited cases that ran now match, but some cited cases were not \
+             run — re-run unfiltered before deleting): {}\n",
+            report.unverified_stale_entries.join(", ")
         ));
     }
     render_extent_gaps(&mut out, report);

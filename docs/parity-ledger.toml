@@ -73,11 +73,26 @@
 #
 #   0. an extent is only meaningful from a run the HOST could not reach. The
 #      runner clears the environment for every binary it spawns (a scratch
-#      HOME / XDG tree, no NORN_ROOT / NORN_CONFIG_DIR) and refuses to run
-#      when the oracle writes to stderr on a freshly generated fixture, which
-#      is what a live `norn serve` daemon on the host looks like (NRN-490).
-#      Trust a number that came out of a clean run; re-measure one that did
-#      not;
+#      HOME / XDG tree, a pinned `LC_ALL=C.UTF-8`, no NORN_ROOT /
+#      NORN_CONFIG_DIR) and refuses to run when the oracle writes to stderr on
+#      a freshly generated fixture, which is what a live `norn serve` daemon
+#      on the host looks like (NRN-490). Trust a number that came out of a
+#      clean run; re-measure one that did not;
+#
+#      The LOCALE is pinned rather than forwarded, and that is a decision, not
+#      a detail. The rewrite selects glyphs from the locale
+#      (`LC_ALL` -> `LC_CTYPE` -> `LANG`, ASCII off a non-UTF-8 value;
+#      `crates/norn-cli/src/output/glyphs.rs`) where the pinned oracle emits
+#      unicode unconditionally. RULING: the adaptive fallback STAYS — ASCII in
+#      a non-UTF-8 terminal is correct output hygiene, and the rewrite is not
+#      changed to match the oracle here. Parity runs both sides under one
+#      pinned UTF-8 locale, where they render the same glyphs, so the adaptive
+#      behavior is deliberately unexercised by parity rather than gated by an
+#      entry. Forwarding the host's locale instead would bake whichever locale
+#      the tables were recorded under into the ledger (it did: several cases
+#      differ under `LC_ALL=C` and matched only because CI images set a UTF-8
+#      `LANG`), which is exactly the platform-dependence the rule below
+#      forbids;
 #   1. write the entry with `observed = {}` (the field is required, and may
 #      be empty until the first run measures it);
 #   2. run the gated comparison — `norn-parity --oracle <pinned> --rewrite

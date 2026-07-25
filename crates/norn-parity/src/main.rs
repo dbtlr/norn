@@ -22,7 +22,8 @@ fn usage() -> String {
      \x20 --consistency  oracle-only cross-command invariants; --rewrite not required\n\n\
      --oracle default: `norn` resolved from PATH\n\
      --rewrite default: ./target/release/norn (ignored by --consistency)\n\
-     --ledger default: docs/parity-ledger.toml at the workspace root"
+     --ledger default: docs/parity-ledger.toml at the workspace root\n\
+     -h, --help     print this usage and exit 0"
         .to_string()
 }
 

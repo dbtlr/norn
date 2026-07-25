@@ -289,6 +289,31 @@ mod tests {
         assert_eq!(stream_regions("a\nb\n", "a\nb"), 1);
     }
 
+    /// The invariant `run::run_suites` relies on to declare
+    /// `RunError::UnmeasuredDivergence` unreachable: no pair of DIFFERING
+    /// stream contents measures zero regions, whatever shape the difference
+    /// takes.
+    #[test]
+    fn the_floor_holds_for_every_differing_shape() {
+        let pairs = [
+            ("a\n", "b\n"),             // content
+            ("a\n", "a\r\n"),           // line terminator
+            ("a\n", "a"),               // trailing newline
+            ("", "\n"),                 // empty vs one blank line
+            ("a\n", ""),                // everything removed
+            ("a\nb\n", "a\nb\n\n"),     // trailing blank line
+            (" a\n", "a\n"),            // leading whitespace
+            ("a \n", "a\n"),            // trailing whitespace
+            ("a\n\n\nb\n", "a\n\nb\n"), // a dropped blank line
+        ];
+        for (oracle, candidate) in pairs {
+            assert!(
+                stream_regions(oracle, candidate) > 0,
+                "{oracle:?} vs {candidate:?} differs but measured zero regions"
+            );
+        }
+    }
+
     #[test]
     fn channels_are_counted_separately_so_a_swap_cannot_cancel_out() {
         let one_on_stdout = Extent {

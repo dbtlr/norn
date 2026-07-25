@@ -682,7 +682,45 @@ observed = {}
 
     let ran: BTreeSet<&str> = ["help-bare"].into_iter().collect();
     let diverged: BTreeSet<&str> = BTreeSet::new(); // nothing diverged: PD-001's case matched
-    assert_eq!(ledger.stale_entries(&ran, &diverged), vec!["PD-001"]);
+    let stale = ledger.stale_entries(&ran, &diverged);
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0].entry_id, "PD-001");
+    assert!(
+        stale[0].every_cited_case_ran,
+        "the entry cites one case and it ran, so the entry is provably dead"
+    );
+}
+
+#[test]
+fn stale_is_unverified_when_a_cited_case_never_ran() {
+    // A `--suite` filter ran one of the entry's two cited cases. It matched —
+    // but the case that did not run may still diverge, so this run has not
+    // earned the "delete the entry" verdict.
+    let toml = r#"
+[meta]
+oracle_version = "0.48.0"
+
+[[entry]]
+id = "PD-001"
+surface = "help"
+cases = ["help-bare", "help-validate"]
+old = "old behavior"
+new = "new behavior"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = { "help-bare" = { stdout = 1 }, "help-validate" = { stdout = 1 } }
+"#;
+    let ledger = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap();
+
+    let ran: BTreeSet<&str> = ["help-bare"].into_iter().collect();
+    let diverged: BTreeSet<&str> = BTreeSet::new();
+    let stale = ledger.stale_entries(&ran, &diverged);
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0].entry_id, "PD-001");
+    assert!(
+        !stale[0].every_cited_case_ran,
+        "help-validate never ran, so the entry cannot be judged dead here"
+    );
 }
 
 #[test]
