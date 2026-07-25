@@ -391,7 +391,7 @@ impl VaultCacheSlot {
     /// (NRN-253): a generation whose staged increment failed would keep serving.
     /// So on ANY increment failure we EVICT the generation the increment ran on
     /// (dropping it forces the next [`ensure_current`](Self::ensure_current) to
-    /// re-derive from files), surface an operator note the owner renders later,
+    /// re-derive from files), return an operator note explaining the degrade,
     /// and SUCCEED. `Degraded` (the target generation died mid-commit) is already
     /// benign — no eviction, just the note.
     ///
@@ -478,8 +478,9 @@ impl VaultCacheSlot {
 /// ([`commit_apply_increments_fire_and_degrade`](VaultCacheSlot::commit_apply_increments_fire_and_degrade)).
 ///
 /// The mutation always succeeds; this only reports whether the cache stayed warm.
-/// `Degraded` carries an operator note the owner layer renders alongside the
-/// `ApplyReport` (the cache did not update; the next read heals it).
+/// `Degraded` carries an operator note explaining why the cache did not update;
+/// the owner's mutation seam drops the whole outcome (the next read heals the
+/// cache either way), so no surface renders the note today.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyIncrementCommit {
     /// The increment staged and published; the cache is warm.

@@ -1131,8 +1131,12 @@ async fn dispatch_mutation<R: Send + 'static>(
         let exec = slot.serve_read(|cache| execute(cache, &mut sink))?;
         if let Some(baseline) = baseline {
             if !exec.touched_paths.is_empty() {
-                // Fire-and-degrade: a failed increment leaves the next read's
-                // detect to heal the cache; the write itself already landed.
+                // Fire-and-degrade (docs/architecture.md invariant 12, "A cache
+                // fault degrades the cache, never the request"): the write has
+                // already landed in the vault, so the commit's outcome — including
+                // the `Degraded` operator note — is dropped here rather than
+                // failing the caller. A failed increment evicts the generation it
+                // ran on and the next read re-derives it from the files.
                 let _ =
                     slot.commit_apply_increments_fire_and_degrade(&exec.touched_paths, baseline);
             }

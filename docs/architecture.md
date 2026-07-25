@@ -53,6 +53,10 @@ Read it before adding a surface, a crate edge, or a mutation path. The point is 
 
 **Trust is maintained continuously by the substrate so that requests can stay fast.** A warm owner, a filesystem watcher, and a periodic health scan keep the served state trustworthy between requests; a request presumes that work is done and answers from it. Checks run on signal — an obvious integrity failure acts immediately and conservatively — or on schedule, never as a per-request ritual. Recovery from an eviction is background work owned by the maintenance layer, not a cost billed to the next caller (ADR [0005](./decisions/0005-trusted-cache-via-warm-service.md), [0013](./decisions/0013-generational-contexts-two-class-writer.md), [0017](./decisions/0017-registered-vaults-summoned-owners.md)).
 
+## 12. A cache fault degrades the cache, never the request
+
+**The cache is pure derivation, so a failure to maintain it never turns a confirmed apply into a request failure.** The mutation seam captures a pre-write baseline, lets the write land in the vault, and then commits the increment through the `norn-owner` runtime — the `commit_apply_increments_fire_and_degrade` call, whose result that seam deliberately drops. A failed increment evicts the generation it ran on, and the next read re-derives that generation from the files, which are the source of truth; the caller still receives the report for the write that landed. *Interim:* eviction is today's first response and is decided-to-be-replaced by a dirty-path queue plus a timer-driven heal worker in the maintenance layer; this invariant survives that change, because eviction and full re-derivation remain the terminal rung beneath the cheaper heals (ADR [0005](./decisions/0005-trusted-cache-via-warm-service.md), [0013](./decisions/0013-generational-contexts-two-class-writer.md), [0014](./decisions/0014-atomic-cache-publication.md)).
+
 ## See also
 
 - [Concepts](concepts.md) — the vault graph, frontmatter, and validate/repair loop these invariants operate on.
