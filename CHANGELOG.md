@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+## v0.48.2 - 2026-07-24
+
+**Release theme:** routed writes survive big cache rebuilds — the stall watchdog now sees real progress during long refreshes instead of abandoning healthy writes.
+
 ### Fixed
 
 - **Routed writes against a large vault no longer false-stall while the daemon rebuilds or refreshes its cache (NRN-465).** A routed `set` / `new` / `edit` against a `norn serve` daemon could fail with `service stopped responding or making writer progress — run \`norn service restart\`; the daemon may have applied the change` (exit 1, `post-send-uncertain`) even though the daemon was healthy — leaving the write *applied on disk but never acknowledged to the client*. The cause: the client stall watchdog declares a busy writer wedged when its opaque progress `sequence` stays unchanged for the five-second stall budget, but that sequence only advanced at op boundaries — and a freshness refresh reparses the WHOLE vault on any single content change as one indivisible op. On a large vault (tens of thousands of docs) that reparse froze the sequence for several seconds, tripping the budget while the daemon was actively working. The refresh, rebuild, and generation-open liveness ops now advance the sequence from inside their real work loops (per batch of files parsed / hashed / staged, and per bounded cache-write-lock retry), so the client waits through a legitimately long rebuild instead of abandoning it. Every tick is evidence of actual work — never timer-driven — so a genuinely wedged daemon is still caught. A new undocumented `NORN_SERVICE_STALL_BUDGET_MS` client env override (mirroring `NORN_SERVICE_HANDSHAKE_TIMEOUT_MS`) shrinks or grows the stall budget for deterministic tests and as an operator escape hatch.
