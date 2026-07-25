@@ -86,8 +86,18 @@ pub fn scratch_env() -> Scratch {
 
 /// Write `body` as an executable `/bin/sh` script at `dir/name` — the one
 /// place this crate's tests materialize a fake binary, so every suite
-/// driving stubs (`tests/mcp.rs`, `tests/mutation.rs`) gets the same
-/// exec-safety handling.
+/// driving stubs (`tests/mcp.rs`, `tests/mutation.rs`, `tests/environment.rs`,
+/// `tests/verdicts.rs`) gets the same exec-safety and portability handling.
+///
+/// PORTABILITY RULE, enforced below: a stub body is POSIX shell, and uses
+/// `printf`, never `echo`. `/bin/sh` is bash on macOS and dash on
+/// Debian-family CI, and their `echo` builtins disagree — dash's interprets
+/// backslash escapes, so a body that emits one line locally emits several
+/// there and a case's measured divergence changes size with the runner.
+/// `printf '%s\n' '<payload>'` behaves identically under both (with the
+/// payload as an ARGUMENT, so a `%` inside it is never a format directive).
+/// Same reasoning bars the other bashisms — `echo -e`, `[[ ]]`,
+/// `${var/old/new}`.
 ///
 /// The mode is requested at open time (which applies it only when the file is
 /// CREATED — every caller writes a fresh path under its own temp dir) and the
@@ -98,6 +108,17 @@ pub fn scratch_env() -> Scratch {
 /// thread forking while this write is in flight, so its child inherits the
 /// descriptor) is absorbed by `exec`'s retry.
 pub fn write_stub(dir: &Path, name: &str, body: &str) -> PathBuf {
+    for (number, line) in body.lines().enumerate() {
+        let first = line.split_whitespace().next().unwrap_or_default();
+        // `if ...; then echo ...` hides the word mid-line, so scan tokens too.
+        let has_echo = line.split_whitespace().any(|tok| tok == "echo");
+        assert!(
+            !(first == "echo" || has_echo),
+            "stub line {} runs `echo`, which is not portable across the shells /bin/sh resolves \
+             to (bash here, dash on Debian-family CI). Use `printf '%s\\n' '<payload>'`:\n  {line}",
+            number + 1
+        );
+    }
     let path = dir.join(name);
     let mut file = std::fs::OpenOptions::new()
         .write(true)

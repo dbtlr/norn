@@ -35,14 +35,14 @@ const REQUEST_FRAMES: &[&str] = &[
 /// The `--version` preamble every stub shares, plus dispatch on `mcp` vs.
 /// anything else (any non-mcp/non-version argv exits 0 quietly — this
 /// crate's cases never invoke the stub any other way for this suite).
-const STUB_PREAMBLE: &str = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"stub 9.9.9\"; exit 0; fi\nif [ \"$1\" != \"mcp\" ]; then exit 0; fi\ncat > /dev/null\n";
+const STUB_PREAMBLE: &str = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' \"stub 9.9.9\"; exit 0; fi\nif [ \"$1\" != \"mcp\" ]; then exit 0; fi\ncat > /dev/null\n";
 
 /// A stub that drains stdin then answers both request frames (ids 1 and 2)
 /// with a `serverInfo.version` of `version` and a `tools/list` result body
 /// of `tools_result` verbatim, exit 0.
 fn mcp_stub_body(version: &str, tools_result: &str) -> String {
     format!(
-        "{STUB_PREAMBLE}echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{{\"name\":\"norn\",\"version\":\"{version}\"}},\"capabilities\":{{\"tools\":{{}}}}}}}}'\necho '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":{tools_result}}}}}'\nexit 0\n"
+        "{STUB_PREAMBLE}printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{{\"name\":\"norn\",\"version\":\"{version}\"}},\"capabilities\":{{\"tools\":{{}}}}}}}}'\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":{tools_result}}}}}'\nexit 0\n"
     )
 }
 
@@ -50,7 +50,7 @@ fn mcp_stub_body(version: &str, tools_result: &str) -> String {
 /// the premature-EOF shape.
 fn eof_early_stub_body() -> String {
     format!(
-        "{STUB_PREAMBLE}echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{{\"name\":\"norn\",\"version\":\"9.9.9\"}},\"capabilities\":{{\"tools\":{{}}}}}}}}'\nexit 0\n"
+        "{STUB_PREAMBLE}printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{{\"name\":\"norn\",\"version\":\"9.9.9\"}},\"capabilities\":{{\"tools\":{{}}}}}}}}'\nexit 0\n"
     )
 }
 
@@ -59,7 +59,7 @@ fn eof_early_stub_body() -> String {
 /// content is byte-identical.
 fn mcp_stub_body_with_exit(version: &str, tools_result: &str, exit_code: i32) -> String {
     format!(
-        "{STUB_PREAMBLE}echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{{\"name\":\"norn\",\"version\":\"{version}\"}},\"capabilities\":{{\"tools\":{{}}}}}}}}'\necho '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":{tools_result}}}}}'\nexit {exit_code}\n"
+        "{STUB_PREAMBLE}printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{{\"name\":\"norn\",\"version\":\"{version}\"}},\"capabilities\":{{\"tools\":{{}}}}}}}}'\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":{tools_result}}}}}'\nexit {exit_code}\n"
     )
 }
 
@@ -67,7 +67,7 @@ fn mcp_stub_body_with_exit(version: &str, tools_result: &str, exit_code: i32) ->
 /// a full JSON-RPC frame) for an id never requested — F2.
 fn mcp_stub_body_with_extra(version: &str, tools_result: &str, extra_line: &str) -> String {
     format!(
-        "{STUB_PREAMBLE}echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{{\"name\":\"norn\",\"version\":\"{version}\"}},\"capabilities\":{{\"tools\":{{}}}}}}}}'\necho '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":{tools_result}}}}}'\necho '{extra_line}'\nexit 0\n"
+        "{STUB_PREAMBLE}printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{{\"name\":\"norn\",\"version\":\"{version}\"}},\"capabilities\":{{\"tools\":{{}}}}}}}}'\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":{tools_result}}}}}'\nprintf '%s\\n' '{extra_line}'\nexit 0\n"
     )
 }
 
@@ -75,7 +75,7 @@ fn mcp_stub_body_with_extra(version: &str, tools_result: &str, extra_line: &str)
 /// times) — F3.
 fn mcp_stub_body_with_duplicate_id2(version: &str, tools_result: &str) -> String {
     format!(
-        "{STUB_PREAMBLE}echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{{\"name\":\"norn\",\"version\":\"{version}\"}},\"capabilities\":{{\"tools\":{{}}}}}}}}'\necho '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":{tools_result}}}}}'\necho '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":{tools_result}}}}}'\nexit 0\n"
+        "{STUB_PREAMBLE}printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"serverInfo\":{{\"name\":\"norn\",\"version\":\"{version}\"}},\"capabilities\":{{\"tools\":{{}}}}}}}}'\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":{tools_result}}}}}'\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"tools\":{tools_result}}}}}'\nexit 0\n"
     )
 }
 

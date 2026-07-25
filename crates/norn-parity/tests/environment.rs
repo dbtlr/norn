@@ -96,12 +96,12 @@ fn an_oracle_that_writes_to_stderr_on_a_clean_fixture_aborts_the_run() {
     let noisy = write_stub(
         bin_dir.path(),
         "oracle",
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"stub 9.9.9\"; exit 0; fi\necho \"norn: service is v9.9.9, client is v9.9.8 — restart the norn serve daemon\" >&2\nexit 0\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' \"stub 9.9.9\"; exit 0; fi\nprintf '%s\\n' \"norn: service is v9.9.9, client is v9.9.8 — restart the norn serve daemon\" >&2\nexit 0\n",
     );
     let quiet = write_stub(
         bin_dir.path(),
         "candidate",
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"stub 9.9.9\"; exit 0; fi\nexit 0\n",
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' \"stub 9.9.9\"; exit 0; fi\nexit 0\n",
     );
 
     let ledger_dir = tempfile::TempDir::new().unwrap();
@@ -139,7 +139,7 @@ fn an_oracle_that_writes_to_stderr_on_a_clean_fixture_aborts_the_run() {
 fn a_quiet_oracle_passes_the_preflight() {
     let bin_dir = tempfile::TempDir::new().unwrap();
     let stub_body =
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"stub 9.9.9\"; exit 0; fi\nexit 0\n";
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' \"stub 9.9.9\"; exit 0; fi\nexit 0\n";
     let oracle = write_stub(bin_dir.path(), "oracle", stub_body);
     let candidate = write_stub(bin_dir.path(), "candidate", stub_body);
 

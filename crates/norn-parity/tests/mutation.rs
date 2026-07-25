@@ -12,7 +12,8 @@
 //!   and that a non-mutating case never triggers the tree comparison.
 //!
 //! Stubs are `/bin/sh` scripts (this crate's tests already assume a unixy
-//! environment — cf. `/bin/echo` in `tests/verdicts.rs`). Each answers
+//! environment). They go through `common::write_stub`, which holds the
+//! POSIX-only rule every stub body follows. Each answers
 //! `--version` with a pinned semver token so the harness's oracle-version pin
 //! is satisfiable, and otherwise writes into its cwd (the fixture vault).
 
@@ -38,13 +39,13 @@ const MUT_CASE_ID: &str = "fab-mutation-clean";
 /// `content` verbatim into `mutation.md` in its cwd, exit 0.
 fn mutating_stub_body(content: &str) -> String {
     format!(
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"stub 9.9.9\"; exit 0; fi\nprintf '%s' '{content}' > mutation.md\nexit 0\n"
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' \"stub 9.9.9\"; exit 0; fi\nprintf '%s' '{content}' > mutation.md\nexit 0\n"
     )
 }
 
 /// The `--version` preamble every stub shares.
 const STUB_VERSION_PREAMBLE: &str =
-    "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"stub 9.9.9\"; exit 0; fi\n";
+    "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' \"stub 9.9.9\"; exit 0; fi\n";
 
 /// A stub that creates an empty directory `emptied/` in its cwd (no file
 /// writes, no stdout), exit 0 — for the directory-cleanup divergence case.

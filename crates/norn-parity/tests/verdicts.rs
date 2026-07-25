@@ -9,16 +9,21 @@
 //! case and exercise the classification/stale glue exactly as production
 //! would — no re-derivation of that logic inline.
 //!
-//! The candidate binary is `/bin/echo` (present on macOS + Linux,
-//! deterministic, and guaranteed to mismatch the oracle's `--help` output) for
-//! the mismatch cases, and the oracle itself for the match/stale case. Every
-//! ledger here is a temp file; the real `docs/parity-ledger.toml` is never
-//! touched.
+//! The candidate binary for the mismatch cases is a written stub that prints
+//! ONE fixed line and exits 0 — the oracle itself stands in for the
+//! match/stale cases. A system binary cannot serve as the candidate here: the
+//! obvious pick, `/bin/echo`, is BSD echo on macOS and GNU coreutils on
+//! Linux, and only the GNU build interprets `--help` and answers with its own
+//! multi-line usage. That makes the SIZE of the divergence a property of the
+//! platform (1 region against BSD echo, 5-7 against GNU echo), which is
+//! exactly what a declared extent may never be. Every ledger here is a temp
+//! file; the real `docs/parity-ledger.toml` is never touched.
 
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use common::write_stub;
 use norn_parity::cases::{Case, Fixture, Suite};
 use norn_parity::run::{self, Mode, RunConfig};
 use norn_parity::Verdict;
@@ -42,7 +47,7 @@ const FAB_CASE_ID: &str = "fab-help-clean";
 /// cache build, which would flip the stale test's required Match to a
 /// Diverged. (The production self-check runs its cases sequentially in one
 /// process and is unaffected.) The mismatch tests below still hold: the
-/// oracle's help text never equals `/bin/echo`'s echo of the argv.
+/// oracle's help text never equals the candidate stub's one fixed line.
 static FAB_SUITES: &[Suite] = &[Suite {
     name: "fabricated",
     cases: &[Case {
@@ -60,7 +65,17 @@ static FAB_SUITES: &[Suite] = &[Suite {
     }],
 }];
 
-const ECHO: &str = "/bin/echo";
+/// The candidate for every mismatch case: one fixed line, exit 0, on any
+/// platform and under any `/bin/sh`. The line shares no text with the
+/// oracle's `--help`, so the divergence is exactly one region however long
+/// that help happens to be — the property the declared extents depend on.
+fn fixed_line_candidate(dir: &Path) -> PathBuf {
+    write_stub(
+        dir,
+        "candidate",
+        "#!/bin/sh\nprintf '%s\\n' 'fabricated candidate output'\nexit 0\n",
+    )
+}
 
 fn diverged_verdicts(report: &run::RunReport) -> Vec<String> {
     report
@@ -78,6 +93,8 @@ fn candidate_echo_with_no_ledger_entry_is_drift_and_exits_1() {
     if common::oracle_missing("verdicts") {
         return;
     }
+    let bin_dir = tempfile::TempDir::new().unwrap();
+    let candidate = fixed_line_candidate(bin_dir.path());
     let ledger_dir = tempfile::TempDir::new().unwrap();
     let ledger_path = ledger_dir.path().join("ledger.toml");
     common::write_ledger(&ledger_path, "[meta]\noracle_version = \"0.48.1\"\n");
@@ -85,7 +102,7 @@ fn candidate_echo_with_no_ledger_entry_is_drift_and_exits_1() {
     let config = RunConfig {
         mode: Mode::Gated,
         oracle: Path::new("norn"),
-        rewrite: Path::new(ECHO),
+        rewrite: &candidate,
         ledger_path: &ledger_path,
         suite_filter: &[],
     };
@@ -106,6 +123,8 @@ fn candidate_echo_covered_by_a_ledger_entry_is_diverged_citing_it_and_exits_0() 
     if common::oracle_missing("verdicts") {
         return;
     }
+    let bin_dir = tempfile::TempDir::new().unwrap();
+    let candidate = fixed_line_candidate(bin_dir.path());
     let ledger_dir = tempfile::TempDir::new().unwrap();
     let ledger_path = ledger_dir.path().join("ledger.toml");
     common::write_ledger(
@@ -131,7 +150,7 @@ observed = {{ "{FAB_CASE_ID}" = {{ stdout = 1 }} }}
     let config = RunConfig {
         mode: Mode::Gated,
         oracle: Path::new("norn"),
-        rewrite: Path::new(ECHO),
+        rewrite: &candidate,
         ledger_path: &ledger_path,
         suite_filter: &[],
     };
@@ -206,6 +225,8 @@ fn an_entry_declaring_the_wrong_divergence_extent_is_a_gap_and_exits_1() {
     if common::oracle_missing("verdicts") {
         return;
     }
+    let bin_dir = tempfile::TempDir::new().unwrap();
+    let candidate = fixed_line_candidate(bin_dir.path());
     let ledger_dir = tempfile::TempDir::new().unwrap();
     let ledger_path = ledger_dir.path().join("ledger.toml");
     // The entry covers the case and its case really does diverge — but it
@@ -235,7 +256,7 @@ observed = {{ "{FAB_CASE_ID}" = {{ stdout = 2 }} }}
     let config = RunConfig {
         mode: Mode::Gated,
         oracle: Path::new("norn"),
-        rewrite: Path::new(ECHO),
+        rewrite: &candidate,
         ledger_path: &ledger_path,
         suite_filter: &[],
     };
