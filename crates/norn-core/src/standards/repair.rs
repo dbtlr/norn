@@ -1126,7 +1126,6 @@ mod tests {
             Some("task-status".into()),
             field.into(),
             value,
-            vec![json!("backlog"), json!("completed")],
         )
     }
 

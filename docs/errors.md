@@ -100,7 +100,35 @@ goes to stderr for `records`/TTY output):
 - `message` — human-readable prose. Do not parse it.
 - `path` — the offending vault-relative path, when the failure is about one document.
 
-Over MCP the same `{ code, message, path? }` envelope is carried as the failing
+### Recovery slots
+
+Past those three, the envelope carries named, typed, **optional** recovery slots —
+the facts needed to turn a refusal into a passing retry, as data rather than prose.
+A slot is populated by the codes that have that fact and omitted entirely otherwise,
+so the envelope stays one flat shape. Slots are additive: a client reading only
+`code` and `message` is unaffected when a new one appears.
+
+**Absent is not empty.** A slot is *omitted* when the refusal carries no fact of
+that kind at all; a slot the code *does* own is always present, even when the fact
+is an empty collection. So `"allowed": []` is itself the answer — nothing satisfies
+the schema — and is distinguishable from a code that simply has no allowed-values
+fact. Every future slot follows this rule: absent means "not applicable", empty
+means "applicable, and the set is empty".
+
+| Slot | Populated by | Contents |
+|---|---|---|
+| `allowed` | `value-not-allowed` | The values the schema accepts for the offending field — the intersection of every co-applying rule's `allowed_values` set, so each listed value is a retry that passes. Always present on this code; `[]` when the co-applying rules share no value at all, so nothing passes without `--force` or a config fix (the message renders `<none>`) |
+
+```json
+{
+  "code": "value-not-allowed",
+  "message": "value 'someday' is not allowed for 'status' (allowed: backlog, done); use --force to override",
+  "path": "tasks/a.md",
+  "allowed": ["backlog", "done"]
+}
+```
+
+Over MCP the same envelope (slots included) is carried as the failing
 operation or precondition's `error` inside the returned `ApplyReport` — for both a `refused` apply
 (nothing written) and a `failed` apply (partial mutation). A structurally invalid
 request (an unparseable plan, a bad `schema_version`) still surfaces as a transport

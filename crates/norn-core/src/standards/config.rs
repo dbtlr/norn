@@ -693,8 +693,11 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
             }
         }
 
-        // allowed_values: non-empty, scalar values only.
-        // Fields sorted for deterministic error output.
+        // allowed_values: non-empty, scalar values only, and never `null`.
+        // A declared value is a value a write can retry with, and enforcement
+        // matches on same-typed scalar equality (String/Bool/Number) — `null`
+        // matches nothing, so listing it advertises a value no document can
+        // ever satisfy. Fields sorted for deterministic error output.
         let mut allowed_value_entries: Vec<(&String, &Vec<serde_json::Value>)> =
             rule.allowed_values.iter().collect();
         allowed_value_entries.sort_by_key(|(field, _)| field.as_str());
@@ -706,6 +709,14 @@ fn post_validate(cfg: &VaultConfig, source_path: &Utf8Path) -> Result<(), Config
                 });
             }
             for v in values {
+                if v.is_null() {
+                    return Err(ConfigError::Invalid {
+                        source_path: source_path.to_owned(),
+                        message: format!(
+                            "rule {rule_label}: allowed_values for '{field}' contains null; entries must be strings, booleans, or numbers"
+                        ),
+                    });
+                }
                 if !is_scalar_json_value(v) {
                     return Err(ConfigError::Invalid {
                         source_path: source_path.to_owned(),
@@ -1393,6 +1404,22 @@ validate:
     fn index_unknown_field_is_rejected() {
         let err = parse("index:\n  notakey: x\n").unwrap_err();
         assert!(err.to_string().contains("unknown field"), "got: {err}");
+    }
+
+    #[test]
+    fn null_allowed_values_entry_is_rejected() {
+        // `null` can never satisfy the enforcement match, so listing it would
+        // advertise a retry value that always refuses.
+        let err = parse_config(
+            "validate:\n  rules:\n    - name: r\n      allowed_values:\n        status: [~, done]\n",
+            camino::Utf8Path::new("c.yaml"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("allowed_values for 'status' contains null"),
+            "{err}"
+        );
     }
 
     #[test]

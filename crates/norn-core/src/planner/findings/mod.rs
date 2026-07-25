@@ -114,7 +114,6 @@ mod tests {
             Some("test-rule".into()),
             field.into(),
             value,
-            vec![serde_json::json!("allowed")],
         )
     }
 

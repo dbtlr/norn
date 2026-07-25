@@ -45,7 +45,10 @@ pub fn execute(
                 crate::target::TargetRefusalFamily::NotFound,
                 format!("doc not found: {}", params.target),
             );
-            return Ok(refused(params.target.clone(), code, msg, None));
+            return Ok(refused(
+                params.target.clone(),
+                CodedError::new(code, msg, None),
+            ));
         }
         crate::target::TargetResolution::Ambiguous(candidates) => {
             let (code, msg) = crate::target::target_refusal(
@@ -60,7 +63,10 @@ pub fn execute(
                         .join(", ")
                 ),
             );
-            return Ok(refused(params.target.clone(), code, msg, None));
+            return Ok(refused(
+                params.target.clone(),
+                CodedError::new(code, msg, None),
+            ));
         }
     };
     let target_str = target_path.to_string();
@@ -80,9 +86,11 @@ pub fn execute(
         Some(_) => {
             return Ok(refused(
                 target_str,
-                "frontmatter-not-mapping",
-                "frontmatter is not a top-level mapping",
-                Some(target_path.to_string()),
+                CodedError::new(
+                    "frontmatter-not-mapping",
+                    "frontmatter is not a top-level mapping",
+                    Some(target_path.to_string()),
+                ),
             ));
         }
     };
@@ -91,12 +99,9 @@ pub fn execute(
     let synthed = match synth(cfg, &index, &doc, &current_fm, params) {
         Ok(s) => s,
         Err(e) => {
-            return Ok(refused(
-                target_str,
-                e.code(),
-                e.to_string(),
-                Some(target_path.to_string()),
-            ));
+            let error = CodedError::new(e.code(), e.to_string(), Some(target_path.to_string()))
+                .with_allowed_opt(e.allowed());
+            return Ok(refused(target_str, error));
         }
     };
 
@@ -174,15 +179,13 @@ pub fn execute(
             .iter()
             .find(|o| o.status == OpStatus::Failed)
             .and_then(|o| o.error.clone())
-            .map(|e| CodedError {
-                code: e.code,
-                message: e.message,
-                path: e.path,
-            })
-            .unwrap_or_else(|| CodedError {
-                code: "internal-error".into(),
-                message: "apply refused without a coded op error".into(),
-                path: None,
+            .map(|e| CodedError::new(e.code, e.message, e.path))
+            .unwrap_or_else(|| {
+                CodedError::new(
+                    "internal-error",
+                    "apply refused without a coded op error",
+                    None,
+                )
             });
         return Ok(MutationExecution {
             report: SetReport {
@@ -316,7 +319,7 @@ fn synth(
                 if !force {
                     return Err(SetError::FieldJsonNotAllowed {
                         field: key.clone(),
-                        allowed: coerce::display_allowed(&allowed),
+                        allowed,
                     });
                 }
                 warnings.push(coerce::force_bypass_warning(
@@ -551,7 +554,7 @@ fn coerce_kv_slice(
                         return Err(SetError::ValueNotAllowed {
                             field: key.clone(),
                             value: coerce::display_value(&coerced),
-                            allowed: coerce::display_allowed(&allowed),
+                            allowed,
                         });
                     }
                     w.push(coerce::force_bypass_warning(
@@ -620,12 +623,7 @@ fn unknown_field(key: &str) -> MutationWarning {
     }
 }
 
-fn refused(
-    target: impl Into<String>,
-    code: &str,
-    message: impl Into<String>,
-    path: Option<String>,
-) -> MutationExecution<SetReport> {
+fn refused(target: impl Into<String>, error: CodedError) -> MutationExecution<SetReport> {
     MutationExecution {
         report: SetReport {
             schema_version: 2,
@@ -639,11 +637,7 @@ fn refused(
             body_bytes_old: None,
             applied: false,
             outcome: MutationOutcome::Refused,
-            error: Some(CodedError {
-                code: code.into(),
-                message: message.into(),
-                path,
-            }),
+            error: Some(error),
             warnings: Vec::new(),
         },
         touched_paths: Vec::new(),
@@ -658,7 +652,7 @@ enum SetError {
     ValueNotAllowed {
         field: String,
         value: String,
-        allowed: String,
+        allowed: Vec<Value>,
     },
     FieldJsonInvalid {
         field: String,
@@ -670,7 +664,7 @@ enum SetError {
     },
     FieldJsonNotAllowed {
         field: String,
-        allowed: String,
+        allowed: Vec<Value>,
     },
     RequiredFieldRemoved {
         field: String,
@@ -703,6 +697,18 @@ impl SetError {
             SetError::FrontmatterNotMapping => "frontmatter-not-mapping",
         }
     }
+
+    /// The `allowed` recovery slot for the refusal envelope: `Some` (possibly
+    /// empty, when co-applying rules share no value) for the
+    /// `value-not-allowed` family, `None` for every refusal that owns no
+    /// allowed-values fact.
+    fn allowed(&self) -> Option<Vec<Value>> {
+        match self {
+            SetError::ValueNotAllowed { allowed, .. }
+            | SetError::FieldJsonNotAllowed { allowed, .. } => Some(allowed.clone()),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for SetError {
@@ -713,7 +719,11 @@ impl std::fmt::Display for SetError {
                 field,
                 value,
                 allowed,
-            } => write!(f, "{}", coerce::value_not_allowed_message(field, value, allowed)),
+            } => write!(
+                f,
+                "{}",
+                coerce::value_not_allowed_message(field, value, &coerce::display_allowed(allowed))
+            ),
             SetError::FieldJsonInvalid { field, detail } => {
                 write!(f, "--field-json value is not valid JSON ({field}): {detail}")
             }
@@ -723,7 +733,8 @@ impl std::fmt::Display for SetError {
             ),
             SetError::FieldJsonNotAllowed { field, allowed } => write!(
                 f,
-                "--field-json value for '{field}' is not allowed (allowed: {allowed}); use --force to override"
+                "--field-json value for '{field}' is not allowed (allowed: {}); use --force to override",
+                coerce::display_allowed(allowed)
             ),
             SetError::RequiredFieldRemoved { field } => {
                 write!(f, "cannot remove required field '{field}'; use --force to override")
@@ -1274,6 +1285,203 @@ mod tests {
         assert!(
             result.findings.is_empty(),
             "the doc set wrote should validate clean: {:?}",
+            result.findings
+        );
+    }
+
+    // ── Multi-rule allowed_values: set, new, and validate answer alike ────────
+
+    // A permissive rule declared FIRST and a narrower one declared second, both
+    // applying to the same document. The satisfiable set is their intersection
+    // ([backlog, done] for `status`, [a, b] for `tags`), so `active` / `bogus`
+    // violate the schema no matter which rule is consulted first.
+    const TWO_RULE_CFG: &str = "validate:\n  rules:\n    - name: global\n      match:\n        path: \"**/*.md\"\n      field_types:\n        tags: list_of_strings\n      allowed_values:\n        status: [backlog, done, active]\n        tags: [a, b, bogus]\n    - name: notes\n      match:\n        frontmatter:\n          type: note\n      allowed_values:\n        status: [backlog, done]\n        tags: [a, b]\n";
+
+    fn two_rule_vault() -> (TempDir, Utf8PathBuf, VaultConfig) {
+        let (tmp, root) = synth_vault(
+            Some(TWO_RULE_CFG),
+            &[(
+                "notes/a.md",
+                "---\ntype: note\nstatus: backlog\ntags:\n  - a\n---\n",
+            )],
+        );
+        let config = parse_cfg(TWO_RULE_CFG);
+        (tmp, root, config)
+    }
+
+    fn refusal_for(params: SetParams) -> CodedError {
+        let (_t, root, config) = two_rule_vault();
+        let cache = built(&root);
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Refused);
+        exec.report.error.clone().expect("a refusal is coded")
+    }
+
+    #[test]
+    fn set_field_refuses_a_value_only_the_permissive_rule_allows() {
+        let err = refusal_for(SetParams {
+            target: "notes/a.md".into(),
+            fields: vec!["status=active".into()],
+            ..Default::default()
+        });
+        assert_eq!(err.code, "value-not-allowed");
+        assert!(
+            err.message.contains("(allowed: backlog, done)"),
+            "the refusal names the intersection, not one rule's list: {}",
+            err.message
+        );
+        assert_eq!(
+            err.allowed,
+            Some(vec![
+                serde_json::json!("backlog"),
+                serde_json::json!("done")
+            ]),
+            "the recovery slot carries the same satisfiable set as data"
+        );
+    }
+
+    #[test]
+    fn set_push_refuses_an_element_only_the_permissive_rule_allows() {
+        let err = refusal_for(SetParams {
+            target: "notes/a.md".into(),
+            push: vec!["tags=bogus".into()],
+            ..Default::default()
+        });
+        assert_eq!(err.code, "value-not-allowed");
+        assert!(err.message.contains("(allowed: a, b)"), "{}", err.message);
+        assert_eq!(
+            err.allowed,
+            Some(vec![serde_json::json!("a"), serde_json::json!("b")])
+        );
+    }
+
+    #[test]
+    fn set_field_json_refuses_a_value_only_the_permissive_rule_allows() {
+        let err = refusal_for(SetParams {
+            target: "notes/a.md".into(),
+            field_json: vec!["status=\"active\"".into()],
+            ..Default::default()
+        });
+        assert_eq!(err.code, "value-not-allowed");
+        assert!(
+            err.message.contains("(allowed: backlog, done)"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            err.allowed,
+            Some(vec![
+                serde_json::json!("backlog"),
+                serde_json::json!("done")
+            ])
+        );
+    }
+
+    // Two co-applying rules that share no value: nothing satisfies the schema.
+    // The refusal must still OWN the slot — `Some([])` says "no value passes",
+    // which an absent slot could not distinguish from "this code carries no
+    // allowed-values fact".
+    const DISJOINT_CFG: &str = "validate:\n  rules:\n    - name: global\n      match:\n        path: \"**/*.md\"\n      allowed_values:\n        status: [backlog]\n    - name: notes\n      match:\n        frontmatter:\n          type: note\n      allowed_values:\n        status: [done]\n";
+
+    #[test]
+    fn disjoint_rules_refuse_with_an_owned_but_empty_allowed_slot() {
+        let (_t, root) = synth_vault(
+            Some(DISJOINT_CFG),
+            &[("notes/a.md", "---\ntype: note\nstatus: backlog\n---\n")],
+        );
+        let cache = built(&root);
+        let config = parse_cfg(DISJOINT_CFG);
+        let params = SetParams {
+            target: "notes/a.md".into(),
+            fields: vec!["status=done".into()],
+            ..Default::default()
+        };
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Refused);
+        let err = exec.report.error.as_ref().unwrap();
+        assert_eq!(err.code, "value-not-allowed");
+        assert_eq!(err.allowed, Some(vec![]), "the slot is owned but empty");
+        assert!(err.message.contains("(allowed: <none>)"), "{}", err.message);
+
+        // `new` answers the same way on the same schema.
+        let created = crate::mutate::new::execute(
+            &cache,
+            Some(&config),
+            &norn_wire::NewParams {
+                path: Some("notes/b.md".into()),
+                fields: vec!["type=note".into(), "status=done".into()],
+                ..Default::default()
+            },
+            TODAY,
+            &mut sink(),
+        )
+        .unwrap();
+        assert_eq!(created.report.outcome, MutationOutcome::Refused);
+        let err = created.report.error.as_ref().unwrap();
+        assert_eq!(err.code, "value-not-allowed");
+        assert_eq!(err.allowed, Some(vec![]));
+    }
+
+    #[test]
+    fn new_and_validate_agree_with_set_on_the_same_two_rule_schema() {
+        let (_t, root, config) = two_rule_vault();
+        let mut cache = built(&root);
+
+        // new: the same value `set` refuses is refused at preflight.
+        let new_params = norn_wire::NewParams {
+            path: Some("notes/b.md".into()),
+            fields: vec!["type=note".into(), "status=active".into()],
+            ..Default::default()
+        };
+        let created =
+            crate::mutate::new::execute(&cache, Some(&config), &new_params, TODAY, &mut sink())
+                .unwrap();
+        assert_eq!(created.report.outcome, MutationOutcome::Refused);
+        let err = created.report.error.as_ref().unwrap();
+        assert_eq!(err.code, "value-not-allowed");
+        assert!(
+            err.message.contains("(allowed: backlog, done)"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            err.allowed,
+            Some(vec![
+                serde_json::json!("backlog"),
+                serde_json::json!("done")
+            ]),
+            "`new` carries the same recovery slot as `set`"
+        );
+        assert!(
+            !root.join("notes/b.md").as_std_path().exists(),
+            "a refused create writes nothing"
+        );
+
+        // validate: the same value, already on disk, is a finding — so all three
+        // engines call the document schema-violating.
+        std::fs::write(
+            root.join("notes/c.md").as_std_path(),
+            "---\ntype: note\nstatus: active\ntags:\n  - bogus\n---\n",
+        )
+        .unwrap();
+        cache.full_build(&root).unwrap();
+        let result = crate::read::validate::execute(
+            &cache,
+            Some(&config),
+            &norn_wire::ValidateParams::default(),
+            TODAY,
+        )
+        .unwrap()
+        .unwrap();
+        let disallowed: Vec<_> = result
+            .findings
+            .iter()
+            .filter(|f| f.code == "value-not-allowed" && f.path == "notes/c.md")
+            .collect();
+        assert_eq!(
+            disallowed.len(),
+            2,
+            "status and the tags element each violate the narrower rule: {:?}",
             result.findings
         );
     }

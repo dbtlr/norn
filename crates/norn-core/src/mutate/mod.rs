@@ -9,6 +9,8 @@ pub mod apply;
 // `pub(crate)`, not private: the standards side (validate's check_allowed_values
 // and the config-default lint) shares `coerce::value_in_allowed` — the one
 // allowed-values decision — rather than mirroring its element-wise semantics.
+// Only that shared decision and its rendering helpers are `pub(crate)`; the rest
+// of the module is `pub(super)`, so the mutation-verb seam stays inside `mutate`.
 pub(crate) mod coerce;
 pub mod delete;
 pub mod edit;

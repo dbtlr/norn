@@ -23,23 +23,25 @@ norn validate --rule typed-note --path "notes/**/*.md" --format jsonl
 
 This is the complete, authoritative list of finding codes norn emits (also referenced from [`validate`](commands/validate.md#finding-codes)).
 
+Every finding serializes the same closed set of keys — `path`, `code`, `severity`, `message`, plus `rule`, `field`, `value`, `target`, `candidates`, and `next_actions` when the code populates them (absent keys are omitted, never `null`). "Carries" below names the optional slots each code sets. Nothing else the rule declares is emitted on the finding: the effective `max_length` bound is folded into the message, while the allowed-value set and the `allowed_paths` globs are recovered from the config — or, for a refused write, from the refusal envelope's `allowed` slot (see [errors.md](errors.md#recovery-slots)), which is a different surface from a finding.
+
 | Code | Severity | Source |
 |---|---|---|
-| `read-failed` | error | The document could not be read from disk. Carries `diagnostic`. |
-| `frontmatter-unclosed` | warning | Frontmatter `---` opener has no closing `---`. Carries `diagnostic`. |
-| `frontmatter-parse-failed` | warning | YAML frontmatter could not be parsed. Carries `diagnostic`. |
-| `frontmatter-json-conversion-failed` | warning | Parsed YAML frontmatter could not be converted to JSON. Carries `diagnostic`. |
+| `read-failed` | error | The document could not be read from disk. No optional slots; the read-error detail is not surfaced. |
+| `frontmatter-unclosed` | warning | Frontmatter `---` opener has no closing `---`. No optional slots; the parse detail is not surfaced. |
+| `frontmatter-parse-failed` | warning | YAML frontmatter could not be parsed. No optional slots; the parse detail is not surfaced. |
+| `frontmatter-json-conversion-failed` | warning | Parsed YAML frontmatter could not be converted to JSON. No optional slots; the conversion detail is not surfaced. |
 | `link-target-missing` | warning | Body or frontmatter link target not found in the vault. |
 | `link-anchor-missing` | warning | Link target document exists, but the referenced heading anchor is not found. |
 | `link-block-missing` | warning | Link target document exists, but the referenced block ID is not found. |
 | `link-ambiguous` | warning | Stem lookup matched more than one document. Carries `candidates`. |
 | `frontmatter-required-field-missing` | warning | `required_frontmatter` field is absent or null. Carries `field`, `rule`. |
-| `frontmatter-forbidden-field` | warning | `forbidden_frontmatter` field is present. Carries `field`, `rule`. |
-| `field-type-invalid` | warning | Present field doesn't match declared `field_types` shape. Carries `field`, `expected_type`, `rule`. |
-| `frontmatter-exceeds-max-length` | warning | Present `string`/`list_of_strings` field matches its type's shape but exceeds the effective `max_length` bound. Carries `field`, `max_length`, `actual_length`, `rule`. |
-| `value-not-allowed` | warning | Present scalar field value isn't in `allowed_values`. Carries `field`, `actual_value`, `allowed_values`, `rule`. |
-| `document-misrouted` | warning | Document path matches no `allowed_paths` glob. Carries `allowed_paths`, `rule`. |
-| `frontmatter-reference-type` | warning | A frontmatter wikilink resolves to a document whose `type` is outside the field's `field_references.target_type` set. Carries `field`, `reference`, `target`, `actual_type`, `allowed_types`, `rule`. |
+| `frontmatter-forbidden-field` | warning | `forbidden_frontmatter` field is present. Carries `field`, `value`, `rule`. |
+| `field-type-invalid` | warning | Present field doesn't match declared `field_types` shape. Carries `field`, `value`, `rule`. |
+| `frontmatter-exceeds-max-length` | warning | Present `string`/`list_of_strings` field matches its type's shape but exceeds the effective `max_length` bound. Carries `field`, `rule`; the bound and the actual length ride in the message, and `value` is deliberately NOT emitted — the offending value is the whole over-long content. |
+| `value-not-allowed` | warning | A field value isn't in `allowed_values`. A list-valued field is matched element-wise — one finding per violating element, whose message names the element (`… (element: bogus)`). Carries `field`, `value` (the offending scalar, or the single violating element), `rule`. |
+| `document-misrouted` | warning | Document path matches no `allowed_paths` glob (the path itself is the finding's `path`). Carries `rule`. |
+| `frontmatter-reference-type` | warning | A frontmatter wikilink resolves to a document whose `type` is outside the field's `field_references.target_type` set. Carries `field`, `rule`; the referenced document and its actual type ride in the message (`target` stays a link-finding slot and is not set here). |
 
 For the selector + constraint model that produces these codes, see [rule-shape.md](rule-shape.md).
 
@@ -158,7 +160,7 @@ The supported repair actions are:
 - `rewrite_link` — rewrite a broken wikilink in the source document to a new target. Proposed automatically by the closest-match algorithm for `link-target-missing` findings; preserves display text, anchor, and block-ref suffixes.
 - `create_document` — create a brand-new document with synthesized frontmatter and body. Emitted exclusively by `norn new`; not config-rule-triggerable.
 
-Repair rule `match` supports `code`, `rule`, `field`, and `actual_value`. Matches are exact and type-sensitive. A rule must declare exactly one action (for configurable rules; `rewrite_link` is emitted by the closest-match planner, not from config rules).
+Repair rule `match` supports `code`, `rule`, `field`, and `actual_value` — where `actual_value` is the same offending value the finding surfaces on the wire as `value` (the two names for one fact; the rename is tracked in NRN-441). Matches are exact and type-sensitive. A rule must declare exactly one action (for configurable rules; `rewrite_link` is emitted by the closest-match planner, not from config rules).
 
 > **Note on emitter-only ops:** Two plan op variants are emitter-only — `replace_body` (emitted by `norn set --body-from-stdin`) and `create_document` (emitted by `norn new`). Neither is config-rule-triggerable.
 

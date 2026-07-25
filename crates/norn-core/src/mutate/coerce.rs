@@ -12,7 +12,7 @@ use serde_json::Value;
 /// A schema-coercion refusal for a single `--field` value. `code()` gives the
 /// stable kebab discriminator the wire `CodedError` carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CoerceError {
+pub(super) enum CoerceError {
     InvalidDatetime {
         value: String,
     },
@@ -62,7 +62,7 @@ impl std::fmt::Display for CoerceError {
 }
 
 impl CoerceError {
-    pub fn code(&self) -> &'static str {
+    pub(super) fn code(&self) -> &'static str {
         match self {
             // The date/datetime/wikilink family means "the caller supplied a bad
             // value" (retryable). An unsupported DECLARED type is a schema defect
@@ -78,7 +78,7 @@ impl CoerceError {
 
 /// Split `KEY=VALUE` (or `KEY:VALUE`) at the first separator (ADR 0010). Returns
 /// `None` on a missing separator or an empty key.
-pub fn split_kv(raw: &str) -> Option<(String, String)> {
+pub(super) fn split_kv(raw: &str) -> Option<(String, String)> {
     let (k, v) = crate::grammar::split_field_value(raw)?;
     if k.is_empty() {
         return None;
@@ -88,7 +88,7 @@ pub fn split_kv(raw: &str) -> Option<(String, String)> {
 
 /// Light type inference for schema-silent values: `true`/`false` → bool,
 /// integer-shaped → i64, `null` → Null, else string.
-pub fn infer_scalar(raw: &str) -> Value {
+pub(super) fn infer_scalar(raw: &str) -> Value {
     match raw {
         "true" => Value::Bool(true),
         "false" => Value::Bool(false),
@@ -102,7 +102,7 @@ pub fn infer_scalar(raw: &str) -> Value {
 
 /// The declared schema type for `field` on `doc`, or `None` when no matching
 /// rule declares a type.
-pub fn lookup_field_type(cfg: &VaultConfig, doc: &Document, field: &str) -> Option<String> {
+pub(super) fn lookup_field_type(cfg: &VaultConfig, doc: &Document, field: &str) -> Option<String> {
     for rule in &cfg.validate.rules {
         if !crate::standards::engine::rule_matches(doc, rule) {
             continue;
@@ -117,7 +117,11 @@ pub fn lookup_field_type(cfg: &VaultConfig, doc: &Document, field: &str) -> Opti
 }
 
 /// The effective `max_length` bound for `field`'s declared type on `doc`.
-pub fn lookup_field_max_length(cfg: &VaultConfig, doc: &Document, field: &str) -> Option<u32> {
+pub(super) fn lookup_field_max_length(
+    cfg: &VaultConfig,
+    doc: &Document,
+    field: &str,
+) -> Option<u32> {
     for rule in &cfg.validate.rules {
         if !crate::standards::engine::rule_matches(doc, rule) {
             continue;
@@ -130,7 +134,7 @@ pub fn lookup_field_max_length(cfg: &VaultConfig, doc: &Document, field: &str) -
 }
 
 /// Coerce a raw CLI value into a typed JSON `Value` matching the declared type.
-pub fn coerce_value_for_type(
+pub(super) fn coerce_value_for_type(
     field_type: &str,
     raw: &str,
     max_length: Option<u32>,
@@ -204,7 +208,7 @@ fn wrap_wikilink(raw: &str) -> String {
 }
 
 /// Is `field` declared required-frontmatter by any rule matching `doc`?
-pub fn is_required_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool {
+pub(super) fn is_required_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool {
     cfg.validate
         .rules
         .iter()
@@ -215,7 +219,7 @@ pub fn is_required_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool
 /// Is `field` declared by any rule in `rules` via `field_types` (typed),
 /// `allowed_values`, `required_frontmatter`, `field_references`, or
 /// `forbidden_frontmatter`? The known-field predicate both verbs share.
-pub fn field_known_in_rules<'a>(
+pub(super) fn field_known_in_rules<'a>(
     rules: impl IntoIterator<Item = &'a ValidateRule>,
     field: &str,
 ) -> bool {
@@ -237,7 +241,7 @@ pub fn field_known_in_rules<'a>(
 }
 
 /// Is `field` known to the schema for `doc`?
-pub fn is_known_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool {
+pub(super) fn is_known_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool {
     let matching = cfg
         .validate
         .rules
@@ -246,18 +250,71 @@ pub fn is_known_field(cfg: &VaultConfig, doc: &Document, field: &str) -> bool {
     field_known_in_rules(matching, field)
 }
 
-/// The allowed-value set for `field` from the first matching rule that declares
-/// one.
-pub fn lookup_allowed_values(cfg: &VaultConfig, doc: &Document, field: &str) -> Option<Vec<Value>> {
-    for rule in &cfg.validate.rules {
-        if !crate::standards::engine::rule_matches(doc, rule) {
+/// The allowed-value set `field` must satisfy under `rules` — the INTERSECTION
+/// of every rule that declares one, i.e. the only values that satisfy the
+/// schema. Co-applying rules constrain a field CONJUNCTIVELY: a document must
+/// satisfy all of them, so rule order carries no weight and a permissive rule
+/// never masks a restrictive one. `None` means no rule constrains the field;
+/// `Some([])` means the declaring rules share no value, so nothing satisfies
+/// them.
+///
+/// The one multi-rule resolution `set` and `new` both call, so the two verbs
+/// answer the same way as `validate`, which checks each rule in turn.
+///
+/// Declaration order is preserved and repeats are dropped, so a rule listing a
+/// value twice is rendered and carried once.
+///
+/// Correctness dependency: folding the per-rule checks into a single
+/// intersection is sound and complete because matching over the admitted
+/// domain is an equivalence relation — config accepts only non-null scalars as
+/// `allowed_values` entries (`standards::config`), and
+/// [`crate::standards::predicates::frontmatter_value_matches`] is equality on
+/// same-typed `String` / `Bool` / `Number`, so it is reflexive, symmetric, and
+/// transitive there. Dedupe (`Value::eq`) and matching agree on that same
+/// domain. A future matcher that is asymmetric or non-transitive —
+/// case-insensitive, or coercing across types — breaks the fold, and
+/// enforcement would have to test the value against each rule's own set.
+pub(super) fn allowed_values_in_rules<'a>(
+    rules: impl IntoIterator<Item = &'a ValidateRule>,
+    field: &str,
+) -> Option<Vec<Value>> {
+    let mut resolved: Option<Vec<Value>> = None;
+    for rule in rules {
+        let Some(declared) = rule.allowed_values.get(field) else {
             continue;
-        }
-        if let Some(values) = rule.allowed_values.get(field) {
-            return Some(values.clone());
-        }
+        };
+        resolved = Some(match resolved {
+            None => {
+                let mut seed: Vec<Value> = Vec::with_capacity(declared.len());
+                for value in declared {
+                    if !seed.contains(value) {
+                        seed.push(value.clone());
+                    }
+                }
+                seed
+            }
+            Some(narrowed) => narrowed
+                .into_iter()
+                .filter(|value| matches_one_allowed(value, declared))
+                .collect(),
+        });
     }
-    None
+    resolved
+}
+
+/// The allowed-value set `field` must satisfy on `doc`: [`allowed_values_in_rules`]
+/// over every rule matching the document.
+pub(super) fn lookup_allowed_values(
+    cfg: &VaultConfig,
+    doc: &Document,
+    field: &str,
+) -> Option<Vec<Value>> {
+    let matching = cfg
+        .validate
+        .rules
+        .iter()
+        .filter(|rule| crate::standards::engine::rule_matches(doc, rule));
+    allowed_values_in_rules(matching, field)
 }
 
 /// Does `value` itself match one entry of `allowed`? Non-recursive: a nested
@@ -275,15 +332,20 @@ pub(crate) fn matches_one_allowed(value: &Value, allowed: &[Value]) -> bool {
 /// Does `value` satisfy the `allowed` set? Scalars match one entry; arrays
 /// require every element to match one entry (an element that is itself an
 /// array never matches, since [`matches_one_allowed`] doesn't recurse).
-pub fn value_in_allowed(value: &Value, allowed: &[Value]) -> bool {
+pub(crate) fn value_in_allowed(value: &Value, allowed: &[Value]) -> bool {
     match value {
         Value::Array(items) => items.iter().all(|item| matches_one_allowed(item, allowed)),
         scalar => matches_one_allowed(scalar, allowed),
     }
 }
 
-/// Render an allowed-value set for an error message: `a, b, c`.
-pub fn display_allowed(allowed: &[Value]) -> String {
+/// Render an allowed-value set for an error message: `a, b, c`. An empty set —
+/// co-applying rules that share no value — renders `<none>`, since there is no
+/// value the schema accepts.
+pub(crate) fn display_allowed(allowed: &[Value]) -> String {
+    if allowed.is_empty() {
+        return "<none>".to_string();
+    }
     allowed
         .iter()
         .map(|v| match v {
@@ -297,7 +359,7 @@ pub fn display_allowed(allowed: &[Value]) -> String {
 /// Render a single JSON scalar for a refusal message: a JSON string unwraps to
 /// its bare text (`foo`, not `"foo"`); every other scalar uses JSON's own
 /// display.
-pub fn display_value(value: &Value) -> String {
+pub(crate) fn display_value(value: &Value) -> String {
     value
         .as_str()
         .map(str::to_string)
@@ -306,7 +368,7 @@ pub fn display_value(value: &Value) -> String {
 
 /// The `set`/`new` "value not allowed" refusal prose: one function both verbs
 /// call for the same condition, so the message never drifts between them.
-pub fn value_not_allowed_message(field: &str, value: &str, allowed: &str) -> String {
+pub(super) fn value_not_allowed_message(field: &str, value: &str, allowed: &str) -> String {
     format!(
         "value '{value}' is not allowed for '{field}' (allowed: {allowed}); use --force to override"
     )
@@ -314,7 +376,7 @@ pub fn value_not_allowed_message(field: &str, value: &str, allowed: &str) -> Str
 
 /// The `--force` bypass warning both verbs emit when a schema check is
 /// overridden rather than enforced.
-pub fn force_bypass_warning(field: &str, what: &str) -> MutationWarning {
+pub(super) fn force_bypass_warning(field: &str, what: &str) -> MutationWarning {
     MutationWarning {
         code: "force-bypass".into(),
         field: Some(field.to_string()),
@@ -327,7 +389,7 @@ pub fn force_bypass_warning(field: &str, what: &str) -> MutationWarning {
 /// rule matching sees the INCOMING state (NRN-119). `--field` values overlay as
 /// raw strings (a type-flipped enum discriminator stays a string predicate);
 /// `--remove` / `--push` / `--pop` are NOT overlaid.
-pub fn effective_match_doc(
+pub(super) fn effective_match_doc(
     doc: &Document,
     current_frontmatter: &Value,
     fields: &[String],
@@ -349,4 +411,54 @@ pub fn effective_match_doc(
     let mut d = doc.clone();
     d.frontmatter = Some(Value::Object(fm));
     d
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn rules(yaml: &str) -> Vec<ValidateRule> {
+        crate::standards::parse_config(yaml, camino::Utf8Path::new("c.yaml"))
+            .expect("config parses")
+            .validate
+            .rules
+    }
+
+    const TWO_RULES: &str = "validate:\n  rules:\n    - name: global\n      allowed_values:\n        status: [backlog, done, active]\n    - name: notes\n      allowed_values:\n        status: [backlog, done]\n";
+
+    #[test]
+    fn undeclared_field_resolves_to_no_constraint() {
+        let rules = rules(TWO_RULES);
+        assert_eq!(allowed_values_in_rules(rules.iter(), "priority"), None);
+    }
+
+    #[test]
+    fn co_applying_rules_intersect_regardless_of_order() {
+        let mut rules = rules(TWO_RULES);
+        let expected = Some(vec![json!("backlog"), json!("done")]);
+        assert_eq!(allowed_values_in_rules(rules.iter(), "status"), expected);
+        rules.reverse();
+        assert_eq!(
+            allowed_values_in_rules(rules.iter(), "status"),
+            expected,
+            "the narrower rule constrains the field whichever order it is declared in"
+        );
+    }
+
+    #[test]
+    fn a_repeated_declared_value_resolves_once_in_declaration_order() {
+        let rules = rules("validate:\n  rules:\n    - name: r\n      allowed_values:\n        status: [x, x, y]\n");
+        let resolved = allowed_values_in_rules(rules.iter(), "status").expect("the rule declares");
+        assert_eq!(resolved, vec![json!("x"), json!("y")]);
+        assert_eq!(display_allowed(&resolved), "x, y");
+    }
+
+    #[test]
+    fn disjoint_rules_resolve_to_an_unsatisfiable_empty_set() {
+        let rules = rules("validate:\n  rules:\n    - name: a\n      allowed_values:\n        status: [backlog]\n    - name: b\n      allowed_values:\n        status: [done]\n");
+        let resolved = allowed_values_in_rules(rules.iter(), "status").expect("both rules declare");
+        assert!(resolved.is_empty());
+        assert_eq!(display_allowed(&resolved), "<none>");
+    }
 }

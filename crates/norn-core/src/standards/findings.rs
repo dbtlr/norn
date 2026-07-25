@@ -70,9 +70,15 @@ impl Finding {
 
     /// Project onto the flat wire contract (ADR 0022): plain-string paths, the
     /// closed field set, no internal models. Fields the contract does not name
-    /// (`actual_value`, `expected_type`, `allowed_types`, `issues`, `reason`, …)
-    /// are dropped — their decision value already folded into `message` at
-    /// construction where it mattered.
+    /// (`expected_type`, `allowed_types`, `issues`, `reason`, …) are dropped —
+    /// their decision value already folded into `message` at construction where
+    /// it mattered. `actual_value` crosses as the contract's `value` slot: the
+    /// offending value is the fact that distinguishes one finding from another
+    /// on the same field, so a consumer reads it as data instead of re-reading
+    /// the document. `frontmatter-exceeds-max-length` is the one exception —
+    /// its offending value is the whole over-long content, which would echo
+    /// unbounded bytes into every finding while its message already carries
+    /// both the bound and the actual length.
     pub fn to_wire(&self) -> norn_wire::Finding {
         norn_wire::Finding {
             path: self.path.as_str().to_string(),
@@ -81,6 +87,10 @@ impl Finding {
             message: self.message.clone(),
             rule: self.rule.clone(),
             field: self.field.clone(),
+            value: match self.code.as_str() {
+                "frontmatter-exceeds-max-length" => None,
+                _ => self.actual_value.clone(),
+            },
             target: self.target.clone(),
             candidates: self
                 .candidates
@@ -166,18 +176,39 @@ impl Finding {
         finding
     }
 
+    /// A scalar field whose whole value is outside its `allowed_values` set.
     pub fn frontmatter_disallowed_value(
         path: Utf8PathBuf,
         rule: Option<String>,
         field: String,
         actual_value: Value,
-        _allowed_values: Vec<Value>,
     ) -> Self {
         let message = format!("frontmatter field has a disallowed value: {field}");
         let mut finding = Self::base("value-not-allowed", Severity::Warning, path, message);
         finding.rule = rule;
         finding.field = Some(field);
         finding.actual_value = Some(actual_value);
+        finding
+    }
+
+    /// One ELEMENT of a list-valued field is outside its `allowed_values` set.
+    /// Same code and slots as the scalar form, but the message names the
+    /// offending element: a field with several bad elements yields one finding
+    /// per element, and the element is the only thing that tells them apart.
+    pub fn frontmatter_disallowed_element(
+        path: Utf8PathBuf,
+        rule: Option<String>,
+        field: String,
+        element: Value,
+    ) -> Self {
+        let message = format!(
+            "frontmatter field has a disallowed value: {field} (element: {})",
+            crate::mutate::coerce::display_value(&element)
+        );
+        let mut finding = Self::base("value-not-allowed", Severity::Warning, path, message);
+        finding.rule = rule;
+        finding.field = Some(field);
+        finding.actual_value = Some(element);
         finding
     }
 
@@ -227,6 +258,8 @@ impl Finding {
 
     /// A `string`/`list_of_strings` value matches its declared type's shape but
     /// exceeds the effective `max_length` bound (declared, or the type default).
+    /// The value is retained for repair's compare-and-swap but does not cross to
+    /// the wire (see [`Finding::to_wire`]).
     pub fn frontmatter_exceeds_max_length(
         path: Utf8PathBuf,
         rule: Option<String>,
@@ -388,9 +421,11 @@ mod link_finding_tests {
         let v = serde_json::to_value(&wire).unwrap();
         let obj = v.as_object().unwrap();
         assert!(!obj.contains_key("reason"));
-        assert!(!obj.contains_key("actual_value"));
         assert!(!obj.contains_key("status"));
         assert!(!obj.contains_key("link"));
+        // A link finding faults no frontmatter value, so the `value` slot is
+        // absent rather than null.
+        assert!(!obj.contains_key("value"));
     }
 
     #[test]
@@ -404,8 +439,64 @@ mod link_finding_tests {
         assert_eq!(wire.code, "frontmatter-required-field-missing");
         assert_eq!(wire.rule.as_deref(), Some("typed-note"));
         assert_eq!(wire.field.as_deref(), Some("title"));
-        // actual_value is engine-internal and does not cross to the wire.
+        // A missing-field finding has no offending value to carry.
+        assert!(wire.value.is_none());
         let v = serde_json::to_value(&wire).unwrap();
         assert!(!v.as_object().unwrap().contains_key("actual_value"));
+    }
+
+    #[test]
+    fn an_over_long_value_stays_off_the_wire() {
+        // The engine keeps `actual_value` for repair's compare-and-swap, but the
+        // wire finding would otherwise echo the entire over-long content once
+        // per finding — and its message already carries both lengths.
+        let finding = Finding::frontmatter_exceeds_max_length(
+            "note.md".into(),
+            Some("typed-note".into()),
+            "summary".into(),
+            serde_json::json!("x".repeat(5000)),
+            32,
+            5000,
+        );
+        assert!(finding.actual_value.is_some(), "repair still reads it");
+        let wire = finding.to_wire();
+        assert!(wire.value.is_none());
+        assert!(wire.message.contains("(5000 > 32)"), "{}", wire.message);
+    }
+
+    #[test]
+    fn a_disallowed_element_names_the_element_and_carries_it_as_data() {
+        let scalar = Finding::frontmatter_disallowed_value(
+            "task.md".into(),
+            Some("task-rule".into()),
+            "status".into(),
+            serde_json::json!("someday"),
+        );
+        assert_eq!(
+            scalar.message,
+            "frontmatter field has a disallowed value: status"
+        );
+        assert_eq!(scalar.to_wire().value, Some(serde_json::json!("someday")));
+
+        // Two bad elements of one field produce two DISTINGUISHABLE findings.
+        let messages: Vec<String> = ["bogus", "alsobad"]
+            .iter()
+            .map(|element| {
+                Finding::frontmatter_disallowed_element(
+                    "task.md".into(),
+                    Some("task-rule".into()),
+                    "tags".into(),
+                    serde_json::json!(element),
+                )
+                .message
+            })
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                "frontmatter field has a disallowed value: tags (element: bogus)",
+                "frontmatter field has a disallowed value: tags (element: alsobad)",
+            ]
+        );
     }
 }

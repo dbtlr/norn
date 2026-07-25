@@ -165,22 +165,17 @@ pub fn execute(
             .iter()
             .find(|o| o.status == OpStatus::Failed)
             .and_then(|o| o.error.clone())
-            .map(|e| CodedError {
-                code: e.code,
-                message: e.message,
-                path: e.path,
-            })
-            .unwrap_or_else(|| CodedError {
-                code: "internal-error".into(),
-                message: "apply refused without a coded op error".into(),
-                path: None,
+            .map(|e| CodedError::new(e.code, e.message, e.path))
+            .unwrap_or_else(|| {
+                CodedError::new(
+                    "internal-error",
+                    "apply refused without a coded op error",
+                    None,
+                )
             });
-        return Ok(refused_new(Refusal {
-            code_owned: Some(coded.code.clone()),
-            code: "",
-            message: coded.message.clone(),
-            path: coded.path.clone(),
-        }));
+        return Ok(refused_new(
+            refusal_owned(coded.code, coded.message, coded.path).with_allowed_opt(coded.allowed),
+        ));
     }
 
     let applied = params.confirm;
@@ -736,49 +731,43 @@ fn build_create(
         .cloned()
         .collect();
 
-    // allowed_values enforcement (NRN-430). Every field in the synthesized
-    // frontmatter is a fresh direct write, so a value outside a matching rule's
-    // allowed_values set REFUSES here at forecast/preflight — before any file
-    // lands — with --force the documented bypass. `build_create`'s type coercion
-    // never checked allowed_values (a validate-engine-only rule), so without this
-    // a clean forecast could precede a schema-violating create, defeating
-    // plan-then-apply. The allowed list rides in the refusal message so an agent
-    // can recover without a second query; the code/message converge on `set`'s
-    // `value-not-allowed` family. Every matching rule that declares
-    // allowed_values for the field is checked — not just the first — so two
-    // co-applying rules with different sets both gate the value; a scan
-    // stopping at the first declaring rule would let a value valid under it
-    // but rejected by a second rule pass preflight, surfacing only as the
-    // post-apply warning.
+    // allowed_values enforcement. Every field in the synthesized frontmatter is
+    // a fresh direct write, so a value outside the schema's allowed set REFUSES
+    // here at forecast/preflight — before any file lands — with --force the
+    // documented bypass; without it a clean forecast could precede a
+    // schema-violating create, defeating plan-then-apply. The satisfiable set
+    // rides in the refusal message and in the envelope's `allowed` recovery
+    // slot, so an agent retries from data rather than a second query; the
+    // code/message/slot converge on `set`'s `value-not-allowed` family.
+    // `allowed_values_in_rules` intersects EVERY co-applying rule declaring the
+    // field, so a value permitted by one rule but rejected by another never
+    // reaches the write, and the message names the values that satisfy them all.
     let mut allowed_bypass: Vec<MutationWarning> = Vec::new();
     for (field, value) in &resolved_fm {
-        let mut bypassed = false;
-        for (rule, _) in &matched_rules {
-            let Some(allowed) = rule.allowed_values.get(field) else {
-                continue;
-            };
-            if coerce::value_in_allowed(value, allowed) {
-                continue;
-            }
-            if !params.force {
-                return Err(refusal(
-                    "value-not-allowed",
-                    coerce::value_not_allowed_message(
-                        field,
-                        &coerce::display_value(value),
-                        &coerce::display_allowed(allowed),
-                    ),
-                    Some(doc_path.to_string()),
-                ));
-            }
-            if !bypassed {
-                allowed_bypass.push(coerce::force_bypass_warning(
-                    field,
-                    "allowed-values validation",
-                ));
-                bypassed = true;
-            }
+        let Some(allowed) =
+            coerce::allowed_values_in_rules(matched_rules.iter().map(|(rule, _)| *rule), field)
+        else {
+            continue;
+        };
+        if coerce::value_in_allowed(value, &allowed) {
+            continue;
         }
+        if !params.force {
+            return Err(refusal(
+                "value-not-allowed",
+                coerce::value_not_allowed_message(
+                    field,
+                    &coerce::display_value(value),
+                    &coerce::display_allowed(&allowed),
+                ),
+                Some(doc_path.to_string()),
+            )
+            .with_allowed(allowed));
+        }
+        allowed_bypass.push(coerce::force_bypass_warning(
+            field,
+            "allowed-values validation",
+        ));
     }
 
     let mut created: Vec<FrontmatterCreated> = Vec::new();
@@ -888,12 +877,31 @@ fn parse_now(today: &str) -> anyhow::Result<NaiveDateTime> {
 }
 
 /// A coded pre-write refusal. `code_owned` carries a dynamic code (containment /
-/// coercion families) when the discriminator isn't a `'static` literal.
+/// coercion families) when the discriminator isn't a `'static` literal;
+/// `allowed` is the envelope's recovery slot, set by the families that have one.
 struct Refusal {
     code: &'static str,
     code_owned: Option<String>,
     message: String,
     path: Option<String>,
+    allowed: Option<Vec<Value>>,
+}
+
+impl Refusal {
+    /// Attach the satisfiable value set the refusal envelope carries as its
+    /// `allowed` recovery slot. An empty set still attaches — presence is what
+    /// says the refusal owns the fact.
+    fn with_allowed(mut self, allowed: Vec<Value>) -> Self {
+        self.allowed = Some(allowed);
+        self
+    }
+
+    /// The builder form for a caller already holding the optional fact, mirroring
+    /// [`norn_wire::CodedError::with_allowed_opt`].
+    fn with_allowed_opt(mut self, allowed: Option<Vec<Value>>) -> Self {
+        self.allowed = allowed;
+        self
+    }
 }
 
 fn refusal(code: &'static str, message: impl Into<String>, path: Option<String>) -> Refusal {
@@ -902,6 +910,7 @@ fn refusal(code: &'static str, message: impl Into<String>, path: Option<String>)
         code_owned: None,
         message: message.into(),
         path,
+        allowed: None,
     }
 }
 
@@ -915,6 +924,7 @@ fn refusal_owned(
         code_owned: Some(code.into()),
         message: message.into(),
         path,
+        allowed: None,
     }
 }
 
@@ -933,11 +943,7 @@ fn refused_new(r: Refusal) -> MutationExecution<NewReport> {
             body_bytes: 0,
             warnings: Vec::new(),
             predicted_path: None,
-            error: Some(CodedError {
-                code,
-                message: r.message,
-                path: r.path,
-            }),
+            error: Some(CodedError::new(code, r.message, r.path).with_allowed_opt(r.allowed)),
         },
         touched_paths: Vec::new(),
     }
@@ -1430,11 +1436,13 @@ validate:
         );
         let err = exec.report.error.as_ref().unwrap();
         assert_eq!(err.code, "value-not-allowed");
-        // The refusal names the SECOND (violated) rule's allowed set, not the
-        // first rule's (which `active` does satisfy).
+        // The refusal names the INTERSECTION of the two rules' sets — the only
+        // values that satisfy both — not either rule's list on its own
+        // (`active` satisfies the path rule, `done` the global rule; neither
+        // satisfies both).
         assert!(err.message.contains("active"), "{}", err.message);
         assert!(
-            err.message.contains("backlog") && err.message.contains("done"),
+            err.message.contains("(allowed: backlog)"),
             "{}",
             err.message
         );

@@ -95,6 +95,16 @@ pub struct Finding {
     /// Frontmatter field the finding concerns, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
+    /// The offending frontmatter value, for the codes that carry one
+    /// (`value-not-allowed`, `field-type-invalid`, `frontmatter-forbidden-field`).
+    /// Typed as it appears in the document, so a consumer branches on the value
+    /// rather than re-reading the document. For a list field matched
+    /// element-wise it is the single violating ELEMENT, which is what
+    /// distinguishes one finding from its siblings on the same field.
+    /// `frontmatter-exceeds-max-length` faults a value but does not carry it —
+    /// its message names both the bound and the actual length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
     /// Link target the finding concerns, for link findings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
@@ -120,6 +130,7 @@ mod tests {
             message: "link target not found: Foo".into(),
             rule: None,
             field: None,
+            value: None,
             target: Some("Foo".into()),
             candidates: vec![],
             next_actions: vec![],
@@ -129,6 +140,7 @@ mod tests {
         assert!(obj.contains_key("target"));
         assert!(!obj.contains_key("rule"), "absent rule is omitted");
         assert!(!obj.contains_key("field"), "absent field is omitted");
+        assert!(!obj.contains_key("value"), "absent value is omitted");
         assert!(!obj.contains_key("candidates"), "empty candidates omitted");
         assert!(
             !obj.contains_key("next_actions"),
@@ -174,6 +186,7 @@ mod tests {
             message: "frontmatter field has a disallowed value: status".into(),
             rule: Some("task-status".into()),
             field: Some("status".into()),
+            value: Some(serde_json::json!("someday")),
             target: None,
             candidates: vec![],
             next_actions: vec!["set status to a permitted value".into()],

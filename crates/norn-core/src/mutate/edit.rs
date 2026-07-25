@@ -182,15 +182,13 @@ pub fn execute(
             .iter()
             .find(|o| o.status == OpStatus::Failed)
             .and_then(|o| o.error.clone())
-            .map(|e| CodedError {
-                code: e.code,
-                message: e.message,
-                path: e.path,
-            })
-            .unwrap_or_else(|| CodedError {
-                code: "internal-error".into(),
-                message: "apply refused without a coded op error".into(),
-                path: None,
+            .map(|e| CodedError::new(e.code, e.message, e.path))
+            .unwrap_or_else(|| {
+                CodedError::new(
+                    "internal-error",
+                    "apply refused without a coded op error",
+                    None,
+                )
             });
         return Ok(MutationExecution {
             report: refused_report(target_str, coded),
@@ -251,14 +249,7 @@ fn refused(
     path: Option<String>,
 ) -> MutationExecution<EditReport> {
     MutationExecution {
-        report: refused_report(
-            target.into(),
-            CodedError {
-                code: code.into(),
-                message: message.into(),
-                path,
-            },
-        ),
+        report: refused_report(target.into(), CodedError::new(code, message, path)),
         touched_paths: Vec::new(),
     }
 }

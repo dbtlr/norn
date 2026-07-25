@@ -140,6 +140,7 @@ mod tests {
             message: "m".into(),
             rule: None,
             field: None,
+            value: None,
             target: None,
             candidates: vec![],
             next_actions: vec![],

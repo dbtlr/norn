@@ -143,12 +143,11 @@ pub(crate) fn check_allowed_values(
             Value::Array(items) => {
                 for item in items {
                     if !crate::mutate::coerce::matches_one_allowed(item, allowed_values) {
-                        findings.push(Finding::frontmatter_disallowed_value(
+                        findings.push(Finding::frontmatter_disallowed_element(
                             document.path.clone(),
                             rule.map(str::to_string),
                             field.clone(),
                             item.clone(),
-                            allowed_values.clone(),
                         ));
                     }
                 }
@@ -160,7 +159,6 @@ pub(crate) fn check_allowed_values(
                         rule.map(str::to_string),
                         field.clone(),
                         scalar.clone(),
-                        allowed_values.clone(),
                     ));
                 }
             }
