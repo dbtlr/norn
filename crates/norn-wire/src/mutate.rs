@@ -108,6 +108,14 @@ impl CodedError {
         self.allowed = Some(allowed);
         self
     }
+
+    /// Attach the [`CodedError::allowed`] slot when the refusal owns one; `None`
+    /// leaves the envelope slot-free. The builder form for a caller that already
+    /// holds the optional fact.
+    pub fn with_allowed_opt(mut self, allowed: Option<Vec<Value>>) -> Self {
+        self.allowed = allowed;
+        self
+    }
 }
 
 /// A non-fatal mutation warning carried in the report (unknown field, an

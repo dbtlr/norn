@@ -182,7 +182,6 @@ impl Finding {
         rule: Option<String>,
         field: String,
         actual_value: Value,
-        _allowed_values: Vec<Value>,
     ) -> Self {
         let message = format!("frontmatter field has a disallowed value: {field}");
         let mut finding = Self::base("value-not-allowed", Severity::Warning, path, message);
@@ -472,7 +471,6 @@ mod link_finding_tests {
             Some("task-rule".into()),
             "status".into(),
             serde_json::json!("someday"),
-            vec![serde_json::json!("backlog")],
         );
         assert_eq!(
             scalar.message,

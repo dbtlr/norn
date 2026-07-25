@@ -159,7 +159,6 @@ pub(crate) fn check_allowed_values(
                         rule.map(str::to_string),
                         field.clone(),
                         scalar.clone(),
-                        allowed_values.clone(),
                     ));
                 }
             }

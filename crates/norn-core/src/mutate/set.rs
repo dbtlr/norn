@@ -99,10 +99,8 @@ pub fn execute(
     let synthed = match synth(cfg, &index, &doc, &current_fm, params) {
         Ok(s) => s,
         Err(e) => {
-            let mut error = CodedError::new(e.code(), e.to_string(), Some(target_path.to_string()));
-            if let Some(allowed) = e.allowed() {
-                error = error.with_allowed(allowed);
-            }
+            let error = CodedError::new(e.code(), e.to_string(), Some(target_path.to_string()))
+                .with_allowed_opt(e.allowed());
             return Ok(refused(target_str, error));
         }
     };
@@ -1377,6 +1375,51 @@ mod tests {
                 serde_json::json!("done")
             ])
         );
+    }
+
+    // Two co-applying rules that share no value: nothing satisfies the schema.
+    // The refusal must still OWN the slot — `Some([])` says "no value passes",
+    // which an absent slot could not distinguish from "this code carries no
+    // allowed-values fact".
+    const DISJOINT_CFG: &str = "validate:\n  rules:\n    - name: global\n      match:\n        path: \"**/*.md\"\n      allowed_values:\n        status: [backlog]\n    - name: notes\n      match:\n        frontmatter:\n          type: note\n      allowed_values:\n        status: [done]\n";
+
+    #[test]
+    fn disjoint_rules_refuse_with_an_owned_but_empty_allowed_slot() {
+        let (_t, root) = synth_vault(
+            Some(DISJOINT_CFG),
+            &[("notes/a.md", "---\ntype: note\nstatus: backlog\n---\n")],
+        );
+        let cache = built(&root);
+        let config = parse_cfg(DISJOINT_CFG);
+        let params = SetParams {
+            target: "notes/a.md".into(),
+            fields: vec!["status=done".into()],
+            ..Default::default()
+        };
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Refused);
+        let err = exec.report.error.as_ref().unwrap();
+        assert_eq!(err.code, "value-not-allowed");
+        assert_eq!(err.allowed, Some(vec![]), "the slot is owned but empty");
+        assert!(err.message.contains("(allowed: <none>)"), "{}", err.message);
+
+        // `new` answers the same way on the same schema.
+        let created = crate::mutate::new::execute(
+            &cache,
+            Some(&config),
+            &norn_wire::NewParams {
+                path: Some("notes/b.md".into()),
+                fields: vec!["type=note".into(), "status=done".into()],
+                ..Default::default()
+            },
+            TODAY,
+            &mut sink(),
+        )
+        .unwrap();
+        assert_eq!(created.report.outcome, MutationOutcome::Refused);
+        let err = created.report.error.as_ref().unwrap();
+        assert_eq!(err.code, "value-not-allowed");
+        assert_eq!(err.allowed, Some(vec![]));
     }
 
     #[test]

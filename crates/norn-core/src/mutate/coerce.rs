@@ -265,12 +265,15 @@ pub(super) fn is_known_field(cfg: &VaultConfig, doc: &Document, field: &str) -> 
 /// value twice is rendered and carried once.
 ///
 /// Correctness dependency: folding the per-rule checks into a single
-/// intersection is sound and complete only while
-/// [`crate::standards::predicates::frontmatter_value_matches`] is an
-/// equivalence relation (it is: same-typed scalar equality). A future matcher
-/// that is asymmetric or non-transitive — case-insensitive, or coercing across
-/// types — breaks the fold, and enforcement would have to test the value
-/// against each rule's own set instead.
+/// intersection is sound and complete because matching over the admitted
+/// domain is an equivalence relation — config accepts only non-null scalars as
+/// `allowed_values` entries (`standards::config`), and
+/// [`crate::standards::predicates::frontmatter_value_matches`] is equality on
+/// same-typed `String` / `Bool` / `Number`, so it is reflexive, symmetric, and
+/// transitive there. Dedupe (`Value::eq`) and matching agree on that same
+/// domain. A future matcher that is asymmetric or non-transitive —
+/// case-insensitive, or coercing across types — breaks the fold, and
+/// enforcement would have to test the value against each rule's own set.
 pub(super) fn allowed_values_in_rules<'a>(
     rules: impl IntoIterator<Item = &'a ValidateRule>,
     field: &str,

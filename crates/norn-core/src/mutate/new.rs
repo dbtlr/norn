@@ -173,9 +173,9 @@ pub fn execute(
                     None,
                 )
             });
-        let mut refusal = refusal_owned(coded.code, coded.message, coded.path);
-        refusal.allowed = coded.allowed;
-        return Ok(refused_new(refusal));
+        return Ok(refused_new(
+            refusal_owned(coded.code, coded.message, coded.path).with_allowed_opt(coded.allowed),
+        ));
     }
 
     let applied = params.confirm;
@@ -895,6 +895,13 @@ impl Refusal {
         self.allowed = Some(allowed);
         self
     }
+
+    /// The builder form for a caller already holding the optional fact, mirroring
+    /// [`norn_wire::CodedError::with_allowed_opt`].
+    fn with_allowed_opt(mut self, allowed: Option<Vec<Value>>) -> Self {
+        self.allowed = allowed;
+        self
+    }
 }
 
 fn refusal(code: &'static str, message: impl Into<String>, path: Option<String>) -> Refusal {
@@ -936,10 +943,7 @@ fn refused_new(r: Refusal) -> MutationExecution<NewReport> {
             body_bytes: 0,
             warnings: Vec::new(),
             predicted_path: None,
-            error: Some(CodedError {
-                allowed: r.allowed,
-                ..CodedError::new(code, r.message, r.path)
-            }),
+            error: Some(CodedError::new(code, r.message, r.path).with_allowed_opt(r.allowed)),
         },
         touched_paths: Vec::new(),
     }

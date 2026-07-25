@@ -588,7 +588,9 @@ observed = { "apply-authored-wrong-typed-bool-refusal-zoo" = { stderr = 1 }, "ap
 # two findings on the same field, and the contract names it once for every code
 # instead of per-variant. `frontmatter-exceeds-max-length` is excluded from it
 # (its value is the whole over-long content; its message already carries both
-# lengths). No compatibility shim in
+# lengths). The `path`-first ordering claim is scoped: it holds for the struct and
+# for `--format jsonl`; the `--format json` envelope and the MCP structuredContent
+# re-serialize through a sorted map, so their key order is alphabetical. No compatibility shim in
 # the pre-1.0 break window. Covers the CLI `--format json` and `--format jsonl`
 # single-code shapes and the MCP `vault.validate` structuredContent that follows
 # them. See `crates/norn-wire/src/finding.rs` (the flat `Finding` / `Severity`)
@@ -598,7 +600,7 @@ id = "PD-122"
 surface = "validate --format json / jsonl + vault.validate (per-finding shape)"
 cases = ["validate-code-filter-zoo", "validate-jsonl-code-zoo", "mcp-tools-call-validate-code-zoo"]
 old = "each finding serializes an untagged per-variant body flattened onto `{code, severity, path, message}`: a link finding embeds the whole internal `link` model (raw, kind, spans, source_context, resolved_path, unresolved_reason, status, and `candidates` as path objects); a frontmatter finding emits its variant fields (`rule` even when `null`, `field`, plus `allowed_values` / `actual_value` / `max_length` / `allowed_paths` / … as applicable) — an output shape that is an accident of internal representation"
-new = "each finding serializes the flat closed contract `{ path, code, severity, message, rule?, field?, value?, target?, candidates?, next_actions? }`: `path`-first field order, absent optionals omitted rather than `null`, `candidates` as plain vault-path strings, no internal `link` / diagnostic model and no variant-specific frontmatter fields — the detail that carried fix-vs-skip value folded into `message`, the rest dropped EXCEPT the offending value, retained as the contract's universal optional `value` slot (populated by `value-not-allowed` / `field-type-invalid` / `frontmatter-forbidden-field`, and for an element-wise `value-not-allowed` carrying the single violating element; `frontmatter-exceeds-max-length` is excluded, its message already naming both lengths)"
+new = "each finding serializes the flat closed contract `{ path, code, severity, message, rule?, field?, value?, target?, candidates?, next_actions? }`: `path`-first field order on the struct itself and on `--format jsonl` (the `--format json` envelope and the MCP structuredContent re-serialize through a sorted map, so their keys are alphabetical), absent optionals omitted rather than `null`, `candidates` as plain vault-path strings, no internal `link` / diagnostic model and no variant-specific frontmatter fields — the detail that carried fix-vs-skip value folded into `message`, the rest dropped EXCEPT the offending value, retained as the contract's universal optional `value` slot (populated by `value-not-allowed` / `field-type-invalid` / `frontmatter-forbidden-field`, and for an element-wise `value-not-allowed` carrying the single violating element; `frontmatter-exceeds-max-length` is excluded, its message already naming both lengths)"
 reason = "decided-better"
 decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
 observed = { "validate-code-filter-zoo" = { stdout = 3 }, "validate-jsonl-code-zoo" = { stdout = 1 }, "mcp-tools-call-validate-code-zoo" = { mcp = 1 } }

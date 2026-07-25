@@ -95,12 +95,14 @@ pub struct Finding {
     /// Frontmatter field the finding concerns, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
-    /// The offending frontmatter value, for the codes that fault a value
-    /// (`value-not-allowed`, `field-type-invalid`, `frontmatter-exceeds-max-length`,
-    /// `frontmatter-forbidden-field`). Typed as it appears in the document, so a
-    /// consumer branches on the value rather than re-reading the document. For a
-    /// list field matched element-wise it is the single violating ELEMENT, which
-    /// is what distinguishes one finding from its siblings on the same field.
+    /// The offending frontmatter value, for the codes that carry one
+    /// (`value-not-allowed`, `field-type-invalid`, `frontmatter-forbidden-field`).
+    /// Typed as it appears in the document, so a consumer branches on the value
+    /// rather than re-reading the document. For a list field matched
+    /// element-wise it is the single violating ELEMENT, which is what
+    /// distinguishes one finding from its siblings on the same field.
+    /// `frontmatter-exceeds-max-length` faults a value but does not carry it —
+    /// its message names both the bound and the actual length.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<serde_json::Value>,
     /// Link target the finding concerns, for link findings.
