@@ -86,23 +86,23 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
     // over the canonical root answers "is this root registered?" independent of
     // the addressing, and both inputs are read from it.
     //
-    // Fail-safe on a registry I/O or parse error: `.ok()` alone would collapse
-    // `Err` onto the same `None` as a genuinely unregistered root — silently
-    // dropping durability, and silently falling back to `<root>/.norn/config.yaml`
-    // for a vault whose schema lives elsewhere. Distinguish the two: an `Err`
-    // prints one client-side warning through the closed `warning:` vocabulary
-    // and proceeds with both inputs `None`; the command itself is never blocked
-    // on the registry read.
-    let registered = match registry.reverse_lookup(&resolved.root) {
-        Ok(found) => found,
-        Err(e) => {
-            eprintln!(
-                "warning: vault registry unreadable; this invocation falls back to \
-                 <root>/.norn/config.yaml and keeps no audit trail ({e})"
-            );
-            None
-        }
-    };
+    // A registry I/O or parse error REFUSES (exit 1) rather than degrading to
+    // `None`. Collapsing `Err` onto the same `None` a genuinely unregistered
+    // root produces would silently downgrade a registered vault to defaults:
+    // the schema override goes missing, so a write the vault's real schema
+    // forbids lands at exit 0. That is the shape the whole refuse-everywhere
+    // posture exists to prevent, and it is not a read-only concern either — the
+    // `--vault <name>` and directory-binding vias already fail loud here (their
+    // resolution reads the same registry), so refusing converges all four vias
+    // instead of leaving two of them quietly permissive. An unreadable registry
+    // is a local, operator-fixable condition; consistency beats availability.
+    let registered = registry.reverse_lookup(&resolved.root).map_err(|e| {
+        Diagnostic::new(format!(
+            "vault registry unreadable, so this vault's registered config and audit \
+             trail cannot be resolved: {e}"
+        ))
+        .with_hint("fix or restore the registry file, then rerun")
+    })?;
     let config_override = registered.as_ref().and_then(|vault| vault.config.clone());
     let events_dir = registered.as_ref().and_then(|vault| {
         norn_config::events_dir_for(

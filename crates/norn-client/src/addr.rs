@@ -65,6 +65,12 @@ const NO_CONFIG_IDENTITY: &str = "no-config";
 /// unreadable shapes also stay distinct from each other. The label only has to
 /// differ — if a toolchain renames a kind, the effect is a new socket and one
 /// fresh owner, never a wrong answer.
+///
+/// `ErrorKind::Uncategorized` collapses several distinct errors onto one label,
+/// so two different unreadable causes can share a socket. Benign: the owner
+/// summoned on that socket rejects at warm-up and eager-reaps, so no owner
+/// persists per label to be reused under the wrong cause — the next invocation
+/// summons fresh and re-reads the real error.
 const UNREADABLE_CONFIG_PREFIX: &str = "unreadable-config:";
 
 /// Length of the build-fingerprint segment in the socket name (hex chars).

@@ -408,12 +408,10 @@ fn invalid_config_exits_one_with_the_config_diagnostic() {
     // Isolate the central-config home too, so resolution never reads the dev's.
     let cfg_home = tempfile::tempdir().unwrap();
 
-    let out = norn()
+    let out = norn_summoning(&runtime_dir, cfg_home.path())
         .arg("-C")
         .arg(vault.path())
         .args(["find", "--all"])
-        .env("XDG_RUNTIME_DIR", &runtime_dir)
-        .env("NORN_CONFIG_DIR", cfg_home.path())
         .output()
         .unwrap();
 
@@ -520,12 +518,10 @@ fn unknown_dynamic_field_rejects_with_did_you_mean() {
     let runtime_dir = isolated_runtime_dir("unknown");
     let cfg_home = tempfile::tempdir().unwrap();
 
-    let out = norn()
+    let out = norn_summoning(&runtime_dir, cfg_home.path())
         .arg("-C")
         .arg(&vault)
         .args(["find", "--titel", "foo"])
-        .env("XDG_RUNTIME_DIR", &runtime_dir)
-        .env("NORN_CONFIG_DIR", cfg_home.path())
         .output()
         .unwrap();
 
@@ -563,12 +559,10 @@ fn valid_dynamic_field_with_zero_matches_stays_empty_exit_zero() {
     let runtime_dir = isolated_runtime_dir("zeromatch");
     let cfg_home = tempfile::tempdir().unwrap();
 
-    let out = norn()
+    let out = norn_summoning(&runtime_dir, cfg_home.path())
         .arg("-C")
         .arg(&vault)
         .args(["find", "--status", "backlog", "--format", "paths"])
-        .env("XDG_RUNTIME_DIR", &runtime_dir)
-        .env("NORN_CONFIG_DIR", cfg_home.path())
         .output()
         .unwrap();
 
@@ -1046,5 +1040,183 @@ fn a_registered_override_pointing_at_nothing_is_not_served_as_absent() {
     assert!(
         stderr.contains("norn: failed to read config "),
         "expected the read-failure diagnostic, got: {stderr:?}"
+    );
+}
+
+/// NRN-475: `Path::exists()` answers `false` for ANY stat failure, not just
+/// absence — including `EACCES` on the config's PARENT directory — so the owner
+/// took its run-under-defaults branch for a config it was merely forbidden to
+/// see, and served the vault unvalidated at exit 0. Only `NotFound` means
+/// defaults now; every other stat error is the same hard error the read path
+/// raises.
+///
+/// Repro shape: warm an owner on a config-less vault, then `chmod 000` the
+/// `.norn/` directory around a perfectly readable config file.
+#[cfg(unix)]
+#[test]
+fn a_config_hidden_by_an_unreadable_parent_dir_is_not_served_as_absent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let guard = tempfile::tempdir().unwrap();
+    let vault = guard.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::write(
+        vault.join("a.md"),
+        "---\ntype: note\ntitle: A\nstatus: backlog\n---\nbody\n",
+    )
+    .unwrap();
+
+    let runtime_dir = isolated_runtime_dir("parentdir");
+    let cfg_home = tempfile::tempdir().unwrap();
+
+    // Warm an owner with no config present: served under defaults, exit 0.
+    let warm = norn_summoning(&runtime_dir, cfg_home.path())
+        .arg("-C")
+        .arg(&vault)
+        .args(["count"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        warm.status.code(),
+        Some(0),
+        "warming must succeed; stderr was: {:?}",
+        stderr_of(&warm)
+    );
+
+    // A readable config file inside a directory that denies traversal.
+    let norn_dir = vault.join(".norn");
+    std::fs::create_dir_all(&norn_dir).unwrap();
+    std::fs::write(
+        norn_dir.join("config.yaml"),
+        "validate:\n  rules:\n    - name: notes\n      allowed_values:\n        status:\n          - backlog\n          - done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&norn_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let out = norn_summoning(&runtime_dir, cfg_home.path())
+        .arg("-C")
+        .arg(&vault)
+        .args(["set", "a.md", "--field", "status=bogus", "--yes"])
+        .output()
+        .unwrap();
+
+    // Restore before any assertion so the tempdir always cleans up.
+    std::fs::set_permissions(&norn_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+
+    let stderr = stderr_of(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a config behind an unreadable parent must not be served as absent; stderr was: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("norn: failed to read config "),
+        "expected the read-failure diagnostic, got: {stderr:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(vault.join("a.md")).unwrap(),
+        "---\ntype: note\ntitle: A\nstatus: backlog\n---\nbody\n",
+        "the write must not have landed"
+    );
+}
+
+/// NRN-475: the vault registry supplies the schema override, so a registry the
+/// CLI cannot read must refuse rather than degrade to "unregistered". Degrading
+/// dropped the override and ran the vault under its (absent) default config, so
+/// a write the registered schema forbids landed at exit 0 — but only through
+/// `-C` and `NORN_ROOT`, since `--vault` and the directory binding resolve
+/// THROUGH the registry and were already failing loud. All four vias now refuse
+/// identically.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_registry_refuses_on_every_addressing_via() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let guard = tempfile::tempdir().unwrap();
+    let vault = guard.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    let seeded = "---\ntype: note\ntitle: A\nstatus: backlog\n---\nbody\n";
+    std::fs::write(vault.join("a.md"), seeded).unwrap();
+    // The schema lives outside the vault, reachable only via the registration.
+    let override_config = guard.path().join("schema.yaml");
+    std::fs::write(
+        &override_config,
+        "validate:\n  rules:\n    - name: notes\n      allowed_values:\n        status:\n          - backlog\n          - done\n",
+    )
+    .unwrap();
+
+    let runtime_dir = isolated_runtime_dir("badregistry");
+    let cfg_home = tempfile::tempdir().unwrap();
+
+    let out = norn_summoning(&runtime_dir, cfg_home.path())
+        .args(["vault", "register", "reg"])
+        .arg(&vault)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "register: {:?}",
+        stderr_of(&out)
+    );
+    let out = norn_summoning(&runtime_dir, cfg_home.path())
+        .args(["vault", "set", "reg", "--config"])
+        .arg(&override_config)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "set: {:?}", stderr_of(&out));
+
+    // Make the registry unreadable.
+    let registry_file = cfg_home.path().join("config.toml");
+    std::fs::set_permissions(&registry_file, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let forbidden = ["set", "a.md", "--field", "status=bogus", "--yes"];
+    let mut outcomes: Vec<(&str, Option<i32>, String)> = Vec::new();
+    let mut record = |label: &'static str, cmd: &mut Command| {
+        let out = cmd.output().unwrap();
+        outcomes.push((label, out.status.code(), stderr_of(&out)));
+    };
+    record(
+        "--vault",
+        norn_summoning(&runtime_dir, cfg_home.path())
+            .args(["--vault", "reg"])
+            .args(forbidden),
+    );
+    record(
+        "-C",
+        norn_summoning(&runtime_dir, cfg_home.path())
+            .arg("-C")
+            .arg(&vault)
+            .args(forbidden),
+    );
+    record(
+        "NORN_ROOT",
+        norn_summoning(&runtime_dir, cfg_home.path())
+            .env("NORN_ROOT", &vault)
+            .args(forbidden),
+    );
+    record(
+        "cwd",
+        norn_summoning(&runtime_dir, cfg_home.path())
+            .current_dir(&vault)
+            .args(forbidden),
+    );
+
+    // Restore before asserting so the tempdir always cleans up.
+    std::fs::set_permissions(&registry_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+
+    for (label, code, stderr) in &outcomes {
+        assert_eq!(
+            *code,
+            Some(1),
+            "via {label}: an unreadable registry must refuse, not fall back; stderr was: {stderr:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(vault.join("a.md")).unwrap(),
+        seeded,
+        "no via may have applied the forbidden value"
     );
 }
