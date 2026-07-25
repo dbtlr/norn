@@ -397,6 +397,12 @@ mod tests {
             report.operations[0].error.as_ref().unwrap().code,
             "target-not-found"
         );
+        // The envelope carries the coded error WHOLE — the shared
+        // target-resolution wording rides through untouched, not just its code.
+        assert_eq!(
+            report.operations[0].error.as_ref().unwrap().message,
+            "no document matched path or stem: x"
+        );
     }
 
     #[test]
