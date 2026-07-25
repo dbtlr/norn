@@ -32,17 +32,20 @@ pub(crate) struct RewriteWikilinkOp {
     pub new: String,
 }
 
-/// Typed pre-flight refusal for `rewrite_wikilink` (NRN-229).
+/// Typed pre-flight refusal for `rewrite_wikilink`.
 ///
-/// `Display` preserves the EXACT prose the prior `anyhow!()` call site produced
-/// (identical CLI/stderr output); `.code()` gives an MCP / `--format json`
+/// `Display` is the shared target-resolution wording (`target::
+/// target_not_found_message`), so OLD failing to resolve reads exactly as an
+/// unresolvable target does on `set` / `edit` / `move` / `delete` / `get`.
+/// Nothing wraps this in `.context(...)`, so the sentence reaches stderr
+/// unadorned and the concrete type survives to the top of the `anyhow` chain
+/// for `downcast_ref` to recover in both `ApplyError::from_anyhow` and
+/// `mcp::mutate::refusal_from_error`. `.code()` gives an MCP / `--format json`
 /// consumer a stable, machine-branchable kebab code instead of a laundered
-/// `internal-error`. As long as nothing wraps it with `.context(...)`, the
-/// concrete type survives to the top of the `anyhow` chain for `downcast_ref` to
-/// recover in both `ApplyError::from_anyhow` and `mcp::mutate::refusal_from_error`.
+/// `internal-error`.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RewriteWikilinkError {
-    #[error("rewrite_wikilink: '{0}' does not resolve to any document in the vault (pre-flight refusal)")]
+    #[error("{}", crate::target::target_not_found_message(.0))]
     OldUnresolved(String),
 }
 
@@ -367,18 +370,20 @@ mod tests {
         }
     }
 
-    /// NRN-229: the OLD-unresolvable refusal is a TYPED `RewriteWikilinkError`
-    /// (not a bare `anyhow!`), so it carries `target-not-found` (reused from
-    /// `set`) and its `Display` renders `"rewrite_wikilink: '<target>' does not
-    /// resolve to any document in the vault (pre-flight refusal)"`.
+    /// The OLD-unresolvable refusal is a TYPED `RewriteWikilinkError` (not a
+    /// bare `anyhow!`), so it carries `target-not-found` and its `Display` is
+    /// the one shared target-resolution sentence every other verb refuses with
+    /// — no verb-name prefix, no `(pre-flight refusal)` suffix that the
+    /// report's own `outcome` already states.
     #[test]
     fn rewrite_wikilink_error_code_and_display_are_stable() {
         let err = RewriteWikilinkError::OldUnresolved("no-such".into());
         assert_eq!(err.code(), "target-not-found");
         assert_eq!(
             err.to_string(),
-            "rewrite_wikilink: 'no-such' does not resolve to any document in the vault (pre-flight refusal)"
+            crate::target::target_not_found_message("no-such")
         );
+        assert_eq!(err.to_string(), "no document matched path or stem: no-such");
     }
 
     /// The typed error survives to the top of the `anyhow` chain (nothing wraps

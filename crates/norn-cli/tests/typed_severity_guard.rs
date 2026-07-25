@@ -44,10 +44,19 @@
 //!    for failure messages (`{err:?}`, `{s:?}`, …), so this too only scans each
 //!    file's non-`#[cfg(test)]` body.
 //!
-//!    The scan stops at those subtrees: `norn-core`'s storage, apply, and
-//!    standards layers use `Debug` in `anyhow` context and internal diagnostics
-//!    where it is the right rendering, so a blanket crate-wide scan would
-//!    forbid the legitimate uses along with the message-construction ones.
+//!    **This is a partial net, not a whole-tree one.** Three other trees build
+//!    operator-facing message text and are NOT scanned: `norn-core`'s `edit/`
+//!    (which still carries `Debug` placeholders in op diagnostics),
+//!    `planner/intent/` (the folder-move and wikilink-rewrite pre-flight
+//!    refusals), and `standards/apply.rs` (whose minimal-edit refusal renders a
+//!    scalar style through `Debug`). They stay out because widening the scan
+//!    means first fixing the placeholders inside them — tracked separately —
+//!    and because `norn-core`'s storage and apply layers use `Debug` in
+//!    `anyhow` context and internal diagnostics where it is the right
+//!    rendering, so a blanket crate-wide scan would forbid the legitimate uses
+//!    along with the message-construction ones. Naming the gap here is the
+//!    point: a reader must not read this invariant as covering every message a
+//!    verb can emit.
 //!
 //! It lives in `tests/` (outside every scanned `src/` tree) so its own needle
 //! literals are not scanned by invariant 1, and its `{:?}`/`:?}`-free source is
@@ -79,6 +88,22 @@ fn workspace_root() -> PathBuf {
         .nth(2)
         .expect("workspace root is two levels above the crate manifest dir")
         .to_path_buf()
+}
+
+/// Scan one HARDCODED scope directory, failing loudly if it no longer exists.
+///
+/// `scan_rs` returns silently on an unreadable directory, which is right for
+/// the crate walk (a crate without a `src/` is simply skipped) and wrong for a
+/// scope this file names by path: renaming or moving `src/display/render/` or
+/// `norn-core/src/mutate/` would make the invariant pass vacuously, scanning
+/// nothing. The assertion converts that into a failing test naming the stale
+/// path.
+fn scan_scope<F: FnMut(&Path, &str)>(dir: &Path, visit: &mut F) {
+    assert!(
+        dir.is_dir(),
+        "guard scope {dir:?} no longer exists — update the scan"
+    );
+    scan_rs(dir, visit);
 }
 
 fn scan_rs<F: FnMut(&Path, &str)>(dir: &Path, visit: &mut F) {
@@ -659,7 +684,7 @@ fn no_renderer_or_verb_message_carries_a_debug_placeholder() {
     ];
     let mut hits = Vec::new();
     for dir in &dirs {
-        scan_rs(dir, &mut |path, text| {
+        scan_scope(dir, &mut |path, text| {
             if production_source(path, text).contains(":?}") {
                 hits.push(path.display().to_string());
             }
@@ -695,7 +720,7 @@ fn no_render_or_output_surface_emits_a_raw_stderr_prefix() {
     ];
     let mut hits = Vec::new();
     for dir in &dirs {
-        scan_rs(dir, &mut |path, text| {
+        scan_scope(dir, &mut |path, text| {
             let production = production_source(path, text);
             for body in macro_call_bodies(path, &production) {
                 for needle in RAW_PREFIX_NEEDLES {

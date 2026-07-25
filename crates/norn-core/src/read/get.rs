@@ -195,11 +195,17 @@ fn resolve_target(cache: &Cache, raw: &str) -> Result<Vec<Utf8PathBuf>> {
 
     // 2. Stem fallback — one SELECT, case-insensitive stem match.
     let all = cache.documents_matching(&DocumentQuery::default())?;
-    let stem_matches: Vec<Utf8PathBuf> = all
+    let mut stem_matches: Vec<Utf8PathBuf> = all
         .iter()
         .filter(|d| d.stem.eq_ignore_ascii_case(&normalized))
         .map(|d| d.path.clone())
         .collect();
+    // Lexical path order is the ambiguity contract, matching what the
+    // `GraphIndex` resolver hands the mutating verbs. The SELECT orders by the
+    // stored path in SQLite's byte order, which sorts `a-b/x.md` before
+    // `a/x.md`; sorting here keeps one record order and one candidate list
+    // across every verb.
+    stem_matches.sort();
     Ok(stem_matches)
 }
 
