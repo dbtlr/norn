@@ -1020,9 +1020,12 @@ observed = { "mcp-initialize-tools-list-zoo" = { mcp = 1 } }
 # exactly one entry), so this describes all seven regions it differs in, not
 # just the one that motivated it:
 #
-# 1. the long-about body — `edit`'s multi-paragraph op reference, headings /
-#    safety / exit-code prose — is absent from the rewrite's page, which
-#    prints the short about line and goes straight to USAGE;
+# 1. the description prose is replaced in place (one region): the oracle's
+#    multi-paragraph op reference plus its heading-addressing / safety /
+#    exit-code paragraphs give way to the single paragraph stating the
+#    transactional contract both entry paths share — PD-461's earned-prose
+#    disposition, which keeps prose on `edit` because no sugar flag can state
+#    that contract and the page carries no EXAMPLES section to state it;
 # 2. `--ops-file <PATH>` is gone from OPTIONS: it is declared `hide = true`
 #    on both binaries (a stdin-redirection alias, not part of the documented
 #    surface), but the oracle's help renderer honors `hide()` only for
@@ -1280,10 +1283,15 @@ observed = { "describe-zoo" = { stdout = 1 }, "describe-data-zoo" = { stdout = 1
 #     shared `FilterArgs` struct, and the oracle adopts that struct's internal
 #     doc comment as the verb's description — a reader gets "Kept in `cli.rs` so
 #     the build script can include this file without intra-crate deps" where the
-#     verb's own prose belongs. The rewrite spells every flattened arg group
-#     (`GlobalArgs`, `MutationModeArgs`, `FilterArgs`, `SortPaginateArgs`) with
-#     plain comments, so clap has nothing to adopt at any of those sites — an
-#     explicit `about` on the host shields only `about`, not `long_about`.
+#     verb's own prose belongs. The rewrite spells all five of its flattened arg
+#     groups (`GlobalArgs`, `MutationModeArgs`, `ValidateTriageArgs`,
+#     `FilterArgs`, `SortPaginateArgs`) with plain comments, so clap has nothing
+#     to adopt at any of those sites — an explicit `about` on the host shields
+#     only `about`, and once a doc comment runs past one paragraph clap adopts
+#     the whole comment as the host's `long_about`, which no `about` overrides.
+#     `ValidateTriageArgs` matters as much as the rest: `repair` flattens it and
+#     declares only `about`, so a doc comment there would land as
+#     `repair --help`'s description exactly as `FilterArgs` did on `count`.
 #     Never restored.
 #   - RESTATED BY THE PAGE ITSELF (`set`, `move`, `delete`, `new`,
 #     `cache index`, `completions install`, `rewrite-wikilink`). The oracle
@@ -1295,6 +1303,11 @@ observed = { "describe-zoo" = { stdout = 1 }, "describe-data-zoo" = { stdout = 1
 #     `rewrite-wikilink`'s prose is internal mechanism (a one-op MigrationPlan
 #     through the unified applier) plus those exit codes; its one user-facing
 #     fact — frontmatter wikilink values are rewritten too — is in the summary.
+#     It also states a pre-flight refusal (exit 2) when OLD resolves to no
+#     document, which no rewrite surface carries today; weighed and still
+#     dropped, because a refusal a reader meets only by running the command
+#     announces itself with its own coded error, and pinning it in prose here
+#     would restate one instance of the shared exit-code convention.
 #     `new`'s prose ends on a behavior note that IS still true here (a
 #     post-create validate pass runs against the created document, NRN-390, and
 #     its findings surface as report warnings) — it is dropped because the
@@ -1307,7 +1320,11 @@ observed = { "describe-zoo" = { stdout = 1 }, "describe-data-zoo" = { stdout = 1
 #     exists to point a reader at the sibling verb ("prefer
 #     `norn completions install`"); the two summaries in the `completions`
 #     COMMANDS block — emit a script to stdout vs. install into the shell config
-#     — already route that choice.
+#     — already route that choice. It also says the script is meant to be
+#     sourced or eval'd at shell startup, which no rewrite surface carries;
+#     weighed and still dropped, because it describes what a reader does with
+#     stdout after the command exits rather than how to invoke the command, and
+#     the sibling verb this page routes to does that wiring for them.
 #   - NO LONGER TRUE OF THIS TREE (`serve`, `service`, `cache`, `cache clear`,
 #     `cache prune`). The prose describes one host-wide daemon on a single
 #     well-known socket, and a retained global cache tree swept by a 90-day
@@ -1340,10 +1357,10 @@ observed = { "describe-zoo" = { stdout = 1 }, "describe-data-zoo" = { stdout = 1
 # discovered-inconsistency, matching what `help-count` actually shows.
 [[entry]]
 id = "PD-461"
-surface = "<command> --help (description prose / long_about)"
+surface = "count --help (whole page: description prose / long_about, OUTPUT --format, GLOBAL OPTIONS)"
 cases = ["help-count"]
-old = "`count --help` prints the internal doc comment of the shared `FilterArgs` struct as the verb's description — two paragraphs about `cli.rs`, `build.rs`, intra-crate deps, and where `build_document_query` lives — between the one-line summary and USAGE"
-new = "`count --help` prints the one-line summary and goes straight to USAGE: every flattened arg group carries plain comments clap cannot adopt, so no source-tree text can reach a help page. Description prose is kept only where it decides something the flags, EXAMPLES, and conceptual sections do not — `get`, `validate`, `edit`, and `self-update` — and is dropped on the other 17 paths that carry it on the oracle"
+old = "the page prints the internal doc comment of the shared `FilterArgs` struct as `count`'s description — two paragraphs about `cli.rs`, `build.rs`, intra-crate deps, and where `build_document_query` lives — between the one-line summary and USAGE; `--format` reads 'Output format. Default text (records-block)' over 'Possible values: text, json'; GLOBAL OPTIONS lists `--config <YAML config file>`, truncates `-C/--cwd` at 70 chars, and has no `--vault`"
+new = "the page prints the one-line summary and goes straight to USAGE: all five flattened arg groups (`GlobalArgs`, `MutationModeArgs`, `ValidateTriageArgs`, `FilterArgs`, `SortPaginateArgs`) carry plain comments clap cannot adopt, so no source-tree text can reach a help page, and description prose is kept only where it decides something the flags, EXAMPLES, and conceptual sections do not — `get`, `validate`, `edit`, and `self-update` — dropped on the other 17 paths that carry it on the oracle; `--format` reads 'Output format. Default records (records-block)' over 'Possible values: records, json' (the converged format vocabulary, NRN-416); GLOBAL OPTIONS drops `--config`, shows `-C/--cwd` in full, and adds `--vault NAME` (the PD-102 reshape)"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
-observed = {}
+observed = { "help-count" = { stdout = 4 } }

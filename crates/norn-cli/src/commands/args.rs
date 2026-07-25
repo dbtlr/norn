@@ -11,11 +11,13 @@
 //! a flattened struct's doc comment as the hosting command's `about` /
 //! `long_about`, so a doc comment here becomes description prose on every verb
 //! that flattens the group — `find`, `count`, `describe`, `get`. An explicit
-//! `about = "…"` on the host shields only `about`; a second paragraph still
-//! lands as its `long_about`. Description prose is earned per verb at the
-//! authoring site (`crate::help`), not inherited from a shared arg group, so
-//! the groups give clap nothing to adopt. `GlobalArgs` and `MutationModeArgs`
-//! in `cli.rs` carry the same constraint.
+//! `about = "…"` on the host shields only `about`: once the doc comment runs
+//! past one paragraph, clap adopts the WHOLE comment as the host's
+//! `long_about`, which no `about` overrides. Description prose is earned per
+//! verb at the authoring site (`crate::help`), not inherited from a shared arg
+//! group, so the groups give clap nothing to adopt. The other three flattened
+//! groups — `GlobalArgs`, `MutationModeArgs`, and `ValidateTriageArgs` in
+//! `cli.rs` — carry the same constraint.
 
 use clap::Args;
 use norn_wire::{FilterParams, SortPaginateParams};

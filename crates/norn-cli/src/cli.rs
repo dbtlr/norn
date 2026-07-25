@@ -368,6 +368,14 @@ pub enum DescribeFormat {
     Json,
 }
 
+// The finding-triage filters shared by `validate` and `repair`, which both
+// flatten this group.
+//
+// A plain comment, NOT a doc comment: clap adopts a flattened struct's doc
+// comment as the hosting command's description prose, and `repair` declares
+// only `about`, so a doc comment here would surface as `repair --help`'s
+// description (the same constraint `GlobalArgs`, `MutationModeArgs`, and the
+// read groups in `commands/args.rs` carry).
 #[derive(Debug, Clone, Args)]
 pub struct ValidateTriageArgs {
     #[arg(

@@ -385,10 +385,11 @@ const PROSE_DROPPED: &[&str] = &[
 /// context, or `None` when the page reads as help. Three shapes, none of which
 /// a help reader ever has use for and none of which the renderer emits: a Rust
 /// source-file token (`foo.rs`), rustdoc intra-doc-link syntax (`` [` ``), and
-/// an attribute (`#[`). The rewrite's flattened arg groups (`GlobalArgs`,
-/// `MutationModeArgs`, `FilterArgs`, `SortPaginateArgs`) carry plain comments
-/// precisely so clap cannot adopt one as a hosting command's description, so
-/// nothing of this shape may reach any page.
+/// an attribute (`#[`). All five of the rewrite's flattened arg groups —
+/// `GlobalArgs`, `MutationModeArgs`, `ValidateTriageArgs`, `FilterArgs`, and
+/// `SortPaginateArgs` — carry plain comments precisely so clap cannot adopt one
+/// as a hosting command's description, so nothing of this shape may reach any
+/// page.
 fn source_leak(page: &str) -> Option<String> {
     let bytes = page.as_bytes();
     let context = |at: usize| {
@@ -440,19 +441,21 @@ fn help_walker_description_prose_matches_the_ledgered_disposition() {
     let oracle: PathBuf = common::oracle_path();
     let rewrite: PathBuf = common::rewrite_debug_binary();
     let cwd = common::workspace_root();
+    let scratch = common::scratch_env();
+    let env = &scratch.env;
 
-    let mut paths = enumerate(&rewrite, &cwd);
-    paths.extend(enumerate(&oracle, &cwd));
+    let mut paths = enumerate(&rewrite, &cwd, env);
+    paths.extend(enumerate(&oracle, &cwd, env));
 
     let mut kept_seen: BTreeSet<String> = BTreeSet::new();
     let mut dropped_seen: BTreeSet<String> = BTreeSet::new();
     for path in &paths {
         let name = pretty(path);
         let rewrite_page =
-            String::from_utf8_lossy(&run_help(&rewrite, path, &cwd).stdout).to_string();
+            String::from_utf8_lossy(&run_help(&rewrite, path, &cwd, env).stdout).to_string();
         let rewrite_prose = description_prose(&rewrite_page);
         let oracle_prose = description_prose(&String::from_utf8_lossy(
-            &run_help(&oracle, path, &cwd).stdout,
+            &run_help(&oracle, path, &cwd, env).stdout,
         ));
 
         if let Some(leak) = source_leak(&rewrite_page) {
@@ -500,8 +503,9 @@ fn help_walker_description_prose_matches_the_ledgered_disposition() {
     // The leak the guard above exists to keep out, pinned on the oracle so a
     // rewrite that stopped flattening shared args could not silently retire it.
     for verb in ["count", "describe"] {
-        let page = String::from_utf8_lossy(&run_help(&oracle, &[verb.to_string()], &cwd).stdout)
-            .to_string();
+        let page =
+            String::from_utf8_lossy(&run_help(&oracle, &[verb.to_string()], &cwd, env).stdout)
+                .to_string();
         assert!(
             source_leak(&page).is_some(),
             "expected the oracle `{verb} --help` to print the shared filter struct's source \
