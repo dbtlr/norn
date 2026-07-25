@@ -98,6 +98,12 @@ pub struct DescribeView {
     /// unknown-`--by`-field warning — `report.data.fields` already carries the
     /// normalized, occurrence-filtered set to compare against).
     pub by: Vec<String>,
+    /// `--schema`: expand the structure section from counts to the full declared
+    /// config (every folder, every rule with its defaults, the whole frontmatter
+    /// schema). Applies to both the records and the json rendering.
+    pub schema: bool,
+    /// `--no-pager`: stream `records` straight to stdout even on a TTY.
+    pub no_pager: bool,
     pub format: FormatChoice,
 }
 

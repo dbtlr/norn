@@ -196,6 +196,7 @@ pub fn frozen_known_flags() -> KnownFlags {
         "no-limit",
         "data",
         "stats",
+        "schema",
         "verbose",
         "no-cache-refresh",
         "help",

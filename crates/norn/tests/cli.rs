@@ -1279,3 +1279,115 @@ fn an_unreadable_registry_refuses_on_every_addressing_via() {
         "no via may have applied the forbidden value"
     );
 }
+
+/// NRN-470: `describe --schema --format json` is the surface carrying the whole
+/// declared config, and the default `--format json` is the counts projection of
+/// what bare `describe` prints. Driven end-to-end through a summon against a
+/// vault with a real `.norn/config.yaml`, so the payload split is pinned where
+/// a consumer actually meets it.
+#[cfg(unix)]
+#[test]
+fn describe_schema_json_carries_the_declared_config_and_default_json_counts_it() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // A NON-hidden temp root: the cache scan skips a vault whose path carries a
+    // dot-prefixed component, and `tempdir()`'s default prefix is `.tmp`.
+    let vault = tempfile::Builder::new()
+        .prefix("nrn470-vault")
+        .tempdir()
+        .unwrap();
+    let norn_dir = vault.path().join(".norn");
+    std::fs::create_dir_all(&norn_dir).unwrap();
+    std::fs::write(
+        norn_dir.join("config.yaml"),
+        r#"inbox:
+  path: Inbox
+
+validate:
+  required_frontmatter:
+    - title
+  rules:
+    - name: note-rule
+      match:
+        path: "notes/**/*.md"
+      required_frontmatter:
+        - type
+      frontmatter_defaults:
+        type: note
+    - name: task
+      target: "tasks/{{var.slug}}.md"
+      frontmatter_defaults:
+        type: task
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(vault.path().join("notes")).unwrap();
+    std::fs::write(
+        vault.path().join("notes/a.md"),
+        "---\ntitle: A\ntype: note\n---\nbody\n",
+    )
+    .unwrap();
+
+    // Short, unique runtime dir for the summoned owner's socket (`sun_path`
+    // limit), plus an isolated central-config home.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let runtime_dir = std::path::PathBuf::from(format!("/tmp/nrn470-{}", nanos % 100_000_000));
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+    let cfg_home = tempfile::tempdir().unwrap();
+
+    let describe = |extra: &[&str]| {
+        let mut cmd = norn();
+        cmd.arg("-C").arg(vault.path()).arg("describe");
+        cmd.args(extra);
+        cmd.args(["--format", "json"])
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
+            .env("NORN_CONFIG_DIR", cfg_home.path())
+            .output()
+            .unwrap()
+    };
+
+    let dump = describe(&["--schema"]);
+    let summary = describe(&[]);
+    let _ = std::fs::remove_dir_all(&runtime_dir); // best-effort cleanup
+
+    // `--schema`: the declared config in full.
+    assert_eq!(
+        dump.status.code(),
+        Some(0),
+        "stderr was: {:?}",
+        stderr_of(&dump)
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout_of(&dump)).unwrap();
+    assert_eq!(v["folders"], serde_json::json!(["notes"]));
+    assert_eq!(v["path_rules"][0]["glob"], "notes/**/*.md");
+    assert_eq!(v["path_rules"][0]["name"], "note-rule");
+    assert_eq!(v["path_rules"][0]["frontmatter_defaults"]["type"], "note");
+    assert_eq!(v["creatable_rules"][0]["name"], "task");
+    assert_eq!(v["creatable_rules"][0]["target"], "tasks/{{var.slug}}.md");
+    assert_eq!(
+        v["creatable_rules"][0]["required_vars"],
+        serde_json::json!(["slug"])
+    );
+    assert_eq!(v["inbox"], "Inbox");
+    assert_eq!(
+        v["schema"]["required_frontmatter"],
+        serde_json::json!(["title"])
+    );
+    assert_eq!(v["schema"]["rules"][0]["name"], "note-rule");
+    assert_eq!(v["schema"]["rules"].as_array().unwrap().len(), 2);
+
+    // Bare: the counts projection — four scalar keys, no declared config.
+    assert_eq!(
+        summary.status.code(),
+        Some(0),
+        "stderr was: {:?}",
+        stderr_of(&summary)
+    );
+    assert_eq!(
+        stdout_of(&summary).trim_end(),
+        r#"{"folders":1,"path_rules":1,"creatable_rules":1,"inbox":"Inbox"}"#
+    );
+}

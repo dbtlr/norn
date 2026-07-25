@@ -1,10 +1,17 @@
 //! `vault.describe` — the vault's structure and configured schema.
 //!
-//! The param struct mirrors `norn describe`'s daily surface; the handler routes
-//! to the owner and returns the wire [`DescribeReport`] FLAT as the tool's
-//! `structuredContent` (the read-verb envelope shape — `folders` / `path_rules`
-//! / `schema` at the top level, not wrapped under a `report` key), via the
-//! [`FlatReport`] newtype that satisfies rmcp's `type: object` schema demand.
+//! The param struct carries `norn describe`'s data-mode and filter surface; the
+//! handler routes to the owner and returns the wire [`DescribeReport`] FLAT as
+//! the tool's `structuredContent` (the read-verb envelope shape — `folders` /
+//! `path_rules` / `schema` at the top level, not wrapped under a `report` key),
+//! via the [`FlatReport`] newtype that satisfies rmcp's `type: object` schema
+//! demand.
+//!
+//! The report is ALWAYS the full declared config — every folder, every rule with
+//! its defaults, the whole frontmatter schema. There is no counts-only mode
+//! here: the CLI's counts projection (`norn describe` without `--schema`) is a
+//! display-layer rendering of this same report, not a second owner response
+//! shape. A params-level selector for it is tracked as NRN-492.
 
 use norn_wire::{DescribeParams as WireDescribeParams, DescribeReport, FilterParams};
 use serde::Deserialize;

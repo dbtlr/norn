@@ -1286,11 +1286,12 @@ const READ_CASES: &[Case] = &[
 ];
 
 /// describe ports for real (NRN-347): the structure view (folders + declared
-/// rules + inbox + the full schema under `--format json`) and the contents
-/// summary (`--data`/`--stats`/`--by`). All `ported: true`, must Match the
-/// oracle. The `describe-json-zoo` case pins the schema serialization (the full
-/// validate config) as the end-user contract; any intended change moves through
-/// the divergence ledger.
+/// rules + inbox) and the contents summary (`--data`/`--stats`/`--by`). All
+/// `ported: true`. The `describe-json-zoo` case pins the `--format json`
+/// payload, which now Diverges under PD-470 (the json slot projects the records
+/// counts summary; the full declared config moved behind `describe --schema`).
+/// The records cases Diverge under PD-470b (the counts block prints zero counts
+/// and an absent inbox instead of dropping their lines).
 const DESCRIBE_CASES: &[Case] = &[
     Case {
         id: "describe-zoo",
@@ -1333,9 +1334,9 @@ const DESCRIBE_CASES: &[Case] = &[
         plan: None,
     },
     Case {
-        // The structure view in full, incl. the serialized schema (validate
-        // config) — this case pins the schema shape as the end-user contract;
-        // any intended change moves through the divergence ledger.
+        // The `--format json` payload: the counts-summary projection of the
+        // records block (PD-470), against the whole-config serialization the
+        // pinned comparator emits.
         id: "describe-json-zoo",
         argv: &["describe", "--format", "json"],
         fixture: ZOO_1,

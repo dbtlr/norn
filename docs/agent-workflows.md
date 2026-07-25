@@ -56,7 +56,7 @@ These commands never write to the vault. An agent can run them with confidence:
 
 - `norn find`
 - `norn count`
-- `norn describe` (with or without `--data`/`--stats`/`--by`)
+- `norn describe` (with or without `--schema`/`--data`/`--stats`/`--by`)
 - `norn get`
 - `norn validate` (with or without `--summary`, with or without filters)
 - `norn repair --plan` (produces a `MigrationPlan` artifact; does not modify the vault)
