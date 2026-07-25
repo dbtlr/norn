@@ -299,6 +299,32 @@ pub fn handshake_timeout() -> std::time::Duration {
 #[cfg(unix)]
 const SERVICE_STALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Undocumented env override for the service stall budget, in milliseconds
+/// (NRN-465), mirroring [`HANDSHAKE_TIMEOUT_ENV`] in shape and intent. The 5s
+/// [`SERVICE_STALL_BUDGET`] is tuned so a healthy daemon whose busy writer keeps
+/// advancing its sequence never trips it, but a deterministic integration test
+/// wants a SMALL budget so a staleness-triggered whole-vault reparse would exceed
+/// it on the pre-fix code and pass on the fixed code without a multi-second wait.
+/// Primary purpose is that test; a secondary operator escape hatch (shrink it to
+/// fail over to a direct open sooner, or grow it on a pathologically slow host)
+/// falls out for free. Parsed only when it is a positive integer, else the 5s
+/// default stands.
+#[cfg(unix)]
+const SERVICE_STALL_BUDGET_ENV: &str = "NORN_SERVICE_STALL_BUDGET_MS";
+
+/// The service stall budget, honoring [`SERVICE_STALL_BUDGET_ENV`] when it parses
+/// to a positive integer, otherwise [`SERVICE_STALL_BUDGET`].
+#[cfg(unix)]
+fn service_stall_budget() -> std::time::Duration {
+    match std::env::var(SERVICE_STALL_BUDGET_ENV) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(ms) if ms > 0 => std::time::Duration::from_millis(ms),
+            _ => SERVICE_STALL_BUDGET,
+        },
+        Err(_) => SERVICE_STALL_BUDGET,
+    }
+}
+
 /// Request-socket poll cadence. This is only how often a blocked response read
 /// wakes to consult the scoped control plane; it is not a call timeout.
 #[cfg(unix)]
@@ -1259,7 +1285,7 @@ impl ServiceClient {
             tool,
             arguments,
             on_tool_error,
-            SERVICE_STALL_BUDGET,
+            service_stall_budget(),
             REQUEST_POLL_INTERVAL,
         )
     }
