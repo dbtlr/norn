@@ -174,7 +174,7 @@ old = "the 22-command list ends at `audit` with no registered-vault namespace; G
 new = "a `vault` namespace (register/unregister/list/set) is listed after `audit`, exposing the ADR 0017 registry; GLOBAL OPTIONS drops `--config` and adds `--vault NAME`; the `-C/--cwd` description is shown in FULL (unclamped) in `--help`, only the concise line in `-h` (NRN-335); the `describe` row's one-line summary names the `--schema` surface the config dump moved behind (NRN-470), so that COMMANDS row's text differs too. A FURTHER difference is normalized away rather than gated here: the rewrite always lists a `self-update` COMMANDS row, while the pinned oracle lists it only where it finds the release-installer receipt it was installed with (present beside a `$HOME` install, absent under the harness's cleared environment and absent from the CI musl artifact) — and accepts the command either way. That row's presence tracks the environment and the build rather than either binary, and an extent is a platform-invariant number, so `Normalization::SelfUpdateCommandRow` removes the row from BOTH sides for this case"
 reason = "decided-better"
 decision = "docs/decisions/0017-registered-vaults-summoned-owners.md"
-observed = { "help-bare" = { stdout = 3 } }
+observed = { "help-bare" = { stdout = 4 } }
 
 # The per-command GLOBAL OPTIONS change (NRN-345) on the two ported subcommand
 # help surfaces. Both drop `--config` and gain `--vault NAME`; neither has a
@@ -1234,7 +1234,7 @@ old = "`describe --format json` serializes the whole describe report regardless 
 new = "`describe --format json` is the JSON projection of the records block — `folders` / `path_rules` / `creatable_rules` as integer COUNTS, `inbox` (`null` when unconfigured), and `data` only when a contents-summary was requested (`--data`/`--stats`/`--by`). The full declared config is reachable as `describe --schema`, whose `--format json` emits exactly the payload the oracle's bare `--format json` emitted, and whose records rendering prints the same sections human-legibly"
 reason = "decided-better"
 decision = "docs/decisions/0021-verbs-return-one-layer-renders.md"
-observed = {}
+observed = { "describe-json-zoo" = { stdout = 1 } }
 
 # NRN-470, records side. `describe`'s counts block prints all four lines —
 # folders / path rules / creatable / inbox — whatever their value, where the
@@ -1260,4 +1260,4 @@ old = "a zero count drops its line entirely (the zoo prints `folders`/`path rule
 new = "all four count lines print on every invocation — `folders`, `path rules`, `creatable`, `inbox` — with `0` where the count is zero and `(none)` where no `inbox.path` is configured. The contents-summary block that follows under `--data`/`--stats`/`--by` is unchanged; only the structure block ahead of it gains lines"
 reason = "decided-better"
 decision = "docs/decisions/0021-verbs-return-one-layer-renders.md"
-observed = {}
+observed = { "describe-zoo" = { stdout = 1 }, "describe-data-zoo" = { stdout = 1 }, "describe-stats-zoo" = { stdout = 1 }, "describe-by-clean" = { stdout = 1 }, "describe-data-clean" = { stdout = 1 } }

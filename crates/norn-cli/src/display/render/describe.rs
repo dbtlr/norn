@@ -199,7 +199,11 @@ fn schema_text(report: &DescribeReport) -> String {
 /// default [`ValidateConfig`] for a vault running under no config file, and a
 /// config declaring no `validate` section serializes to the same value, so an
 /// all-empty schema means "nothing declared" and its section is dropped rather
-/// than printed as three empty keys.
+/// than printed as three empty keys. A config that spells out an empty
+/// `validate:` block collapses into that same case, deliberately: it enforces
+/// exactly the rules a config with no `validate` section enforces — none — so
+/// the two are one state to a reader of the records dump. `--format json` still
+/// carries the `schema` key either way.
 fn declared_schema(report: &DescribeReport) -> Option<&Value> {
     let undeclared = serde_json::to_value(ValidateConfig::default()).unwrap_or(Value::Null);
     (!is_empty_value(&report.schema) && report.schema != undeclared).then_some(&report.schema)
@@ -433,45 +437,51 @@ mod tests {
     }
 
     /// The two slots cannot fork: every records count line names a key of the
-    /// json object and carries that key's value.
+    /// json object and carries that key's value. Run over a configured vault
+    /// (inbox set, non-zero rule counts) AND a config-less one (null inbox,
+    /// zero counts), so the `(none)` spelling of a null is covered too. The
+    /// contents-summary is cleared on both: `data` is the one key with no count
+    /// line, and the key-count assertion holds only in its absence.
     #[test]
     fn summary_text_lines_mirror_the_summary_json_object() {
-        let report = schema_sample();
-        let text = summary_text(&report);
-        let json: serde_json::Value = serde_json::from_str(&summary_json(&report)).unwrap();
+        for mut report in [schema_sample(), describe_sample()] {
+            report.data = None;
+            let text = summary_text(&report);
+            let json: serde_json::Value = serde_json::from_str(&summary_json(&report)).unwrap();
 
-        let rendered: Vec<(&str, String)> = text
-            .lines()
-            .take_while(|line| !line.is_empty())
-            .map(|line| {
-                let (label, value) = line.split_at(11);
-                (label.trim_end(), value.trim().to_string())
-            })
-            .collect();
-        assert_eq!(
-            rendered
-                .iter()
-                .map(|(label, _)| *label)
-                .collect::<Vec<&str>>(),
-            vec!["folders", "path rules", "creatable", "inbox"]
-        );
+            let rendered: Vec<(&str, String)> = text
+                .lines()
+                .take_while(|line| !line.is_empty())
+                .map(|line| {
+                    let (label, value) = line.split_at(11);
+                    (label.trim_end(), value.trim().to_string())
+                })
+                .collect();
+            assert_eq!(
+                rendered
+                    .iter()
+                    .map(|(label, _)| *label)
+                    .collect::<Vec<&str>>(),
+                vec!["folders", "path rules", "creatable", "inbox"]
+            );
 
-        // Each records label maps to the json key it projects; `(none)` is the
-        // records spelling of a `null` inbox.
-        let keys = ["folders", "path_rules", "creatable_rules", "inbox"];
-        for ((_, value), key) in rendered.iter().zip(keys) {
-            let expected = match &json[key] {
-                serde_json::Value::Null => NO_INBOX.to_string(),
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            assert_eq!(*value, expected, "records/json fork on `{key}`");
+            // Each records label maps to the json key it projects; `(none)` is
+            // the records spelling of a `null` inbox.
+            let keys = ["folders", "path_rules", "creatable_rules", "inbox"];
+            for ((_, value), key) in rendered.iter().zip(keys) {
+                let expected = match &json[key] {
+                    serde_json::Value::Null => NO_INBOX.to_string(),
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                assert_eq!(*value, expected, "records/json fork on `{key}`");
+            }
+            assert_eq!(
+                json.as_object().unwrap().len(),
+                keys.len(),
+                "a json key with no records line: {json}"
+            );
         }
-        assert_eq!(
-            json.as_object().unwrap().len(),
-            keys.len(),
-            "a json key with no records line: {json}"
-        );
     }
 
     /// The default `--format json` is the projection of the default records
