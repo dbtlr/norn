@@ -97,6 +97,14 @@ pub fn validate_with_compiled(
 /// graph, since a link's resolved/unresolved/ambiguous status depends on every
 /// other document.
 ///
+/// Ordering precondition: `index.documents` is expected sorted by
+/// [`Utf8Path`] order, which is COMPONENT-WISE — `Projects/a.md` sorts before
+/// `Projects.md`, the reverse of their byte order. The graph walk and the apply
+/// overlay both sort under exactly this comparator. An index ordered any other
+/// way still answers correctly, because the lookup falls back to a scan on a
+/// miss; it just pays a linear lookup, which a debug build reports as a failed
+/// assertion rather than letting it pass unnoticed.
+///
 /// A path absent from the index, or one excluded by `validate.ignore`, yields
 /// no findings — the same answer the whole-vault pass gives for it.
 pub fn validate_document_with_compiled(
@@ -105,6 +113,14 @@ pub fn validate_document_with_compiled(
     compiled: &CompiledConfig,
     path: &Utf8Path,
 ) -> Vec<Finding> {
+    // Checked once per call, not per lookup: the precondition belongs to the
+    // entry point, and an O(documents) check inside the lookup would itself
+    // scale with the vault.
+    debug_assert!(
+        index.documents.windows(2).all(|w| w[0].path <= w[1].path),
+        "index documents are expected sorted under path-component order; \
+         another order still answers correctly but costs a linear lookup"
+    );
     let Some(document) = lookup_document(index, path) else {
         return Vec::new();
     };
@@ -229,20 +245,26 @@ fn reference_types_for_targets<'a>(
         .collect()
 }
 
-/// Look one path up in the index. `documents` is sorted by path (the graph
-/// walk, the apply overlay, and the cache load all emit it sorted), so the
-/// lookup binary-searches rather than scanning — a scoped validate must not pay
-/// for the vault's size.
+/// Look one path up in the index. The graph walk and the apply overlay both
+/// sort `documents` under [`Utf8Path`]'s own ordering, so the lookup
+/// binary-searches rather than scanning — a scoped validate must not pay for
+/// the vault's size.
+///
+/// The miss then re-checks with a scan, because that ordering is COMPONENT-WISE
+/// while a byte-ordered sequence of the same paths disagrees with it: `.`
+/// (0x2E) sorts below `/` (0x2F), so bytes put `Projects.md` before
+/// `Projects/a.md` where the comparator puts it after. A search over paths
+/// ordered the other way can miss a document that is present, and a validate
+/// that silently reports nothing for a document it holds is worse than a slow
+/// one. The scan runs only on a miss, so a sorted index — every index this
+/// engine is handed today — pays nothing for it.
 fn lookup_document<'a>(index: &'a GraphIndex, path: &Utf8Path) -> Option<&'a Document> {
-    debug_assert!(
-        index.documents.windows(2).all(|w| w[0].path <= w[1].path),
-        "index documents must be sorted by path for lookup to find them"
-    );
     index
         .documents
         .binary_search_by(|doc| doc.path.as_path().cmp(path))
         .ok()
         .map(|position| &index.documents[position])
+        .or_else(|| index.documents.iter().find(|doc| doc.path == path))
 }
 
 fn document_ignored_compiled(

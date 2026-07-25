@@ -104,9 +104,10 @@ fn line(key: &str, value: &str) -> String {
 
 /// Build a vault whose fixed skeleton carries seeded per-document variation.
 /// The skeleton pins the cross-document shapes an index-wide pass sees — an
-/// ambiguous stem, an ignored reference target, a misrouted document, an
-/// unparseable frontmatter block, a non-portable path segment — while the
-/// seeded slots vary types, values, and link targets across runs.
+/// ambiguous stem, an ignored reference target, a type-less reference target, a
+/// folder-note pair, a misrouted document, an unparseable frontmatter block, a
+/// non-portable path segment — while the seeded slots vary types, values, and
+/// link targets across runs.
 fn generate_vault(root: &Utf8Path, seed: u64) {
     let mut shapes = Shapes::new(seed);
 
@@ -121,6 +122,7 @@ fn generate_vault(root: &Utf8Path, seed: u64) {
             "\"[[ghost]]\"",
             "\"[[dup]]\"",
             "\"[[old]]\"",
+            "\"[[untyped]]\"",
             "",
         ]);
         let body = shapes.pick(&["[[t0]]", "[[ghost]]", "[[dup]]", "plain body"]);
@@ -165,6 +167,20 @@ fn generate_vault(root: &Utf8Path, seed: u64) {
     write(root, "notes/dup.md", "---\ntitle: Dup A\nkind: log\n---\n");
     write(root, "other/dup.md", "---\ntitle: Dup B\n---\n");
 
+    // A validated, resolvable reference target with NO `type` field. Guards the
+    // arm the ignored target does not: a `field_references` lookup that finds
+    // the target present-but-type-less reports `(missing)`, where a lookup that
+    // misses the target entirely (the ignored document below) skips it. Drop
+    // type-less targets from the scoped lookup and only this document's
+    // referrers diverge.
+    write(root, "phases/untyped.md", "---\ntitle: Untyped\n---\n");
+
+    // The folder-note layout: `Projects.md` sorts BEFORE `Projects/a.md` in
+    // byte order and AFTER it under path-component order, so the pair pins the
+    // ordering the index lookup searches under.
+    write(root, "Projects.md", "---\ntitle: Projects\n---\n[[a]]\n");
+    write(root, "Projects/a.md", "---\ntitle: Project A\n---\n");
+
     // Outside the validation contract: never validated itself, and never judged
     // as a reference target.
     write(root, "Archive/old.md", "---\ntype: note\n---\nold\n");
@@ -197,6 +213,7 @@ fn scoped_findings_equal_the_whole_vault_pass_per_document() {
     let (config, compiled) = parse_config_compiled(CONFIG, Utf8Path::new("norn.yaml")).unwrap();
     let mut codes_seen: BTreeSet<String> = BTreeSet::new();
     let mut saw_element_finding = false;
+    let mut saw_type_less_reference = false;
     let mut saw_clean_document = false;
 
     for seed in 0..12u64 {
@@ -209,6 +226,20 @@ fn scoped_findings_equal_the_whole_vault_pass_per_document() {
         for finding in &full {
             codes_seen.insert(finding.code.clone());
             saw_element_finding |= finding.message.contains("(element:");
+            saw_type_less_reference |= finding.message.contains("(type: (missing))");
+        }
+
+        // The folder-note layout reached the index, so the equality loop below
+        // really does search a pair whose byte order and path-component order
+        // disagree.
+        for expected_path in ["Projects.md", "Projects/a.md"] {
+            assert!(
+                index
+                    .documents
+                    .iter()
+                    .any(|doc| doc.path.as_str() == expected_path),
+                "seed {seed}: the corpus must carry {expected_path}"
+            );
         }
 
         for document in &index.documents {
@@ -231,7 +262,11 @@ fn scoped_findings_equal_the_whole_vault_pass_per_document() {
                 "seed {seed}: scoped findings diverge for {}",
                 document.path
             );
-            saw_clean_document |= expected.is_empty();
+            // An ignored document is clean for free — it is never validated at
+            // all — so only a document inside the validation contract counts
+            // as evidence that a clean document round-trips.
+            let ignored = document.path.as_str().starts_with("Archive/");
+            saw_clean_document |= expected.is_empty() && !ignored;
         }
 
         // A path the index does not carry is not a document, so it has no
@@ -279,7 +314,12 @@ fn scoped_findings_equal_the_whole_vault_pass_per_document() {
         "the generated corpus never produced an element-wise allowed-values finding"
     );
     assert!(
+        saw_type_less_reference,
+        "the generated corpus never referenced a validated, type-less target — the arm that \
+         separates a present-but-type-less lookup from a missing one is unguarded"
+    );
+    assert!(
         saw_clean_document,
-        "the generated corpus never produced a finding-free document"
+        "the generated corpus never produced a finding-free, validated document"
     );
 }

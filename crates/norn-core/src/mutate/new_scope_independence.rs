@@ -57,8 +57,13 @@ fn measure_single_create(expansion_docs: usize) -> (usize, usize, u128) {
     let mut cache = Cache::open(&root).unwrap();
     cache.full_build(&root).unwrap();
 
+    // The probe lands where the fixture's rules bite (a `notes/**` rule forbids
+    // `legacy`, and the `type: note` rule matches every path), so the measured
+    // scope contains real rule evaluation rather than a document no rule selects.
     let params = norn_wire::NewParams {
-        path: Some("guard-probe.md".into()),
+        path: Some("notes/guard-probe.md".into()),
+        fields: vec!["type=note".into(), "legacy=true".into()],
+        parents: true,
         confirm: true,
         ..Default::default()
     };
@@ -85,8 +90,20 @@ fn measure_single_create(expansion_docs: usize) -> (usize, usize, u128) {
         execution.report
     );
     assert!(
-        root.join("guard-probe.md").as_std_path().exists(),
+        root.join("notes/guard-probe.md").as_std_path().exists(),
         "the guard's create must write the document"
+    );
+    // A rule-scoped finding for the created path proves the counted evaluation
+    // did rule work: without it, `evaluated == 1` could hold over a document no
+    // rule selects, and the guard would certify a scope that measures nothing.
+    assert!(
+        execution
+            .report
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "frontmatter-forbidden-field"),
+        "the post-create pass must report the created document's rule violation: {:?}",
+        execution.report.warnings
     );
 
     (evaluated, total_docs, elapsed)
