@@ -382,7 +382,7 @@ mod tests {
     fn refused_builds_a_coded_refusal_report() {
         let env = ApplyError {
             code: "target-not-found".into(),
-            message: "doc not found".into(),
+            message: "no document matched path or stem: x".into(),
             path: None,
         };
         let report = ApplyReport::refused("/v".into(), false, "delete_document", env);

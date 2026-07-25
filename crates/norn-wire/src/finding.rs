@@ -162,16 +162,19 @@ mod tests {
 
     #[test]
     fn note_carries_typed_severity_and_kebab_serialization() {
-        let warn = Note::warning("target-ambiguous", "'x' resolved to 2 docs");
+        let warn = Note::warning(
+            "target-ambiguous",
+            "ambiguous document stem: x; candidates: a/x.md, b/x.md",
+        );
         assert!(!warn.is_error());
-        let err = Note::error("target-not-found", "'x' did not resolve to any doc");
+        let err = Note::error("target-not-found", "no document matched path or stem: x");
         assert!(err.is_error());
         let v = serde_json::to_value(&err).unwrap();
         assert_eq!(v["severity"], serde_json::json!("error"));
         assert_eq!(v["code"], serde_json::json!("target-not-found"));
         assert_eq!(
             v["message"],
-            serde_json::json!("'x' did not resolve to any doc")
+            serde_json::json!("no document matched path or stem: x")
         );
         let back: Note = serde_json::from_value(v).unwrap();
         assert_eq!(back, err);

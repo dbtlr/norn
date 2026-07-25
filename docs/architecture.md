@@ -15,7 +15,7 @@ Read it before adding a surface, a crate edge, or a mutation path. The point is 
 
 ## 2. Typed facts cross boundaries; prose is rendering
 
-**A boundary carries facts — severity and code enums — never a rendered sentence.** Each client surface (CLI, MCP) composes its own message fidelity from the same typed facts, so two surfaces need agree only on meaning, never on wording. No outcome bit may be derived from message text: the code decides the outcome, the text only explains it. The stderr prefix vocabulary is a closed set defined once in the display layer, and `format!("{:?}")` never appears in display code (ADR [0020](./decisions/0020-posix-by-default.md), [0021](./decisions/0021-verbs-return-one-layer-renders.md)).
+**A boundary carries facts — severity and code enums — never a rendered sentence.** Each client surface (CLI, MCP) composes its own message fidelity from the same typed facts, so two surfaces need agree only on meaning, never on wording. No outcome bit may be derived from message text: the code decides the outcome, the text only explains it. The stderr prefix vocabulary is a closed set defined once in the display layer, and `format!("{:?}")` never appears in display code nor in a verb's message construction — a candidate path list reaches a reader as a joined list, never as a `Debug`-rendered vector (ADR [0020](./decisions/0020-posix-by-default.md), [0021](./decisions/0021-verbs-return-one-layer-renders.md)).
 
 ## 3. One user-facing vocabulary per cross-verb concept
 

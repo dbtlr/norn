@@ -63,17 +63,21 @@ pub fn execute(
 
     for raw in &params.targets {
         let resolved = resolve_target(cache, raw)?;
+        // The two resolution-failure messages come from the shared resolver
+        // wording, so a `get` miss reads exactly as a `set` or `delete` miss
+        // does and an ambiguous stem names its colliding paths rather than
+        // just counting them.
         if resolved.is_empty() {
             notes.push(Note::error(
                 "target-not-found",
-                format!("'{raw}' did not resolve to any doc"),
+                crate::target::target_not_found_message(raw),
             ));
             continue;
         }
         if resolved.len() > 1 {
             notes.push(Note::warning(
                 "target-ambiguous",
-                format!("'{raw}' resolved to {} docs", resolved.len()),
+                crate::target::target_ambiguous_message(raw, &resolved),
             ));
         }
         for path in &resolved {

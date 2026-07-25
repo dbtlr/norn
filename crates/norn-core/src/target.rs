@@ -5,9 +5,14 @@
 //! collects the links across the index that resolve to a given path. The
 //! mutation appliers and `delete` use these to find what points at a document
 //! before they move or remove it.
+//!
+//! This module also owns the WORDING of a failed resolution, not just its
+//! codes: [`TargetResolution::or_refuse`] and the two message builders are the
+//! single source for every "no document matched" / "ambiguous document stem"
+//! string in the tree, so no verb spells its own.
 
 use crate::domain::{GraphIndex, Link};
-use anyhow::{bail, Result};
+use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf;
 
 pub fn backlinks<'a>(index: &'a GraphIndex, target_path: &Utf8PathBuf) -> Vec<&'a Link> {
@@ -30,32 +35,99 @@ pub enum TargetResolution {
     Ambiguous(Vec<Utf8PathBuf>),
 }
 
-/// The two refusal families a failed [`TargetResolution`] produces. Every
-/// mutating verb (`set`, `edit`, `delete`, `move`) hits one of exactly these
-/// two arms when its target/source fails to resolve, each with its own stable
-/// `code`.
-pub enum TargetRefusalFamily {
-    NotFound,
-    Ambiguous,
-}
-
-impl TargetRefusalFamily {
-    pub fn code(&self) -> &'static str {
+impl TargetResolution {
+    /// Collapse to the resolved path or the refusal the failure reports as —
+    /// the shape every mutating verb wants, since both failure arms refuse the
+    /// same way and only the slot's codes and prefix distinguish them.
+    pub fn or_refuse(self, slot: TargetSlot, target: &str) -> Result<Utf8PathBuf, TargetRefusal> {
         match self {
-            Self::NotFound => "target-not-found",
-            Self::Ambiguous => "target-ambiguous",
+            Self::Resolved(path) => Ok(path),
+            Self::NotFound => Err(TargetRefusal {
+                code: slot.not_found_code(),
+                message: format!("{}{}", slot.prefix(), target_not_found_message(target)),
+            }),
+            Self::Ambiguous(candidates) => Err(TargetRefusal {
+                code: slot.ambiguous_code(),
+                message: format!(
+                    "{}{}",
+                    slot.prefix(),
+                    target_ambiguous_message(target, &candidates)
+                ),
+            }),
         }
     }
 }
 
-/// Build the `(code, message)` pair for a target-resolution refusal — the one
-/// constructor every mutating verb's resolve-failure branch calls, keyed on
-/// which refusal family fired. The `code` is centralized here, declared once
-/// instead of re-typed at each call site; `message` is verb-supplied — each
-/// caller passes its own wording for what didn't resolve, and this
-/// constructor threads it through verbatim.
-pub fn target_refusal(family: TargetRefusalFamily, message: String) -> (&'static str, String) {
-    (family.code(), message)
+/// Which addressable input a target refusal is about. A verb with a single
+/// document argument (`set`, `edit`, `move`'s source, `delete`'s target) uses
+/// [`TargetSlot::Target`]; `delete --rewrite-to` resolves a SECOND document, so
+/// it carries its own codes and names the flag ahead of the shared prose,
+/// telling a reader which of the two inputs failed.
+#[derive(Clone, Copy)]
+pub enum TargetSlot {
+    Target,
+    RewriteTo,
+}
+
+impl TargetSlot {
+    fn not_found_code(self) -> &'static str {
+        match self {
+            Self::Target => "target-not-found",
+            Self::RewriteTo => "rewrite-to-not-found",
+        }
+    }
+
+    fn ambiguous_code(self) -> &'static str {
+        match self {
+            Self::Target => "target-ambiguous",
+            Self::RewriteTo => "rewrite-to-ambiguous",
+        }
+    }
+
+    /// What the slot prints ahead of the shared prose. The primary target adds
+    /// nothing — it is what a verb is about — so only the redirect slot is
+    /// qualified.
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Target => "",
+            Self::RewriteTo => "--rewrite-to: ",
+        }
+    }
+}
+
+/// A failed target resolution ready for the wire: the stable kebab `code` and
+/// the operator-facing `message`. Every verb refuses with a pair built here, so
+/// a miss reads the same on `set` as on `delete` and one ambiguous stem renders
+/// its candidates identically everywhere.
+pub struct TargetRefusal {
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// The one not-found message: a target that matched nothing, naming the ladder
+/// it was tried against (an exact path, then a case-insensitive stem — nothing
+/// else resolves).
+pub fn target_not_found_message(target: &str) -> String {
+    format!("no document matched path or stem: {target}")
+}
+
+/// The one ambiguous message: the colliding paths as a readable comma-joined
+/// list in resolver (lexical) order, never a `Debug` rendering of the vector.
+pub fn target_ambiguous_message(target: &str, candidates: &[Utf8PathBuf]) -> String {
+    format!(
+        "ambiguous document stem: {target}; candidates: {}",
+        join_candidates(candidates)
+    )
+}
+
+/// Render candidate paths as the single list form every candidate-bearing
+/// message uses.
+pub fn join_candidates(candidates: &[Utf8PathBuf]) -> String {
+    candidates
+        .iter()
+        .map(|path| path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Resolve a target (exact path first, then a case-insensitive stem match) to a
@@ -88,19 +160,13 @@ pub fn resolve_target(index: &GraphIndex, target: &str) -> TargetResolution {
     }
 }
 
+/// The `anyhow`-shaped wrapper the read verbs use to resolve a `--links-to`
+/// operand. It carries the same prose as a mutating verb's refusal — one
+/// resolution failure has one wording, whatever consumed the target.
 pub fn resolve_target_path(index: &GraphIndex, target: &str) -> Result<Utf8PathBuf> {
-    match resolve_target(index, target) {
-        TargetResolution::Resolved(path) => Ok(path),
-        TargetResolution::NotFound => bail!("no document matched path or stem: {target}"),
-        TargetResolution::Ambiguous(candidates) => bail!(
-            "ambiguous document stem: {target}; candidates: {}",
-            candidates
-                .iter()
-                .map(|path| path.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
+    resolve_target(index, target)
+        .or_refuse(TargetSlot::Target, target)
+        .map_err(|refusal| anyhow!(refusal.message))
 }
 
 #[cfg(test)]
@@ -210,6 +276,64 @@ mod tests {
             msg.contains("notes/a.md") && msg.contains("tasks/a.md"),
             "{msg}"
         );
+    }
+
+    /// The target slot picks the codes and the qualifier; the prose after it is
+    /// the same string on both slots, which is the whole point of routing every
+    /// verb through one constructor.
+    #[test]
+    fn or_refuse_gives_one_wording_per_family_and_slot_specific_codes() {
+        let idx = index(vec![doc("notes/a.md", "a"), doc("tasks/a.md", "a")]);
+
+        let miss = resolve_target(&idx, "missing")
+            .or_refuse(TargetSlot::Target, "missing")
+            .unwrap_err();
+        assert_eq!(miss.code, "target-not-found");
+        assert_eq!(miss.message, "no document matched path or stem: missing");
+
+        let miss_redirect = resolve_target(&idx, "missing")
+            .or_refuse(TargetSlot::RewriteTo, "missing")
+            .unwrap_err();
+        assert_eq!(miss_redirect.code, "rewrite-to-not-found");
+        assert_eq!(
+            miss_redirect.message,
+            "--rewrite-to: no document matched path or stem: missing"
+        );
+
+        let ambiguous = resolve_target(&idx, "a")
+            .or_refuse(TargetSlot::Target, "a")
+            .unwrap_err();
+        assert_eq!(ambiguous.code, "target-ambiguous");
+        assert_eq!(
+            ambiguous.message,
+            "ambiguous document stem: a; candidates: notes/a.md, tasks/a.md"
+        );
+
+        let ambiguous_redirect = resolve_target(&idx, "a")
+            .or_refuse(TargetSlot::RewriteTo, "a")
+            .unwrap_err();
+        assert_eq!(ambiguous_redirect.code, "rewrite-to-ambiguous");
+        assert_eq!(
+            ambiguous_redirect.message,
+            "--rewrite-to: ambiguous document stem: a; candidates: notes/a.md, tasks/a.md"
+        );
+    }
+
+    /// Candidates render as a readable joined list — never the `Debug` form of
+    /// the vector, which leaks Rust quoting and brackets into operator prose.
+    #[test]
+    fn candidates_render_joined_not_debug() {
+        let candidates = vec![
+            Utf8PathBuf::from("archive2/duplicate.md"),
+            Utf8PathBuf::from("notes/duplicate.md"),
+        ];
+        assert_eq!(
+            join_candidates(&candidates),
+            "archive2/duplicate.md, notes/duplicate.md"
+        );
+        let message = target_ambiguous_message("duplicate", &candidates);
+        assert!(!message.contains('['), "{message}");
+        assert!(!message.contains('"'), "{message}");
     }
 
     #[test]

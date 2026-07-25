@@ -326,14 +326,17 @@ mod tests {
             records: vec![],
             notes: vec![Note::error(
                 "target-not-found",
-                "'x' did not resolve to any doc",
+                "no document matched path or stem: x",
             )],
             markdown_content: None,
         };
         assert!(has_error(&report));
         let ok = GetReport {
             records: vec![],
-            notes: vec![Note::warning("target-ambiguous", "'x' resolved to 2 docs")],
+            notes: vec![Note::warning(
+                "target-ambiguous",
+                "ambiguous document stem: x; candidates: a/x.md, b/x.md",
+            )],
             markdown_content: None,
         };
         assert!(!has_error(&ok));

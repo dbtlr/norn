@@ -33,22 +33,21 @@
 //!    `#[serde(rename_all = "kebab-case")]` name via `display::serde_label`, not
 //!    `Debug` — neither the positional `format!("{:?}", value)` nor its
 //!    inline-capture sibling `format!("{value:?}")` (both derive the variant
-//!    identifier and only accidentally lowercase). So no PRODUCTION line
-//!    under `src/display/render/` may carry a `:?}` in either form. Test
-//!    assertions legitimately print `Debug` for failure messages (`{err:?}`,
-//!    `{s:?}`, …), so this too only scans each file's non-`#[cfg(test)]`
-//!    body.
+//!    identifier and only accidentally lowercase). The same shape reaches a
+//!    reader from the other direction too — a `norn-core` verb building a
+//!    report message by `Debug`-formatting a value or a path list — and both
+//!    land as operator-facing text, so the scan covers the CLI's renderers
+//!    (`src/display/render/`) AND the two `norn-core` subtrees that construct
+//!    verb messages (`mutate/`, `read/`). No PRODUCTION line in any of the
+//!    three may carry a `:?}` in either form; a candidate list renders through
+//!    `target::join_candidates`. Test assertions legitimately print `Debug`
+//!    for failure messages (`{err:?}`, `{s:?}`, …), so this too only scans each
+//!    file's non-`#[cfg(test)]` body.
 //!
-//!    **Scope decision (NRN-448):** this scans `src/display/render/` only,
-//!    matching the boundary `docs/architecture.md` invariant 2 states
-//!    (`format!("{:?}")` never appears in DISPLAY code). The same `{:?}`
-//!    shape also appears outside display code: `norn-core`'s
-//!    `mutate/delete.rs` and `mutate/move_doc.rs` build an ambiguous-target
-//!    refusal message by `Debug`-formatting the candidate path list
-//!    (`{candidates:?}`). That is a `norn-core` message-construction site,
-//!    not a renderer, so it sits outside this guard's scope; wording it to
-//!    match `mutate/edit.rs` and `mutate/set.rs`'s comma-joined candidate
-//!    list is a separate task, not this invariant's job.
+//!    The scan stops at those subtrees: `norn-core`'s storage, apply, and
+//!    standards layers use `Debug` in `anyhow` context and internal diagnostics
+//!    where it is the right rendering, so a blanket crate-wide scan would
+//!    forbid the legitimate uses along with the message-construction ones.
 //!
 //! It lives in `tests/` (outside every scanned `src/` tree) so its own needle
 //! literals are not scanned by invariant 1, and its `{:?}`/`:?}`-free source is
@@ -652,20 +651,33 @@ fn no_surface_sniffs_severity_from_message_text() {
 }
 
 #[test]
-fn renderers_label_enums_via_serde_name_not_debug() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/display/render");
+fn no_renderer_or_verb_message_carries_a_debug_placeholder() {
+    let dirs = [
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/display/render"),
+        norn_core_src().join("mutate"),
+        norn_core_src().join("read"),
+    ];
     let mut hits = Vec::new();
-    scan_rs(&dir, &mut |path, text| {
-        if production_source(path, text).contains(":?}") {
-            hits.push(path.display().to_string());
-        }
-    });
+    for dir in &dirs {
+        scan_rs(dir, &mut |path, text| {
+            if production_source(path, text).contains(":?}") {
+                hits.push(path.display().to_string());
+            }
+        });
+    }
     assert!(
         hits.is_empty(),
-        "a renderer must label enum values via display::serde_label (the serde \
-         kebab name), never a `Debug` placeholder — positional `{{:?}}` or \
-         inline-capture `{{ident:?}}` (NRN-407):\n{hits:#?}"
+        "a renderer or verb must label values via display::serde_label (the \
+         serde kebab name) and render lists through a shared joiner, never a \
+         `Debug` placeholder — positional `{{:?}}` or inline-capture \
+         `{{ident:?}}` (NRN-407):\n{hits:#?}"
     );
+}
+
+/// `norn-core`'s source root, reached from this crate's manifest dir. The
+/// message-construction half of invariant 3 scans two of its subtrees.
+fn norn_core_src() -> PathBuf {
+    workspace_root().join("crates/norn-core/src")
 }
 
 #[test]

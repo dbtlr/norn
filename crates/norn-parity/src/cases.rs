@@ -1056,9 +1056,10 @@ const READ_CASES: &[Case] = &[
     Case {
         // Ambiguous stem: one record per candidate + an ambiguity annotation on
         // stderr, exit 0. `duplicate` resolves to archive2/duplicate.md and
-        // notes/duplicate.md. The oracle emits `note:`; the rewrite carries the
-        // ambiguity as a `warning`-severity note and renders `warning:` — the
-        // closed prefix set (PD-131).
+        // notes/duplicate.md. The oracle emits `note:` and only counts the
+        // matches; the rewrite carries the ambiguity as a `warning`-severity
+        // note (the closed prefix set) whose text is the shared resolver
+        // wording naming both candidate paths (PD-131).
         id: "read-get-ambiguous-json-zoo",
         argv: &["get", "duplicate", "--format", "json"],
         fixture: ZOO_1,
@@ -1074,6 +1075,8 @@ const READ_CASES: &[Case] = &[
     Case {
         // Not-found: `[]` on stdout, an `error:` note on stderr, exit 1 — the
         // note-driven failure signal. `zzz-no-such-doc` is not a fixture stem.
+        // The note's text is the shared resolver wording, which is where this
+        // case diverges from the oracle's `get`-local phrasing (PD-467).
         id: "read-get-not-found-json-zoo",
         argv: &["get", "zzz-no-such-doc", "--format", "json"],
         fixture: ZOO_1,
@@ -2152,6 +2155,8 @@ const PLAN_HASH_NORM: &[Normalization] = &[Normalization::PlanHash];
 /// captured wholly by the set-on-null-block half below.
 const MUTATE_CASES: &[Case] = &[
     // set: a nonexistent target is a clean pre-write refusal (exit 2), write-free.
+    // The refusal wording is the shared resolver's, which is where it diverges
+    // from the oracle's `set`-local phrasing (PD-467).
     Case {
         id: "mutate-set-missing-target-zoo",
         argv: &["set", "no-such-doc-xyzzy", "status:done"],
@@ -2902,8 +2907,9 @@ const EDIT_CASES: &[Case] = &[
         normalize: NO_NORM,
         plan: None,
     },
-    // A bad target is a clean pre-write refusal: `error: doc not found: <t>` on
-    // stderr, exit 2, write-free (the format-independent edit refusal surface).
+    // A bad target is a clean pre-write refusal: the shared resolver wording on
+    // stderr behind `error:`, exit 2, write-free (the format-independent edit
+    // refusal surface); the wording is where it diverges (PD-467).
     // `--edits-json` for the same harness-stdin reason as the forecast case.
     Case {
         id: "edit-missing-target-zoo",

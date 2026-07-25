@@ -609,10 +609,14 @@ mod tests {
 
     #[test]
     fn a_refusal_without_a_recovery_slot_serializes_to_code_message_path() {
-        let e = CodedError::new("target-not-found", "doc not found: x", None);
+        let e = CodedError::new(
+            "target-not-found",
+            "no document matched path or stem: x",
+            None,
+        );
         assert_eq!(
             serde_json::to_value(&e).unwrap(),
-            json!({ "code": "target-not-found", "message": "doc not found: x" }),
+            json!({ "code": "target-not-found", "message": "no document matched path or stem: x" }),
             "an unpopulated recovery slot is omitted, not null"
         );
     }

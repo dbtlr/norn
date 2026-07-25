@@ -33,30 +33,18 @@ pub fn execute(
     let index = cache.load_graph_index()?;
     let vault_root = cache.vault_root().to_string();
 
-    // ── Target resolution (refusal prose is end-user contract; mirrors `set`) ──
-    let target_path = match crate::target::resolve_target(&index, &params.target) {
-        crate::target::TargetResolution::Resolved(p) => p,
-        crate::target::TargetResolution::NotFound => {
-            let (code, msg) = crate::target::target_refusal(
-                crate::target::TargetRefusalFamily::NotFound,
-                format!("doc not found: {}", params.target),
-            );
-            return Ok(refused(params.target.clone(), code, msg, None));
-        }
-        crate::target::TargetResolution::Ambiguous(candidates) => {
-            let (code, msg) = crate::target::target_refusal(
-                crate::target::TargetRefusalFamily::Ambiguous,
-                format!(
-                    "ambiguous document stem: {}; candidates: {}",
-                    params.target,
-                    candidates
-                        .iter()
-                        .map(|path| path.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            );
-            return Ok(refused(params.target.clone(), code, msg, None));
+    // ── Target resolution (code + prose come from the resolver, as in `set`) ──
+    let target_path = match crate::target::resolve_target(&index, &params.target)
+        .or_refuse(crate::target::TargetSlot::Target, &params.target)
+    {
+        Ok(path) => path,
+        Err(refusal) => {
+            return Ok(refused(
+                params.target.clone(),
+                refusal.code,
+                refusal.message,
+                None,
+            ));
         }
     };
     let target_str = target_path.to_string();
