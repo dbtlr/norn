@@ -34,6 +34,8 @@ pub mod op;
 pub mod path_match;
 pub mod predicates;
 pub mod repair;
+#[cfg(test)]
+mod scoped_equivalence;
 pub mod substitution;
 pub mod summary;
 mod template_refs;
@@ -51,7 +53,7 @@ pub use defaults::{
     applicable_rules, merge_defaults, path_variables, resolve_to_fixpoint, ResolveError,
 };
 pub use duration::parse_duration;
-pub use engine::validate_with_compiled;
+pub use engine::{validate_document_with_compiled, validate_with_compiled};
 pub use findings::Finding;
 pub use op::{ApplyBatch, ApplyOp};
 pub use path_match::{effective_match_glob, glob_from_target, pattern_from_target, PathPattern};
