@@ -7,19 +7,23 @@
 //!
 //! Resolution (root resolution lives in `norn-config`, not here): an
 //! explicit `[vaults.<name>].config` override path wins; otherwise
-//! `<vault_root>/.norn/config.yaml` is used if it exists; otherwise the vault
-//! runs under [`CacheOpenConfig::default`] (the fixed `aliases` frontmatter
-//! convention, no ignores, empty index set).
+//! `<vault_root>/.norn/config.yaml`, when a stat of it succeeds; otherwise —
+//! and ONLY when that stat says the file is not there — the vault runs under
+//! [`CacheOpenConfig::default`] (the fixed `aliases` frontmatter convention, no
+//! ignores, empty index set). See [`config_path`] for why "not there" has to
+//! mean `NotFound` specifically. A dangling symlink at that path stats as
+//! `NotFound` (the stat follows the link), so a broken link runs under defaults.
 //!
 //! Both errors below feed the NRN-360 user-error surface (a warm-up config
 //! failure becomes an `OwnerFrame::Rejected`, not exit-to-heal), but they carry
 //! two distinct message shapes: a present-but-unparseable file yields the
 //! `invalid config <path>: <detail>` message (from
 //! [`norn_core::standards::parse_config`]), while a present-but-unreadable file
-//! (a permissions/IO access error) yields `failed to read config <path>: <io>`.
-//! Both render the same way (`eprintln!("{error:#}")`, exit 1); the parse-error
-//! branch carries the stable `invalid config <path>: ` prefix as a contract,
-//! and the access-error branch is a rarer edge with its own wording.
+//! (a permissions/IO access error, from the stat or the read) yields
+//! `failed to read config <path>: <io>`. Both render the same way
+//! (`eprintln!("{error:#}")`, exit 1); the parse-error branch carries the stable
+//! `invalid config <path>: ` prefix as a contract, and the access-error branch
+//! is a rarer edge with its own wording.
 
 use camino::{Utf8Path, Utf8PathBuf};
 

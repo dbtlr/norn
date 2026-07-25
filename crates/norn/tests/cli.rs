@@ -1213,7 +1213,33 @@ fn an_unreadable_registry_refuses_on_every_addressing_via() {
             Some(1),
             "via {label}: an unreadable registry must refuse, not fall back; stderr was: {stderr:?}"
         );
+        // Text convergence, not just exit-code convergence. `--vault` and the
+        // cwd binding fail earlier, inside registry resolution, than `-C` and
+        // `NORN_ROOT` do — every one of them must still render the same
+        // headline and the same recovery hint, and the hint must point at the
+        // registry file rather than at the per-vault YAML.
+        assert!(
+            stderr.contains("norn: failed to read config "),
+            "via {label}: expected the shared registry-read headline, got: {stderr:?}"
+        );
+        assert!(
+            stderr.contains("hint: repair or remove the registry file by hand"),
+            "via {label}: expected the registry-recovery hint, got: {stderr:?}"
+        );
+        assert!(
+            !stderr.contains("YAML") && !stderr.contains("norn config validate"),
+            "via {label}: the registry is TOML; the per-vault-YAML advice is wrong here: {stderr:?}"
+        );
     }
+    // One underlying error, one rendering: the four vias must not differ by a
+    // single character of stderr.
+    let rendered: std::collections::BTreeSet<&str> =
+        outcomes.iter().map(|(_, _, s)| s.as_str()).collect();
+    assert_eq!(
+        rendered.len(),
+        1,
+        "every via must render the same diagnostic, got: {rendered:?}"
+    );
     assert_eq!(
         std::fs::read_to_string(vault.join("a.md")).unwrap(),
         seeded,

@@ -96,13 +96,15 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
     // resolution reads the same registry), so refusing converges all four vias
     // instead of leaving two of them quietly permissive. An unreadable registry
     // is a local, operator-fixable condition; consistency beats availability.
-    let registered = registry.reverse_lookup(&resolved.root).map_err(|e| {
-        Diagnostic::new(format!(
-            "vault registry unreadable, so this vault's registered config and audit \
-             trail cannot be resolved: {e}"
-        ))
-        .with_hint("fix or restore the registry file, then rerun")
-    })?;
+    //
+    // Routed through the SAME `config_error_diagnostic` the `--vault <name>` and
+    // directory-binding vias already fail through (their resolution reads this
+    // same file, earlier), so all four vias render one registry error the same
+    // way — same headline, same hint — instead of converging on the exit code
+    // alone.
+    let registered = registry
+        .reverse_lookup(&resolved.root)
+        .map_err(|e| config_error_diagnostic(&e))?;
     let config_override = registered.as_ref().and_then(|vault| vault.config.clone());
     let events_dir = registered.as_ref().and_then(|vault| {
         norn_config::events_dir_for(
@@ -235,12 +237,35 @@ pub fn config_error_diagnostic(e: &ConfigError) -> Diagnostic {
         ConfigError::BindingUnregistered { .. } => {
             base.with_hint("register the vault with `norn vault register`, or fix the binding file")
         }
-        ConfigError::ConfigParse { .. } => base.with_hint(
-            "fix the YAML syntax, then re-run — `norn config validate` reports the details",
-        ),
+        // The registry file is TOML at `<config home>/config.toml`, and this is
+        // its only parse site — a vault's own `.norn/config.yaml` never reaches
+        // here (it is parsed by norn-core, behind the owner). So the recovery is
+        // hand-editing the registry file, NOT `norn config validate`, which
+        // reports on the per-vault YAML.
+        ConfigError::ConfigParse { .. } => base.with_hint(REGISTRY_FILE_HINT),
+        // Same recovery whenever the unreadable thing IS the registry file: a
+        // permissions denial or any other IO failure reading it. Other `Io`
+        // paths (canonicalizing a vault root, writing a temp config) are their
+        // own conditions and keep the bare headline.
+        ConfigError::Io { path, .. } if is_registry_file(path) => {
+            base.with_hint(REGISTRY_FILE_HINT)
+        }
         // `#[non_exhaustive]`: every other variant is a clear headline on its own.
         _ => base,
     }
+}
+
+/// The recovery for a registry file that exists but cannot be read or parsed.
+/// It is deliberately hand-editing: every `norn vault` verb needs the registry
+/// to run, so none of them can repair it.
+const REGISTRY_FILE_HINT: &str =
+    "repair or remove the registry file by hand (it cannot be fixed through `norn vault`), then rerun";
+
+/// Is `path` the central registry file? [`ConfigHome::config_path`] names it
+/// `config.toml` under the config home; a vault's own config is `config.yaml`,
+/// so the two never collide on file name.
+fn is_registry_file(path: &std::path::Path) -> bool {
+    path.file_name().is_some_and(|name| name == "config.toml")
 }
 
 #[cfg(test)]
@@ -258,6 +283,40 @@ mod tests {
         assert_eq!(
             diag.hints(),
             ["run `norn vault list` to see registered vault names".to_string()]
+        );
+    }
+
+    /// The registry file is `<config home>/config.toml`; a vault's own config is
+    /// `.norn/config.yaml` and never reaches this mapper. An IO failure on the
+    /// registry therefore earns the hand-repair hint, while an IO failure on any
+    /// other path (canonicalizing a vault root, writing a temp file) keeps the
+    /// bare headline.
+    #[test]
+    fn a_registry_io_error_gets_the_hand_repair_hint() {
+        let e = ConfigError::Io {
+            context: "failed to read config".into(),
+            path: PathBuf::from("/home/u/.config/norn/config.toml"),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        let diag = config_error_diagnostic(&e);
+        assert_eq!(diag.hints().len(), 1);
+        assert!(
+            diag.hints()[0].contains("repair or remove the registry file by hand"),
+            "got {:?}",
+            diag.hints()
+        );
+        // The recovery is hand-editing precisely because no `norn vault` verb
+        // can run without the registry.
+        assert!(diag.hints()[0].contains("cannot be fixed through `norn vault`"));
+
+        let unrelated = ConfigError::Io {
+            context: "failed to canonicalize vault root".into(),
+            path: PathBuf::from("/vaults/atlas"),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        };
+        assert!(
+            config_error_diagnostic(&unrelated).hints().is_empty(),
+            "only the registry file earns the registry hint"
         );
     }
 
