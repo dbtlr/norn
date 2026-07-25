@@ -44,7 +44,7 @@ Fourteen tools, split into seven read and seven mutation.
 |---|---|
 | `vault.find` | Full-text + metadata document search, with sort, limit, and paging — the same selection surface as `norn find`. |
 | `vault.count` | Count documents, total or grouped by a frontmatter field. |
-| `vault.get` | Fetch structured documents, or one exact on-disk source document with `format: "markdown"`. |
+| `vault.get` | Fetch document records, or one exact on-disk source document with `format: "markdown"`. |
 | `vault.validate` | Validate graph facts and configured frontmatter/link rules; returns structured findings. |
 | `vault.repair` | Produce a deterministic `MigrationPlan` (closest-match link rewrites, frontmatter fixes) **without applying it**. Feed the plan to `vault.apply`. |
 | `vault.describe` | Describe the vault for an off-filesystem client — folder tree, declared path rules, creatable rules, inbox, frontmatter schema. See [Placing a new document](#placing-a-new-document). |
@@ -62,8 +62,12 @@ Fourteen tools, split into seven read and seven mutation.
 | `vault.rewrite_wikilink` | Retarget every occurrence of a wikilink across the vault (body + frontmatter), without moving any file. |
 | `vault.apply` | Apply a `MigrationPlan` (e.g. one returned by `vault.repair`) inline — moves, deletes, link rewrites, frontmatter ops. |
 
-`vault.get` defaults to `format: "structured"`. For a byte-faithful whole-file
-read, request exactly one selected document:
+`vault.get`'s `format` speaks the same vocabulary as the CLI's `--format`, with
+the values that name a distinct payload: `records` (the default) and `markdown`.
+The CLI's `json` / `jsonl` / `paths` are renderings of the `records` payload —
+`structuredContent` already delivers it as JSON — so they have no MCP spelling,
+and a `format` outside the two accepted values is rejected. For a byte-faithful
+whole-file read, request exactly one selected document:
 
 ```json
 { "name": "vault.get", "arguments": { "targets": ["notes/task.md"], "format": "markdown" } }

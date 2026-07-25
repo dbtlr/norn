@@ -1010,16 +1010,21 @@ observed = { "read-find-col-truncated-page-suppressed-zoo" = { stderr = 1 }, "re
 # `starts_at` default is `0` where the oracle's is `1`. This entry extends PD-105
 # (the same redesign on the CLI's `--starts-at`) to the MCP schema surface — a
 # ledger DECLARATION, not a normalization rule (normalizers hide, ledger entries
-# declare). The rest of the `tools/list` delta is incidental prose (tool
-# descriptions, the typed-note schemas PD-133 already covers on the call
-# surface). See `crates/norn-mcp/src/tools/get.rs` (the `starts_at` default) and
-# `crates/norn-mcp/src/server.rs` (the served catalog).
+# declare). A SECOND structural cause joined it under NRN-469: `get`'s `format`
+# enum publishes the CLI's `--format` value names, so its accepted values are
+# `records` / `markdown` where the oracle publishes `structured` / `markdown`
+# (the call-surface face of that rename is PD-469). The rest of the `tools/list`
+# delta is incidental prose (tool descriptions, the filter-predicate
+# descriptions the three read tools now publish from one definition, the
+# typed-note schemas PD-133 already covers on the call surface). See
+# `crates/norn-mcp/src/tools/get.rs` (the `starts_at` default and the `format`
+# vocabulary) and `crates/norn-mcp/src/server.rs` (the served catalog).
 [[entry]]
 id = "PD-141"
-surface = "mcp tools/list (published inputSchema — zero-indexed get.starts_at)"
+surface = "mcp tools/list (published inputSchema — zero-indexed get.starts_at, get.format vocabulary)"
 cases = ["mcp-initialize-tools-list-zoo"]
-old = "the full `tools/list` catalog is 14 tools whose `get` `inputSchema` documents `starts_at` as a 1-indexed default (`default: 1`), matching the oracle's paging"
-new = "the catalog is the same 14 tools, but `get`'s published `inputSchema` documents `starts_at` as a zero-indexed default (`default: 0`, NRN-332) — the MCP-surface face of PD-105; the remaining catalog delta is incidental prose (descriptions / typed-note schemas)"
+old = "the full `tools/list` catalog is 14 tools whose `get` `inputSchema` documents `starts_at` as a 1-indexed default (`default: 1`), matching the oracle's paging, and whose `format` enum accepts `structured` / `markdown`"
+new = "the catalog is the same 14 tools, but `get`'s published `inputSchema` documents `starts_at` as a zero-indexed default (`default: 0`, NRN-332) — the MCP-surface face of PD-105 — and its `format` enum accepts `records` / `markdown`, the CLI's own `--format` value names (NRN-469); the remaining catalog delta is incidental prose (descriptions / typed-note schemas)"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 observed = { "mcp-initialize-tools-list-zoo" = { mcp = 1 } }
@@ -1372,3 +1377,26 @@ new = "the page prints the one-line summary and goes straight to USAGE: all five
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 observed = { "help-count" = { stdout = 4 } }
+
+# NRN-469 (decided-better): the MCP `format` param now speaks the CLI's
+# converged `--format` vocabulary (NRN-416). `vault.get` accepts `records` —
+# the name `norn get --format records` uses for the document-record payload —
+# where the oracle spells the same payload `structured` while its own envelope
+# field is already named `records`. The rename is a hard break with no alias
+# window (no MCP consumers exist; the pre-1.0 window is the place for it).
+# Scope is the whole format-like MCP param surface, which is this one param:
+# `vault.get.format` is the only format-shaped param any tool accepts, and the
+# other four CLI format values (`json` / `jsonl` / `paths`) name RENDERINGS of
+# the records payload that `structuredContent` already delivers as JSON, so
+# they gain no MCP spelling. The schema-surface face of the same rename is
+# folded into PD-141 (one case, one entry). See
+# `crates/norn-mcp/src/tools/get.rs`.
+[[entry]]
+id = "PD-469"
+surface = "mcp tools/call vault.get (format param vocabulary)"
+cases = ["mcp-tools-call-get-format-records-zoo"]
+old = "`format: \"records\"` is an unknown variant: the call fails deserialization with `isError: true` and a text-only content of `failed to deserialize parameters: unknown variant `records`, expected `structured` or `markdown``, so the document-record payload is reachable only under the `structured` spelling"
+new = "`format: \"records\"` is the document-record payload's name, matching `norn get --format records`, and returns the ordinary `{records, section_failures, notes}` envelope with `isError: false`; `structured` is gone and now fails as the unknown variant, naming `records` / `markdown` as the accepted values"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = { "mcp-tools-call-get-format-records-zoo" = { mcp = 1 } }

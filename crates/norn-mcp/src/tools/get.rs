@@ -1,4 +1,4 @@
-//! `vault.get` — structured document fetch (and exact-source markdown).
+//! `vault.get` — document records (and exact-source markdown).
 //!
 //! The param struct mirrors `norn get`'s daily surface; the handler routes to the
 //! owner and projects each wire [`GetRecord`] into the same full-facet JSON the
@@ -26,11 +26,12 @@ pub struct GetParams {
     /// One or more document targets (stem or path), as `norn get` accepts.
     pub targets: Vec<String>,
 
-    /// Response representation. `structured` (the default) returns document
-    /// records; `markdown` returns one exact on-disk document and refuses unless
-    /// exactly one document is selected.
+    /// Which payload to return, in the same `--format` vocabulary `norn get`
+    /// accepts: `records` (the default) returns document records; `markdown`
+    /// returns one exact on-disk document and refuses unless exactly one
+    /// document is selected.
     #[serde(default)]
-    pub format: GetRepresentation,
+    pub format: GetFormat,
 
     /// Optional column request, comma-separated, in `norn get --col` syntax. On
     /// the MCP surface this only controls whether the on-request facets (`.body`,
@@ -64,15 +65,20 @@ pub struct GetParams {
     pub all_cols: bool,
 }
 
-/// Representation returned by `vault.get`.
+/// The payload `vault.get` returns, named in the CLI's `--format` vocabulary.
+///
+/// Two of `norn get`'s five format values name a distinct PAYLOAD — `records`
+/// and `markdown` — and those are the two this tool accepts. The other three
+/// (`json`, `jsonl`, `paths`) are renderings of the `records` payload, which
+/// `structuredContent` already delivers as JSON, so they have no MCP spelling.
 #[derive(
     Debug, Clone, Copy, Default, Deserialize, Serialize, schemars::JsonSchema, PartialEq, Eq,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum GetRepresentation {
+pub enum GetFormat {
     /// Parsed document records and their graph connections.
     #[default]
-    Structured,
+    Records,
     /// One byte-faithful UTF-8 Markdown document read from the vault file.
     Markdown,
 }
@@ -138,7 +144,7 @@ pub(crate) fn to_wire(p: &GetParams) -> WireGetParams {
         },
         sections: p.section.clone(),
         with_body,
-        markdown: p.format == GetRepresentation::Markdown,
+        markdown: p.format == GetFormat::Markdown,
     }
 }
 
@@ -194,7 +200,7 @@ pub(crate) fn envelope(p: &GetParams, report: GetReport) -> MutationResult<GetOu
         .iter()
         .map(|r| record_json(r, want_body, want_hash))
         .collect();
-    let markdown = if p.format == GetRepresentation::Markdown {
+    let markdown = if p.format == GetFormat::Markdown {
         report.markdown_content.as_ref().and_then(|content| {
             report.records.first().map(|r| MarkdownOutput {
                 path: r.path.clone(),
@@ -363,7 +369,7 @@ mod tests {
 
         let params = GetParams {
             targets: vec!["a.md".into(), "b.md".into()],
-            format: GetRepresentation::Markdown,
+            format: GetFormat::Markdown,
             ..Default::default()
         };
         let report = GetReport {
@@ -395,6 +401,38 @@ mod tests {
             Some(2),
             "both resolved records still ride the envelope, got {sc:?}"
         );
+    }
+
+    #[test]
+    fn format_speaks_the_cli_vocabulary_records_and_markdown() {
+        // The wire spellings are the CLI's `--format` names. `records` is also
+        // the default, so an omitted `format` and an explicit `records` agree.
+        let explicit: GetParams =
+            serde_json::from_value(json!({"targets": ["alpha"], "format": "records"})).unwrap();
+        assert_eq!(explicit.format, GetFormat::Records);
+        let omitted: GetParams = serde_json::from_value(json!({"targets": ["alpha"]})).unwrap();
+        assert_eq!(omitted.format, GetFormat::Records);
+        let markdown: GetParams =
+            serde_json::from_value(json!({"targets": ["alpha"], "format": "markdown"})).unwrap();
+        assert_eq!(markdown.format, GetFormat::Markdown);
+    }
+
+    #[test]
+    fn a_format_value_outside_the_cli_vocabulary_is_rejected() {
+        // `structured` was the pre-convergence spelling of `records`, and the
+        // CLI's `json` / `jsonl` / `paths` are renderings of the records
+        // payload with no MCP spelling — all four fail loudly, naming the two
+        // accepted values, rather than silently selecting a payload.
+        for value in ["structured", "json", "jsonl", "paths"] {
+            let err =
+                serde_json::from_value::<GetParams>(json!({"targets": ["alpha"], "format": value}))
+                    .unwrap_err();
+            let message = err.to_string();
+            assert!(
+                message.contains("unknown variant") && message.contains(value),
+                "got: {message}"
+            );
+        }
     }
 
     #[test]

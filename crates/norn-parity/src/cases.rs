@@ -1786,6 +1786,30 @@ const MCP_CASES: &[Case] = &[
         plan: None,
     },
     Case {
+        // The `format` param's converged vocabulary: `records` names the
+        // document-record payload the CLI's `--format records` names. The
+        // oracle spells that same payload `structured` and rejects `records`
+        // as an unknown variant, so this case pins the rename as a declared
+        // divergence (PD-469) rather than leaving the wire vocabulary
+        // untested. The default-`format` payload is pinned separately by
+        // `mcp-tools-call-get-alpha-zoo`, which still matches.
+        id: "mcp-tools-call-get-format-records-zoo",
+        argv: &["mcp"],
+        fixture: MCP_FIXTURE,
+        stdin: Some(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"norn-parity","version":"0.1.0"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"vault.get","arguments":{"targets":["alpha"],"format":"records"}}}"#,
+        ]),
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: Some("notes/alpha.md"),
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
+    Case {
         // A `vault.get` for a target that does not resolve: the report's
         // `error`-severity missing-target note maps to `isError: true` while the
         // envelope still carries the (empty) records + notes — the NRN-214 signal.
