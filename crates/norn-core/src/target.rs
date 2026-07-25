@@ -114,6 +114,7 @@ mod tests {
             stem: stem.into(),
             hash: "h".into(),
             frontmatter: None,
+            head_text: String::new(),
             body_text: String::new(),
             headings: vec![],
             block_ids: vec![],

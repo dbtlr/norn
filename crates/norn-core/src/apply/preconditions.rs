@@ -415,6 +415,7 @@ mod tests {
             stem: stem.to_string(),
             hash: "hash".to_string(),
             frontmatter,
+            head_text: String::new(),
             body_text: String::new(),
             headings: vec![],
             block_ids: vec![],

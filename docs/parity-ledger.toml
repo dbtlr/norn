@@ -899,9 +899,9 @@ observed = { "mutate-set-push-apply-json-zoo" = { stdout = 1 }, "mutate-set-refu
 # authority (the redundant `applied` bool is retained for field presence).
 # Surfaces on the CLI `edit --dry-run --format json` and on the MCP `vault.set`
 # forecast's `structuredContent`. The cascade verbs (`move` / `delete` /
-# `rewrite-wikilink` / `apply`) already carry an explicit `dry_run: true` preview
-# signal on their `ApplyReport`; their top-level `outcome` honesty and the deeper
-# cascade-count forecast fidelity remain NRN-161. See `crates/norn-wire/src/
+# `rewrite-wikilink` / `apply`) also carry an explicit `dry_run: true` preview
+# signal on their `ApplyReport`, and their top-level `outcome` honesty plus the
+# deeper cascade-count forecast fidelity are NRN-161 scope. See `crates/norn-wire/src/
 # mutate.rs` (`MutationOutcome::Forecast`) and `crates/norn-core/src/mutate/
 # {set,new,edit}.rs`.
 [[entry]]

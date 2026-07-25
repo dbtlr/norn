@@ -369,7 +369,7 @@ impl McpServer {
     /// `vault.move` — relocate a document/folder and cascade-rewrite backlinks.
     #[tool(
         name = "vault.move",
-        description = "Relocate a document (or folder, recursive:true) and cascade-rewrite its backlinks. DRY-RUN by default (confirm:false): reports dry_run:true (with outcome:\"applied\" pending NRN-161) and writes nothing. Pass confirm:true to apply.",
+        description = "Relocate a document (or folder, recursive:true) and cascade-rewrite its backlinks. DRY-RUN by default (confirm:false): reports outcome:\"forecast\" with dry_run:true and writes nothing. Pass confirm:true to apply.",
         output_schema = output_schema_for::<crate::tools::move_doc::MoveOutput>()
     )]
     async fn move_document(
@@ -387,7 +387,7 @@ impl McpServer {
     /// `vault.delete` — remove a document, leaving or redirecting its backlinks.
     #[tool(
         name = "vault.delete",
-        description = "Delete a document, either leaving its incoming links broken (allow_broken_links:true) or redirecting them (rewrite_to). The owner stamps the target's current content hash as a required plan-time precondition (protects against owner-index-vs-disk skew); a client-chosen CAS instead goes through vault.apply with a plan-carried document_hash. DRY-RUN by default (confirm:false): reports dry_run:true (with outcome:\"applied\" pending NRN-161) and writes nothing. Pass confirm:true to apply.",
+        description = "Delete a document, either leaving its incoming links broken (allow_broken_links:true) or redirecting them (rewrite_to). The owner stamps the target's current content hash as a required plan-time precondition (protects against owner-index-vs-disk skew); a client-chosen CAS instead goes through vault.apply with a plan-carried document_hash. DRY-RUN by default (confirm:false): reports outcome:\"forecast\" with dry_run:true and writes nothing. Pass confirm:true to apply.",
         output_schema = output_schema_for::<crate::tools::delete::DeleteOutput>()
     )]
     async fn delete(
@@ -405,7 +405,7 @@ impl McpServer {
     /// `vault.rewrite_wikilink` — rewrite every `[[old]]` reference to `[[new]]`.
     #[tool(
         name = "vault.rewrite_wikilink",
-        description = "Rewrite every [[old]] wikilink reference (body + frontmatter) to [[new]] across the vault. DRY-RUN by default (confirm:false): reports dry_run:true (with outcome:\"applied\" pending NRN-161) and writes nothing. Pass confirm:true to apply.",
+        description = "Rewrite every [[old]] wikilink reference (body + frontmatter) to [[new]] across the vault. DRY-RUN by default (confirm:false): reports outcome:\"forecast\" with dry_run:true and writes nothing. Pass confirm:true to apply.",
         output_schema = output_schema_for::<crate::tools::rewrite_wikilink::RewriteWikilinkOutput>()
     )]
     async fn rewrite_wikilink(
@@ -423,7 +423,7 @@ impl McpServer {
     /// `vault.apply` — execute an already-reviewed MigrationPlan.
     #[tool(
         name = "vault.apply",
-        description = "Execute an already-reviewed MigrationPlan (e.g. one returned by vault.repair). DRY-RUN by default (confirm:false): reports dry_run:true (with outcome:\"applied\" pending NRN-161) and writes nothing. Pass confirm:true to apply.",
+        description = "Execute an already-reviewed MigrationPlan (e.g. one returned by vault.repair). DRY-RUN by default (confirm:false): reports outcome:\"forecast\" with dry_run:true and writes nothing. Pass confirm:true to apply.",
         output_schema = output_schema_for::<crate::tools::apply::ApplyOutput>()
     )]
     async fn apply(

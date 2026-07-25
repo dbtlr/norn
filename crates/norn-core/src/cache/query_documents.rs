@@ -92,7 +92,7 @@ impl crate::cache::Cache {
         path: &Utf8Path,
     ) -> Result<Option<crate::domain::Document>, CacheError> {
         let mut stmt = self.conn.prepare(
-            "SELECT path, stem, hash, frontmatter_json, body_text \
+            "SELECT path, stem, hash, frontmatter_json, head_text, body_text \
              FROM documents WHERE path = ?",
         )?;
         let row = stmt
@@ -101,12 +101,13 @@ impl crate::cache::Cache {
                 let stem: String = row.get(1)?;
                 let hash: String = row.get(2)?;
                 let frontmatter_json: Option<String> = row.get(3)?;
-                let body_text: String = row.get(4)?;
-                Ok((path, stem, hash, frontmatter_json, body_text))
+                let head_text: String = row.get(4)?;
+                let body_text: String = row.get(5)?;
+                Ok((path, stem, hash, frontmatter_json, head_text, body_text))
             })
             .optional()?;
 
-        let Some((path_str, stem, hash, fm_json, body_text)) = row else {
+        let Some((path_str, stem, hash, fm_json, head_text, body_text)) = row else {
             return Ok(None);
         };
 
@@ -128,6 +129,7 @@ impl crate::cache::Cache {
             stem,
             hash,
             frontmatter,
+            head_text,
             body_text,
             headings,
             block_ids,

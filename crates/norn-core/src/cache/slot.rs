@@ -670,6 +670,108 @@ mod tests {
         (tmp, root, db_path)
     }
 
+    /// Every frontmatter shape whose raw bytes differ from norn's canonical
+    /// re-serialization: quote styles, key order, per-item list quoting, flow
+    /// collections, comments, blank lines, CRLF, a leading BOM, an unclosed block,
+    /// and no frontmatter at all.
+    fn round_trip_fixtures() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("single-quoted.md", "---\nup: '[[Parent]]'\n---\nbody\n"),
+            (
+                "key-order.md",
+                "---\nup: '[[Parent]]'\nabout: \"[[Parent]]\"\n---\nbody\n",
+            ),
+            (
+                "list-items.md",
+                "---\nrelated:\n  - \"[[A]]\"\n  - 'B'\n  - C\n---\nbody\n",
+            ),
+            ("flow-seq.md", "---\ntags: [a, b, c]\n---\nbody\n"),
+            (
+                "comments.md",
+                "---\n# a leading comment\ntype: note   # trailing\n\nstatus: open\n---\n\nbody\n",
+            ),
+            ("crlf.md", "---\r\ntype: note\r\n---\r\nbody\r\n"),
+            ("bom.md", "\u{feff}---\ntype: note\n---\nbody\n"),
+            ("unclosed.md", "---\ntype: note\nbody with no fence\n"),
+            ("no-frontmatter.md", "# Just a body\n\nsee [[a]]\n"),
+            ("empty.md", ""),
+        ]
+    }
+
+    /// The cache-side guard on the invariant the dry-run cascade forecast relies
+    /// on: `head_text + body_text` for a cached document reproduces its file byte
+    /// for byte. Asserted after each of the three lifecycle paths that publish
+    /// documents (two row-write functions between them) — the summon full build, a
+    /// freshness-triggered incremental refresh, and an apply-increment publish — so
+    /// a write path that forgets `head_text` fails here rather than silently
+    /// under-serving the forecast.
+    #[test]
+    fn cached_head_and_body_reproduce_every_file_byte_for_byte() {
+        fn assert_round_trip(index: &GraphIndex, root: &Utf8Path, stage: &str) {
+            assert!(
+                !index.documents.is_empty(),
+                "{stage}: expected documents in the index"
+            );
+            for doc in &index.documents {
+                let on_disk = std::fs::read_to_string(root.join(&doc.path).as_std_path()).unwrap();
+                assert_eq!(
+                    format!("{}{}", doc.head_text, doc.body_text),
+                    on_disk,
+                    "{stage}: cache round-trip lost bytes for {}",
+                    doc.path
+                );
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let base = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let root = base.join("vault");
+        std::fs::create_dir(root.as_std_path()).unwrap();
+        for (name, content) in round_trip_fixtures() {
+            std::fs::write(root.join(name).as_std_path(), content).unwrap();
+        }
+        let db_path = base.join("cache.db");
+
+        // 1. Full build at summon.
+        let slot = VaultCacheSlot::create(&db_path, &root, CacheOpenConfig::default()).unwrap();
+        let built = slot.serve_read(|cache| cache.load_graph_index()).unwrap();
+        assert_eq!(built.documents.len(), round_trip_fixtures().len());
+        assert_round_trip(&built, &root, "full build");
+
+        // 2. Incremental refresh: one file rewritten in a non-canonical form, one
+        // added, routed through the staleness probe.
+        std::fs::write(
+            root.join("single-quoted.md").as_std_path(),
+            "---\nup: '[[Renamed]]'   # kept inline\nz: 1\na: 2\n---\nnew body\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("added.md").as_std_path(),
+            "---\nrelated:\n  - '[[a]]'\n---\nbody\n",
+        )
+        .unwrap();
+        let refreshed = slot.serve_read(|cache| cache.load_graph_index()).unwrap();
+        assert_eq!(refreshed.documents.len(), round_trip_fixtures().len() + 1);
+        assert_round_trip(&refreshed, &root, "incremental refresh");
+
+        // 3. Apply-increment publish: read back off the generation's own read
+        // connection, so the assertion sees the increment rather than a
+        // filesystem-triggered rebuild.
+        let baseline = slot.serve_read(|cache| cache.load_graph_index()).unwrap();
+        std::fs::write(
+            root.join("touched.md").as_std_path(),
+            "---\nup: '[[a]]'\ntags: [x, y]\n---\nsee [[a]]\n",
+        )
+        .unwrap();
+        let outcome = slot
+            .commit_apply_increments(&[Utf8PathBuf::from("touched.md")], baseline)
+            .unwrap();
+        assert_eq!(outcome, ApplyIncrementOutcome::Published);
+        let generation = slot.ensure_current().unwrap();
+        let published = generation.checkout_read().load_graph_index().unwrap();
+        assert_round_trip(&published, &root, "apply increment");
+    }
+
     #[test]
     fn create_warms_up_and_serves_reads() {
         let (_tmp, root, db_path) = vault();

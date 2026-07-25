@@ -323,6 +323,7 @@ fn parse_document(
                 stem,
                 hash: String::new(),
                 frontmatter: None,
+                head_text: String::new(),
                 body_text: String::new(),
                 headings: Vec::new(),
                 block_ids: Vec::new(),
@@ -354,6 +355,10 @@ fn parse_document(
     }
     let (frontmatter, frontmatter_range, body, body_start) =
         extract_frontmatter(&content, &mut diagnostics);
+    // Everything before the body, verbatim: BOM, fences, and the frontmatter
+    // block with its on-disk quoting, key order, and comments intact. Paired
+    // with `body_text` it reproduces the file byte for byte.
+    let head_text = content[..body_start].to_string();
     let body_text = body.to_string();
     // `parse_headings` reports spans relative to `body`; re-base them to
     // content-absolute so a document's heading spans stay consistent with its
@@ -390,6 +395,7 @@ fn parse_document(
         stem,
         hash,
         frontmatter,
+        head_text,
         body_text,
         headings,
         block_ids,
@@ -794,6 +800,7 @@ mod tests {
             stem: "a".into(),
             hash: String::new(),
             frontmatter: None,
+            head_text: String::new(),
             body_text: String::new(),
             headings: vec![],
             block_ids: vec![],

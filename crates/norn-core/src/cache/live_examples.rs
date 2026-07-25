@@ -127,9 +127,18 @@ mod tests {
         cache
             .conn()
             .execute(
-                "INSERT INTO documents (path, stem, hash, frontmatter_json, body_text, mtime_ns, size_bytes) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
-                params![path, path.trim_end_matches(".md"), "h", frontmatter_json, "", 0i64, 0i64],
+                "INSERT INTO documents (path, stem, hash, frontmatter_json, head_text, body_text, mtime_ns, size_bytes) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    path,
+                    path.trim_end_matches(".md"),
+                    "h",
+                    frontmatter_json,
+                    "",
+                    "",
+                    0i64,
+                    0i64
+                ],
             )
             .unwrap();
     }

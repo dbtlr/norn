@@ -56,7 +56,7 @@ pub(crate) mod eav;
 
 /// The relational schema version. Bumped when the DDL changes; stamped into the
 /// `meta` table at [`Cache::create`].
-pub(crate) const SCHEMA_VERSION: u32 = 5;
+pub(crate) const SCHEMA_VERSION: u32 = 6;
 
 pub use change_detection::{ChangeDetectOptions, FileChange};
 pub use engine::Cache;

@@ -107,6 +107,16 @@ pub struct Document {
     pub hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frontmatter: Option<Value>,
+    /// The verbatim bytes preceding the body — a leading BOM, the `---` fences,
+    /// and the frontmatter block exactly as written on disk (quoting, key order,
+    /// comments, blank lines and all). Empty for a document with no recognized
+    /// frontmatter block, and when the file could not be read.
+    ///
+    /// `head_text + body_text` reproduces the file byte for byte, which is what
+    /// lets a snapshot consumer classify an edit against the same bytes an apply
+    /// would splice.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub head_text: String,
     /// The post-frontmatter body of the document, retained for downstream
     /// indexing (cache writer, future FTS5). Empty when the file could not
     /// be read.
@@ -190,6 +200,7 @@ mod document_summary_tests {
             stem: "a".to_string(),
             hash: "abc".to_string(),
             frontmatter: Some(json!({"type": "note"})),
+            head_text: String::new(),
             body_text: "hello".to_string(),
             headings: vec![],
             block_ids: vec![],
@@ -215,6 +226,7 @@ mod document_summary_tests {
             stem: "a".to_string(),
             hash: "abc".to_string(),
             frontmatter: Some(serde_json::json!({"type": "note"})),
+            head_text: String::new(),
             body_text: "hello".to_string(),
             headings: vec![],
             block_ids: vec![],
@@ -241,6 +253,7 @@ mod alias_field_tests {
             stem: "a".into(),
             hash: "h".into(),
             frontmatter: None,
+            head_text: String::new(),
             body_text: String::new(),
             headings: vec![],
             block_ids: vec![],

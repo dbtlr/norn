@@ -1236,6 +1236,7 @@ mod tests {
             stem: camino::Utf8Path::new(path).file_stem().unwrap().to_string(),
             hash: hash.to_string(),
             frontmatter: None,
+            head_text: String::new(),
             body_text: String::new(),
             headings: vec![],
             block_ids: vec![],

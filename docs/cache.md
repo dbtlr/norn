@@ -15,7 +15,7 @@ description: The SQLite-backed cache that accelerates norn query commands — wh
 
 Honors `$XDG_CACHE_HOME` when set. The directory is created at `0700` and the database file at `0600` — explicitly tightened (not relying on umask) to protect frontmatter values on shared hosts.
 
-The database is namespaced by **schema version** (`v5` for the current schema) as well as by channel (below): the schema version is part of the database's on-disk identity, so a binary only ever opens the db in its own `v<schema>` directory. Mixed norn versions therefore coexist — each builds and uses its own cache — and a version downgrade self-heals instead of locking the binary out (see [When the cache rebuilds automatically](#when-the-cache-rebuilds-automatically)).
+The database is namespaced by **schema version** (`v6` for the current schema) as well as by channel (below): the schema version is part of the database's on-disk identity, so a binary only ever opens the db in its own `v<schema>` directory. Mixed norn versions therefore coexist — each builds and uses its own cache — and a version downgrade self-heals instead of locking the binary out (see [When the cache rebuilds automatically](#when-the-cache-rebuilds-automatically)).
 
 The cache identity is derived from the canonical path of the vault root (symlinks resolved). Querying via the symlinked path or its resolved target hits the same cache.
 
@@ -65,7 +65,7 @@ The cache is *disposable*. Any of the following triggers an automatic silent reb
 
 There is **no** "schema newer than this binary supports; upgrade norn" hard error anymore (retired in NRN-286). A genuinely newer binary writes to *its own* `v<newer>/` directory that this binary never opens; a downgrade simply builds and uses the older schema's own directory. Mixed versions coexist, and the stale-schema database ages out via the 48h prune TTL. This retires the incident where a newer-schema binary upgraded a shared cache and locked an older installed binary out of every operation.
 
-The current `schema_version` is `5`. Version 5 adds an atomically maintained graph fingerprint to `meta`; daemon mutation reservations compare that O(1) token before staging so a graph captured before a newer cache publication cannot overwrite it. Because databases are now stored per schema version, moving between versions builds a fresh database in the target version's own directory rather than migrating in place. The schema version is surfaced by `norn cache status` and stamped into the `meta` table on every rebuild.
+The current `schema_version` is `6`. Version 6 adds `documents.head_text` — the verbatim leading bytes of every document, so a cached document reconstructs to its file byte for byte. (Version 5 added the atomically maintained graph fingerprint in `meta`; daemon mutation reservations compare that O(1) token before staging so a graph captured before a newer cache publication cannot overwrite it.) Because databases are now stored per schema version, moving between versions builds a fresh database in the target version's own directory rather than migrating in place. The schema version is surfaced by `norn cache status` and stamped into the `meta` table on every rebuild.
 
 ## Lifecycle
 
@@ -92,7 +92,7 @@ norn --no-cache-refresh validate --code 'link-*' --format jsonl
 
 ## What's cached
 
-Stored: document path, stem, content hash, frontmatter, body text, mtime, size; outgoing links with resolved targets (including the unresolved reason and candidate list for ambiguous links); headings; block IDs; non-Markdown file inventory.
+Stored: document path, stem, content hash, frontmatter, the raw frontmatter head (the verbatim leading bytes — BOM, `---` fences, and the frontmatter block with its on-disk quoting, key order, and comments — so head plus body text reproduces the file byte for byte), body text, mtime, size; outgoing links with resolved targets (including the unresolved reason and candidate list for ambiguous links); headings; block IDs; non-Markdown file inventory.
 
 Not stored: validation findings — they depend on `.norn/config.yaml`, which can change between runs. Findings always recompute fresh against the in-memory graph loaded from the cache.
 

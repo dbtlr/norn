@@ -496,6 +496,41 @@ mod tests {
             .expect("a move op carries a cascade summary")
     }
 
+    /// Run the same `src` → `dst` move twice over two IDENTICAL fresh snapshots of
+    /// `docs` — once as a dry-run forecast, once as a confirmed apply — and return
+    /// `(forecast_cascade, apply_cascade)`. The pairing is what makes forecast /
+    /// apply cascade classification directly comparable.
+    fn forecast_and_apply(
+        docs: &[(&str, &str)],
+        src: &str,
+        dst: &str,
+    ) -> (norn_wire::CascadeSummary, norn_wire::CascadeSummary) {
+        let (_t1, root1) = synth_vault(docs);
+        let cache1 = built(&root1);
+        let forecast = execute(&cache1, None, &params(src, dst, false), TODAY, &mut sink())
+            .unwrap()
+            .report;
+
+        let (_t2, root2) = synth_vault(docs);
+        let cache2 = built(&root2);
+        let applied = execute(&cache2, None, &params(src, dst, true), TODAY, &mut sink())
+            .unwrap()
+            .report;
+
+        assert_eq!(forecast.outcome, ApplyOutcome::Forecast);
+        assert_eq!(applied.outcome, ApplyOutcome::Applied);
+        (cascade_of(&forecast), cascade_of(&applied))
+    }
+
+    /// Assert the forecast's four cascade counts equal the same-snapshot apply's.
+    fn assert_cascade_counts_match(f: &norn_wire::CascadeSummary, a: &norn_wire::CascadeSummary) {
+        assert_eq!(
+            (f.planned, f.applied, f.skipped, f.failed),
+            (a.planned, a.applied, a.skipped, a.failed),
+            "forecast cascade counts must match apply: forecast={f:?} apply={a:?}"
+        );
+    }
+
     /// NRN-161 gap 2 (the sharpest same-snapshot case): a backlink inside a
     /// frontmatter value that apply SKIPS via would-corrupt-frontmatter must be
     /// forecast as skipped too. Before the fix the dry-run hard-coded every
@@ -516,42 +551,8 @@ mod tests {
         ];
         let dst = "Parent \"Two\".md";
 
-        // Forecast (dry-run) on one snapshot.
-        let (_t1, root1) = synth_vault(docs);
-        let cache1 = built(&root1);
-        let forecast = execute(
-            &cache1,
-            None,
-            &params("Parent", dst, false),
-            TODAY,
-            &mut sink(),
-        )
-        .unwrap()
-        .report;
-
-        // Confirmed apply on an identical snapshot.
-        let (_t2, root2) = synth_vault(docs);
-        let cache2 = built(&root2);
-        let applied = execute(
-            &cache2,
-            None,
-            &params("Parent", dst, true),
-            TODAY,
-            &mut sink(),
-        )
-        .unwrap()
-        .report;
-
-        assert_eq!(forecast.outcome, ApplyOutcome::Forecast);
-        assert_eq!(applied.outcome, ApplyOutcome::Applied);
-
-        let f = cascade_of(&forecast);
-        let a = cascade_of(&applied);
-        assert_eq!(
-            (f.planned, f.applied, f.skipped, f.failed),
-            (a.planned, a.applied, a.skipped, a.failed),
-            "forecast cascade counts must match apply: forecast={f:?} apply={a:?}"
-        );
+        let (f, a) = forecast_and_apply(docs, "Parent", dst);
+        assert_cascade_counts_match(&f, &a);
         // And concretely: the frontmatter backlink is skipped, the body one lands.
         assert_eq!(a.applied, 1, "only the safe body backlink rewrites");
         assert_eq!(
@@ -560,19 +561,16 @@ mod tests {
         );
     }
 
-    /// NRN-161 snapshot-reconstruction BOUNDARY (over-optimistic direction): the
-    /// forecast reconstructs a backlinker's frontmatter from the parsed index and
-    /// re-serializes it CANONICALLY (double-quoted), while apply splices the raw
-    /// on-disk bytes. A single-quoted on-disk value (norn-native state — `set` and
-    /// the splice both write single quotes) whose rewrite target carries an
-    /// apostrophe reconstructs to a double-quoted scalar that TOLERATES the
-    /// apostrophe (forecast: rewrite), but the raw single-quoted splice does NOT
-    /// (apply: skip `would-corrupt-frontmatter`). This pins that DIVERGENCE as a
-    /// documented boundary: the forecast over-counts `applied` where apply skips.
-    /// A future change that retains on-disk quoting style in the cache would close
-    /// the gap and MUST update this test (the counts would then match).
+    /// Non-canonical on-disk quoting must not move the forecast off apply. A
+    /// SINGLE-quoted frontmatter value (norn-native state — `set` and the cascade
+    /// splice both write single quotes) whose rewrite target carries an apostrophe
+    /// cannot hold that apostrophe, so apply skips `would-corrupt-frontmatter`; the
+    /// forecast classifies the same raw bytes and reaches the same verdict. A
+    /// reconstruction that re-serialized the parsed frontmatter canonically would
+    /// produce a double-quoted scalar that tolerates the apostrophe and forecast an
+    /// over-optimistic rewrite instead.
     #[test]
-    fn forecast_diverges_over_optimistic_on_single_quoted_apostrophe_target() {
+    fn forecast_matches_apply_on_single_quoted_apostrophe_target() {
         // b.md's `up` is SINGLE-quoted on disk; the move target `Parent's` carries
         // an apostrophe.
         let docs: &[(&str, &str)] = &[
@@ -581,64 +579,24 @@ mod tests {
         ];
         let dst = "Parent's.md";
 
-        let (_t1, root1) = synth_vault(docs);
-        let cache1 = built(&root1);
-        let forecast = execute(
-            &cache1,
-            None,
-            &params("Parent", dst, false),
-            TODAY,
-            &mut sink(),
-        )
-        .unwrap()
-        .report;
-
-        let (_t2, root2) = synth_vault(docs);
-        let cache2 = built(&root2);
-        let applied = execute(
-            &cache2,
-            None,
-            &params("Parent", dst, true),
-            TODAY,
-            &mut sink(),
-        )
-        .unwrap()
-        .report;
-
-        let f = cascade_of(&forecast);
-        let a = cascade_of(&applied);
-        // Forecast: the canonical double-quoted reconstruction accepts the
-        // apostrophe, so it counts the backlink as a would-rewrite.
-        assert_eq!(
-            (f.applied, f.skipped),
-            (1, 0),
-            "forecast is over-optimistic: {f:?}"
-        );
-        // Apply: the raw single-quoted splice cannot hold the apostrophe, so it
-        // skips would-corrupt-frontmatter.
+        let (f, a) = forecast_and_apply(docs, "Parent", dst);
+        assert_cascade_counts_match(&f, &a);
+        // And concretely: the single-quoted value cannot hold the apostrophe, so
+        // both sides skip would-corrupt-frontmatter.
         assert_eq!(
             (a.applied, a.skipped),
             (0, 1),
             "apply skips would-corrupt-frontmatter: {a:?}"
         );
-        assert_ne!(
-            (f.applied, f.skipped),
-            (a.applied, a.skipped),
-            "this pins the KNOWN snapshot-reconstruction divergence; if it now \
-             matches, the cache retains on-disk quoting — update this boundary test"
-        );
     }
 
-    /// NRN-161 snapshot-reconstruction BOUNDARY (pessimistic mirror): the same
-    /// canonical-reconstruction seam, opposite direction. A single-quoted on-disk
-    /// value whose rewrite target carries a DOUBLE-quote reconstructs to a
-    /// double-quoted scalar the inner quote BREAKS (forecast: skip
-    /// `would-corrupt-frontmatter`), but the raw single-quoted splice tolerates the
-    /// double-quote (apply: rewrite). Pins the pessimistic divergence — forecast
-    /// under-counts `applied`. Same future-change caveat as its over-optimistic
-    /// sibling.
+    /// The mirror of its apostrophe sibling: a SINGLE-quoted frontmatter value
+    /// whose rewrite target carries a DOUBLE-quote holds that quote fine, so apply
+    /// lands the rewrite and the forecast — classifying the same raw bytes — agrees.
+    /// A canonical re-serialization would produce a double-quoted scalar the inner
+    /// quote breaks and forecast a pessimistic skip instead.
     #[test]
-    fn forecast_diverges_pessimistic_on_single_quoted_double_quote_target() {
+    fn forecast_matches_apply_on_single_quoted_double_quote_target() {
         // b.md's `up` is SINGLE-quoted on disk; the move target carries a `"`.
         let docs: &[(&str, &str)] = &[
             ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
@@ -646,50 +604,220 @@ mod tests {
         ];
         let dst = "Parent \"Two\".md";
 
-        let (_t1, root1) = synth_vault(docs);
-        let cache1 = built(&root1);
-        let forecast = execute(
-            &cache1,
-            None,
-            &params("Parent", dst, false),
-            TODAY,
-            &mut sink(),
-        )
-        .unwrap()
-        .report;
-
-        let (_t2, root2) = synth_vault(docs);
-        let cache2 = built(&root2);
-        let applied = execute(
-            &cache2,
-            None,
-            &params("Parent", dst, true),
-            TODAY,
-            &mut sink(),
-        )
-        .unwrap()
-        .report;
-
-        let f = cascade_of(&forecast);
-        let a = cascade_of(&applied);
-        // Forecast: the canonical double-quoted reconstruction breaks on the inner
-        // double-quote, so it skips.
-        assert_eq!(
-            (f.applied, f.skipped),
-            (0, 1),
-            "forecast is pessimistic: {f:?}"
-        );
-        // Apply: the raw single-quoted splice holds the double-quote, so it lands.
+        let (f, a) = forecast_and_apply(docs, "Parent", dst);
+        assert_cascade_counts_match(&f, &a);
+        // And concretely: the single-quoted value holds the double-quote, so both
+        // sides land the rewrite.
         assert_eq!(
             (a.applied, a.skipped),
             (1, 0),
             "apply lands the single-quoted rewrite: {a:?}"
         );
+    }
+
+    /// The array-ITEM mirror of the scalar quote-style cases. A block sequence's
+    /// per-item quoting is not part of the collection's parsed shape, so only the
+    /// raw frontmatter bytes carry it: a double-quoted item whose rewrite target
+    /// carries a double-quote breaks the block, and the forecast must reach that
+    /// same skip.
+    #[test]
+    fn forecast_matches_apply_on_double_quoted_array_item() {
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            ("b.md", "---\nrelated:\n  - \"[[Parent]]\"\n---\nbody\n"),
+        ];
+        let dst = "Parent \"Two\".md";
+
+        let (f, a) = forecast_and_apply(docs, "Parent", dst);
+        assert_cascade_counts_match(&f, &a);
+        assert_eq!(
+            (a.applied, a.skipped),
+            (0, 1),
+            "the double-quoted list item cannot hold the inner quote: {a:?}"
+        );
+    }
+
+    /// Frontmatter KEY ORDER is destroyed by parsing (the frontmatter value is a
+    /// sorted map), so only the raw bytes say which occurrence of a repeated
+    /// wikilink comes first — and the rewrite replaces the first occurrence. With
+    /// two keys holding the same link in different quote styles and disk order the
+    /// reverse of alphabetical, forecast and apply classify the same occurrence.
+    #[test]
+    fn forecast_matches_apply_when_disk_key_order_reverses_alphabetical() {
+        // Disk order is `up` then `about`; alphabetical order is the reverse. The
+        // apostrophe destination is safe under `about`'s double quotes and unsafe
+        // under `up`'s single quotes, so the two orders classify differently.
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            (
+                "b.md",
+                "---\nup: '[[Parent]]'\nabout: \"[[Parent]]\"\n---\nbody\n",
+            ),
+        ];
+        let dst = "Parent's.md";
+
+        let (f, a) = forecast_and_apply(docs, "Parent", dst);
+        assert_cascade_counts_match(&f, &a);
+        assert_eq!(
+            (a.applied, a.skipped),
+            (0, 2),
+            "the first occurrence on disk is the single-quoted `up` value: {a:?}"
+        );
+    }
+
+    // ── Multi-occurrence backlinkers: the forecast is stateful per file ──
+    //
+    // Apply re-reads a backlinker before every link, so a rewrite of occurrence 1
+    // is visible when occurrence 2 is classified — and since the classifier picks
+    // the FIRST matching raw, occurrence 2 is then what gets classified. Every
+    // case below puts a SAFE occurrence ahead of an UNSAFE one in the same file,
+    // the ordering under which a stateless forecast re-picks the safe first site
+    // for every link and over-counts `applied`.
+
+    /// Two frontmatter keys, safe occurrence first (alphabetical order, so the
+    /// parsed and on-disk orders agree — this isolates statefulness from key
+    /// order). `about` is double-quoted and holds the apostrophe; `up` is
+    /// single-quoted and cannot.
+    #[test]
+    fn forecast_matches_apply_on_two_keys_safe_occurrence_first() {
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            (
+                "b.md",
+                "---\nabout: \"[[Parent]]\"\nup: '[[Parent]]'\n---\nbody\n",
+            ),
+        ];
+
+        let (f, a) = forecast_and_apply(docs, "Parent", "Parent's.md");
+        assert_cascade_counts_match(&f, &a);
+        assert_eq!(
+            (a.applied, a.skipped),
+            (1, 1),
+            "the double-quoted occurrence rewrites, the single-quoted one skips: {a:?}"
+        );
+    }
+
+    /// Three keys, safe / safe / unsafe: two rewrites must land before the third
+    /// classification reaches the single-quoted occupant.
+    #[test]
+    fn forecast_matches_apply_on_three_keys_safe_safe_unsafe() {
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            (
+                "b.md",
+                "---\na: \"[[Parent]]\"\nb: \"[[Parent]]\"\nc: '[[Parent]]'\n---\nbody\n",
+            ),
+        ];
+
+        let (f, a) = forecast_and_apply(docs, "Parent", "Parent's.md");
+        assert_cascade_counts_match(&f, &a);
+        assert_eq!(
+            (a.applied, a.skipped),
+            (2, 1),
+            "two double-quoted occurrences rewrite, the single-quoted one skips: {a:?}"
+        );
+    }
+
+    /// A FLOW sequence holding both quote styles, safe item first.
+    #[test]
+    fn forecast_matches_apply_on_flow_seq_safe_item_first() {
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            (
+                "b.md",
+                "---\nrelated: [\"[[Parent]]\", '[[Parent]]']\n---\nbody\n",
+            ),
+        ];
+
+        let (f, a) = forecast_and_apply(docs, "Parent", "Parent's.md");
+        assert_cascade_counts_match(&f, &a);
+        assert_eq!(
+            (a.applied, a.skipped),
+            (1, 1),
+            "the double-quoted item rewrites, the single-quoted one skips: {a:?}"
+        );
+    }
+
+    /// A BLOCK sequence holding both quote styles, safe item first.
+    #[test]
+    fn forecast_matches_apply_on_block_seq_safe_item_first() {
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            (
+                "b.md",
+                "---\nrelated:\n  - \"[[Parent]]\"\n  - '[[Parent]]'\n---\nbody\n",
+            ),
+        ];
+
+        let (f, a) = forecast_and_apply(docs, "Parent", "Parent's.md");
+        assert_cascade_counts_match(&f, &a);
+        assert_eq!(
+            (a.applied, a.skipped),
+            (1, 1),
+            "the double-quoted item rewrites, the single-quoted one skips: {a:?}"
+        );
+    }
+
+    /// A YAML anchor plus its alias: TWO affected links over ONE raw occurrence in
+    /// the bytes (the alias `*ref` carries no `[[…]]` text of its own, but parses
+    /// to the same scalar). The first link rewrites that sole occurrence, so the
+    /// second finds nothing left to match and apply skips it as drifted. The
+    /// forecast reaches the same verdict because the drift is against a buffer it
+    /// already rewrote — a cascade-caused absence, not a stale-index guess.
+    #[test]
+    fn forecast_matches_apply_on_yaml_anchor_and_alias() {
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            (
+                "b.md",
+                "---\nup: &ref \"[[Parent]]\"\nalso: *ref\n---\nbody\n",
+            ),
+        ];
+
+        let (f, a) = forecast_and_apply(docs, "Parent", "Parent's.md");
+        assert_cascade_counts_match(&f, &a);
+        assert_eq!(
+            (a.applied, a.skipped),
+            (1, 1),
+            "one raw occurrence rewrites; the aliased second link drifts: {a:?}"
+        );
+    }
+
+    /// BOUNDARY (NRN-499) — the one shape where byte-exact snapshot content still
+    /// does not buy a matching verdict, pinned in its over-optimistic direction.
+    ///
+    /// `"[[\x50arent]]"` is a YAML escape: it DECODES to `[[Parent]]`, so the index
+    /// records a wikilink whose raw text appears nowhere in the file's bytes. The
+    /// rewrite matches raw text, so apply finds no site and skips as drifted, while
+    /// the forecast's untouched-buffer drift hedge promises the rewrite. Retaining
+    /// the raw frontmatter head cannot close this: the snapshot bytes ARE exact
+    /// here, and the gap is between YAML's decoded value and its source text.
+    ///
+    /// If this ever matches, the decoded-scalar residual is closed and this test
+    /// becomes an equality pin.
+    #[test]
+    fn forecast_diverges_over_optimistic_on_yaml_escaped_scalar() {
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            ("b.md", "---\nup: \"[[\\x50arent]]\"\n---\nbody\n"),
+        ];
+
+        let (f, a) = forecast_and_apply(docs, "Parent", "Renamed.md");
+        assert_eq!(
+            (f.applied, f.skipped),
+            (1, 0),
+            "forecast promises the rewrite: {f:?}"
+        );
+        assert_eq!(
+            (a.applied, a.skipped),
+            (0, 1),
+            "apply finds no literal site and skips as drifted: {a:?}"
+        );
         assert_ne!(
             (f.applied, f.skipped),
             (a.applied, a.skipped),
-            "this pins the KNOWN snapshot-reconstruction divergence; if it now \
-             matches, the cache retains on-disk quoting — update this boundary test"
+            "pins the KNOWN decoded-scalar divergence (NRN-499); if it now matches, \
+             the residual is closed — make this an equality pin"
         );
     }
 
