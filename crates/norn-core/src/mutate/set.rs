@@ -36,36 +36,16 @@ pub fn execute(
     let vault_root = cache.vault_root().to_string();
 
     // ── Target resolution ────────────────────────────────────────────────────
-    // Refusal prose is end-user contract: `doc not found: <target>` for a
-    // miss; the resolver's candidate list for an ambiguous stem.
-    let target_path = match crate::target::resolve_target(&index, &params.target) {
-        crate::target::TargetResolution::Resolved(p) => p,
-        crate::target::TargetResolution::NotFound => {
-            let (code, msg) = crate::target::target_refusal(
-                crate::target::TargetRefusalFamily::NotFound,
-                format!("doc not found: {}", params.target),
-            );
+    // Refusal code and prose are end-user contract, and both come from the
+    // resolver so every verb refuses an unresolvable target identically.
+    let target_path = match crate::target::resolve_target(&index, &params.target)
+        .or_refuse(crate::target::TargetSlot::Target, &params.target)
+    {
+        Ok(path) => path,
+        Err(refusal) => {
             return Ok(refused(
                 params.target.clone(),
-                CodedError::new(code, msg, None),
-            ));
-        }
-        crate::target::TargetResolution::Ambiguous(candidates) => {
-            let (code, msg) = crate::target::target_refusal(
-                crate::target::TargetRefusalFamily::Ambiguous,
-                format!(
-                    "ambiguous document stem: {}; candidates: {}",
-                    params.target,
-                    candidates
-                        .iter()
-                        .map(|path| path.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            );
-            return Ok(refused(
-                params.target.clone(),
-                CodedError::new(code, msg, None),
+                CodedError::new(refusal.code, refusal.message, None),
             ));
         }
     };

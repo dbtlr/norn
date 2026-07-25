@@ -382,7 +382,7 @@ mod tests {
     fn refused_builds_a_coded_refusal_report() {
         let env = ApplyError {
             code: "target-not-found".into(),
-            message: "doc not found".into(),
+            message: "no document matched path or stem: x".into(),
             path: None,
         };
         let report = ApplyReport::refused("/v".into(), false, "delete_document", env);
@@ -396,6 +396,12 @@ mod tests {
         assert_eq!(
             report.operations[0].error.as_ref().unwrap().code,
             "target-not-found"
+        );
+        // The envelope carries the coded error WHOLE — the shared
+        // target-resolution wording rides through untouched, not just its code.
+        assert_eq!(
+            report.operations[0].error.as_ref().unwrap().message,
+            "no document matched path or stem: x"
         );
     }
 

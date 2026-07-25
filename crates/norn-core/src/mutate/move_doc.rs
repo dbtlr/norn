@@ -12,7 +12,7 @@
 use super::{owner_index_options, MutationExecution};
 use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::domain::GraphIndex;
-use crate::target::{resolve_target, target_refusal, TargetRefusalFamily, TargetResolution};
+use crate::target::{resolve_target, TargetRefusal, TargetSlot};
 use camino::Utf8PathBuf;
 use norn_wire::{ApplyError, ApplyOutcome, ApplyReport};
 use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
@@ -140,12 +140,22 @@ fn folder_move_fields(params: &norn_wire::MoveParams) -> Value {
     Value::Object(fields)
 }
 
-/// A coded single-file move preflight refusal — the `MovePreflightError`
-/// codes + Display prose are the wire contract.
+/// A coded single-file move preflight refusal — the code + prose are the wire
+/// contract; `path` names the offending path where the refusal knows one.
 struct MoveRefusal {
     code: &'static str,
     message: String,
     path: Option<String>,
+}
+
+impl From<TargetRefusal> for MoveRefusal {
+    fn from(refusal: TargetRefusal) -> Self {
+        Self {
+            code: refusal.code,
+            message: refusal.message,
+            path: None,
+        }
+    }
 }
 
 /// Resolve the source and run the ordered preflight barriers, returning
@@ -156,34 +166,9 @@ fn preflight_single(
     vault_root: &camino::Utf8Path,
     params: &norn_wire::MoveParams,
 ) -> Result<Utf8PathBuf, MoveRefusal> {
-    let src_rel = match resolve_target(index, &params.from) {
-        TargetResolution::Resolved(path) => path,
-        TargetResolution::NotFound => {
-            let (code, message) = target_refusal(
-                TargetRefusalFamily::NotFound,
-                format!("source does not exist: {}", params.from),
-            );
-            return Err(MoveRefusal {
-                code,
-                message,
-                path: None,
-            });
-        }
-        TargetResolution::Ambiguous(candidates) => {
-            let (code, message) = target_refusal(
-                TargetRefusalFamily::Ambiguous,
-                format!(
-                    "source resolves ambiguously by stem: {} → {candidates:?}",
-                    params.from
-                ),
-            );
-            return Err(MoveRefusal {
-                code,
-                message,
-                path: None,
-            });
-        }
-    };
+    let src_rel = resolve_target(index, &params.from)
+        .or_refuse(TargetSlot::Target, &params.from)
+        .map_err(MoveRefusal::from)?;
     let dst_rel = Utf8PathBuf::from(&params.to);
 
     // Same-path (no-op) BEFORE the existence check so `--force` cannot silence it.

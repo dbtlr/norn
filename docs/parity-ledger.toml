@@ -806,8 +806,8 @@ observed = { "edit-atx-prefixed-heading-anchor-diverge" = { stdout = 1, stderr =
 id = "PD-131"
 surface = "get (stderr annotation prefix — closed note/warning/error vocabulary)"
 cases = ["read-get-ambiguous-json-zoo", "read-get-unknown-col-warning-zoo"]
-old = "an ambiguous stem prints `note: '<stem>' resolved to N docs` and an unresolved `--col` field prints `warn: --col field '<f>' not present ...` — two prefixes outside the closed set"
-new = "both render on the closed `warning:` prefix: the ambiguity is a `warning`-severity typed note and the `--col`/`--sort` annotation speaks the one closed vocabulary; stdout / exit / post-state unchanged, only the stderr prefix diverges"
+old = "an ambiguous stem prints `note: '<stem>' resolved to N docs` — an off-set prefix, and a message that counts the collisions without naming one — and an unresolved `--col` field prints `warn: --col field '<f>' not present ...`, a second prefix outside the closed set"
+new = "both render on the closed `warning:` prefix: the ambiguity is a `warning`-severity typed note and the `--col`/`--sort` annotation speaks the one closed vocabulary. The ambiguity note's TEXT also changes, on the same line: it is now the shared resolver wording `ambiguous document stem: <stem>; candidates: <a>, <b>` (NRN-467, PD-467), naming the colliding paths instead of counting them, so the reader disambiguates without a second query. stdout / exit / post-state unchanged; the stderr prefix and that message text are the whole divergence"
 reason = "decided-better"
 decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
 observed = { "read-get-ambiguous-json-zoo" = { stderr = 1 }, "read-get-unknown-col-warning-zoo" = { stderr = 1 } }
@@ -842,8 +842,8 @@ observed = { "apply-authored-precondition-mismatch-refusal-zoo" = { stdout = 1 }
 id = "PD-133"
 surface = "mcp vault.get (structuredContent.notes — typed severity notes)"
 cases = ["mcp-tools-call-get-missing-zoo"]
-old = "`structuredContent.notes` is an array of prose strings (e.g. `\"error: '<t>' did not resolve to any doc\"`); a client recovers severity only by matching the `error:` prefix"
-new = "`structuredContent.notes` is an array of typed `{severity, code, message}` objects; the `isError: true` bit is unchanged (derived from the `error`-severity note), only the notes payload shape diverges"
+old = "`structuredContent.notes` is an array of prose strings (e.g. `\"error: '<t>' did not resolve to any doc\"`); a client recovers severity only by matching the `error:` prefix, and the message is `get`'s own phrasing for a failed resolution"
+new = "`structuredContent.notes` is an array of typed `{severity, code, message}` objects, and the note's `message` is the shared resolver wording `no document matched path or stem: <t>` (NRN-467, PD-467) rather than a `get`-local phrasing; the `isError: true` bit is unchanged (derived from the `error`-severity note), so the notes payload — its shape and that one message — is the whole divergence"
 reason = "decided-better"
 decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
 observed = { "mcp-tools-call-get-missing-zoo" = { mcp = 1 } }
@@ -893,7 +893,7 @@ id = "PD-135"
 surface = "mutation-report --format json (one serializer policy: full envelope, pretty, struct order, trailing newline)"
 cases = ["mutate-set-push-apply-json-zoo", "mutate-set-refusal-json-zoo", "mutate-new-refusal-json-zoo", "edit-refusal-json-zoo", "mutate-move-refusal-json-zoo"]
 old = "the JSON shape is a per-verb zoo: an applied `set --format json` is compact (single line, no indentation); a `set` refusal is a bare pretty `{code,message}` fragment with no report envelope; `new` and `edit` refuse as bare `error: <message>` prose on stderr even under `--format json`; and a `move` refusal is a bare pretty `{code,message}` fragment — four different refusal shapes across the mutation verbs"
-new = "every mutation verb's `--format json` emits the FULL report envelope on every outcome path, pretty-printed in serde struct-field order with one trailing newline: an applied `set` report is now pretty rather than compact, and every refusal (`set` / `new` / `edit` / `move`) carries the whole report (`outcome: refused` plus the coded error in its failed op / `error` field) instead of a bare fragment or bare prose — one shape a consumer parses on every verb and outcome; exit codes are unchanged (2 on refusal, 0 otherwise)"
+new = "every mutation verb's `--format json` emits the FULL report envelope on every outcome path, pretty-printed in serde struct-field order with one trailing newline: an applied `set` report is now pretty rather than compact, and every refusal (`set` / `new` / `edit` / `move`) carries the whole report (`outcome: refused` plus the coded error in its failed op / `error` field) instead of a bare fragment or bare prose — one shape a consumer parses on every verb and outcome; exit codes are unchanged (2 on refusal, 0 otherwise). Inside that envelope, the three target-resolution refusals here (`set` / `edit` / `move`) also carry the shared resolver wording `no document matched path or stem: <t>` (NRN-467, PD-467) in place of each verb's own phrasing — a second cause on the same differing region, not a separate one"
 reason = "decided-better"
 decision = "docs/decisions/0016-surface-neutral-command-core.md"
 observed = { "mutate-set-push-apply-json-zoo" = { stdout = 1 }, "mutate-set-refusal-json-zoo" = { stdout = 1 }, "mutate-new-refusal-json-zoo" = { stdout = 1, stderr = 1 }, "edit-refusal-json-zoo" = { stdout = 1, stderr = 1 }, "mutate-move-refusal-json-zoo" = { stdout = 1 } }
@@ -977,7 +977,7 @@ id = "PD-139"
 surface = "delete ambiguous-stem refusal (records) — real candidate paths in the message"
 cases = ["mutate-delete-ambiguous-refusal-zoo"]
 old = "an ambiguous `delete <stem>` refuses `target-ambiguous` with `document resolves ambiguously by stem: <stem> → []` — the candidate set is dropped before the message is built, so the message names none of the colliding documents"
-new = "the same refusal renders the REAL sorted candidate paths (`… → [\"archive2/duplicate.md\", \"notes/duplicate.md\"]`), threaded through a structured `TargetResolution::Ambiguous`, so a caller sees exactly which documents collide; code / exit / write-free behavior unchanged"
+new = "the same refusal renders the REAL sorted candidate paths, threaded through a structured `TargetResolution::Ambiguous`, so a caller sees exactly which documents collide. The whole message is also the shared resolver wording every verb now speaks (NRN-467, PD-467) — `ambiguous document stem: duplicate; candidates: archive2/duplicate.md, notes/duplicate.md` — replacing both `delete`'s own `document resolves ambiguously by stem: … → …` phrasing and the Rust `Debug` rendering of the candidate vector, so the list reads as prose rather than as a quoted array literal; code / exit / write-free behavior unchanged"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 observed = { "mutate-delete-ambiguous-refusal-zoo" = { stderr = 1 } }
@@ -1421,3 +1421,48 @@ new = "`format: \"records\"` is the document-record payload's name, matching `no
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 observed = { "mcp-tools-call-get-format-records-zoo" = { mcp = 1 } }
+# NRN-467 (ADR 0018, discovered-inconsistency): one wording for one condition.
+# A target that fails to resolve is a single fact — the resolver tried an exact
+# path, then a case-insensitive stem, and landed on nothing (or on more than one
+# document). The pinned oracle spells that fact differently in every verb that
+# reaches it: `doc not found: <t>` on `set` and `edit`, `source does not exist:
+# <t>` on `move`, `document does not exist: <t>` on `delete`, `'<t>' did not
+# resolve to any doc` on `get`, `rewrite-to target does not exist: <t>` on
+# `delete --rewrite-to`, and `no document matched path or stem: <t>` from the
+# `--links-to` resolver — six spellings, none of which says how the target was
+# looked up. The ambiguous half is the same story in candidate form: `set` /
+# `edit` join the colliding paths into a readable list while `delete` / `move`
+# hand the reader a Rust `Debug` vector, and `get` names no candidate at all,
+# only a count.
+#
+# The rewrite resolves every target through ONE constructor
+# (`TargetResolution::or_refuse`, `crates/norn-core/src/target.rs`) that owns
+# both halves of the refusal — the stable kebab code AND the prose. A miss reads
+# `no document matched path or stem: <t>` on every verb, naming the ladder that
+# was actually walked (path -> stem; aliases do not resolve, NRN-455), so a
+# reader learns why a stem they expected to work did not. An ambiguous stem
+# reads `ambiguous document stem: <t>; candidates: <a>, <b>` everywhere, the
+# candidates joined by the one shared renderer. `delete --rewrite-to` keeps its
+# own codes (it is a second, separately addressable input) and prefixes the
+# shared prose with `--rewrite-to: ` rather than rewording it.
+#
+# Codes and exit codes are untouched on every surface: `target-not-found` /
+# `target-ambiguous` (and the `rewrite-to-` pair), exit 2 for a mutation
+# refusal, exit 1 for `get`'s error-severity note, write-free throughout. Only
+# the message text moves.
+#
+# The four cases here are the ones whose divergence is WHOLLY this wording. The
+# same wording change also lands inside cases already gated for a different
+# reason — the `get` ambiguity note (PD-131), the MCP typed-note payload
+# (PD-133), the JSON refusal envelope (PD-135), and the `delete` ambiguous
+# candidate list (PD-139) — and each of those entries names it as a second
+# cause rather than duplicating a citation here.
+[[entry]]
+id = "PD-467"
+surface = "target-resolution refusal wording (set / edit / get / mcp vault.set — records, json, and mcp frames)"
+cases = ["mutate-set-missing-target-zoo", "edit-missing-target-zoo", "read-get-not-found-json-zoo", "mcp-tools-call-set-confirm-refusal-zoo"]
+old = "each verb spells an unresolvable target its own way: `set` and `edit` refuse `error: doc not found: <t>`, `get` notes `'<t>' did not resolve to any doc`, and MCP `vault.set` carries `doc not found: <t>` inside its refused report — none of them saying what the target was matched against"
+new = "every verb refuses with the one resolver wording, `no document matched path or stem: <t>`, built by the single constructor in `crates/norn-core/src/target.rs` and naming the resolution ladder (exact path, then case-insensitive stem) so a reader can tell a typo from an unresolvable alias; codes (`target-not-found`), exit codes (2 for the mutation refusals, 1 for `get`'s error note), stdout payloads, and write-free behavior are unchanged"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = { "mutate-set-missing-target-zoo" = { stderr = 1 }, "edit-missing-target-zoo" = { stderr = 1 }, "read-get-not-found-json-zoo" = { stderr = 1 }, "mcp-tools-call-set-confirm-refusal-zoo" = { mcp = 1 } }

@@ -63,17 +63,21 @@ pub fn execute(
 
     for raw in &params.targets {
         let resolved = resolve_target(cache, raw)?;
+        // The two resolution-failure messages come from the shared resolver
+        // wording, so a `get` miss reads exactly as a `set` or `delete` miss
+        // does and an ambiguous stem names its colliding paths rather than
+        // just counting them.
         if resolved.is_empty() {
             notes.push(Note::error(
                 "target-not-found",
-                format!("'{raw}' did not resolve to any doc"),
+                crate::target::target_not_found_message(raw),
             ));
             continue;
         }
         if resolved.len() > 1 {
             notes.push(Note::warning(
                 "target-ambiguous",
-                format!("'{raw}' resolved to {} docs", resolved.len()),
+                crate::target::target_ambiguous_message(raw, &resolved),
             ));
         }
         for path in &resolved {
@@ -191,11 +195,17 @@ fn resolve_target(cache: &Cache, raw: &str) -> Result<Vec<Utf8PathBuf>> {
 
     // 2. Stem fallback — one SELECT, case-insensitive stem match.
     let all = cache.documents_matching(&DocumentQuery::default())?;
-    let stem_matches: Vec<Utf8PathBuf> = all
+    let mut stem_matches: Vec<Utf8PathBuf> = all
         .iter()
         .filter(|d| d.stem.eq_ignore_ascii_case(&normalized))
         .map(|d| d.path.clone())
         .collect();
+    // Lexical path order is the ambiguity contract, matching what the
+    // `GraphIndex` resolver hands the mutating verbs. The SELECT orders by the
+    // stored path in SQLite's byte order, which sorts `a-b/x.md` before
+    // `a/x.md`; sorting here keeps one record order and one candidate list
+    // across every verb.
+    stem_matches.sort();
     Ok(stem_matches)
 }
 

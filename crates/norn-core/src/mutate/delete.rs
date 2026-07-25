@@ -10,9 +10,7 @@
 use super::{owner_index_options, MutationExecution};
 use crate::apply::{apply_migration_plan, ApplyContext};
 use crate::domain::GraphIndex;
-use crate::target::{
-    backlinks, resolve_target, target_refusal, TargetRefusalFamily, TargetResolution,
-};
+use crate::target::{backlinks, resolve_target, TargetRefusal, TargetSlot};
 use camino::Utf8PathBuf;
 use norn_wire::{ApplyError, ApplyOutcome, ApplyReport};
 use norn_wire::{MigrationOp, MigrationPlan, MIGRATION_PLAN_SCHEMA_VERSION};
@@ -126,11 +124,19 @@ fn delete_fields(
     Value::Object(fields)
 }
 
-/// A coded delete preflight refusal — the `DeletePreflightError` codes +
-/// Display prose are the wire contract.
+/// A coded delete preflight refusal — the code + prose are the wire contract.
 struct DeleteRefusal {
     code: &'static str,
     message: String,
+}
+
+impl From<TargetRefusal> for DeleteRefusal {
+    fn from(refusal: TargetRefusal) -> Self {
+        Self {
+            code: refusal.code,
+            message: refusal.message,
+        }
+    }
 }
 
 /// Resolve the target + optional redirect and run the ordered barriers,
@@ -139,49 +145,17 @@ fn preflight(
     index: &GraphIndex,
     params: &norn_wire::DeleteParams,
 ) -> Result<(Utf8PathBuf, Option<Utf8PathBuf>), DeleteRefusal> {
-    let doc_rel = match resolve_target(index, &params.target) {
-        TargetResolution::Resolved(path) => path,
-        TargetResolution::NotFound => {
-            let (code, message) = target_refusal(
-                TargetRefusalFamily::NotFound,
-                format!("document does not exist: {}", params.target),
-            );
-            return Err(DeleteRefusal { code, message });
-        }
-        TargetResolution::Ambiguous(candidates) => {
-            let (code, message) = target_refusal(
-                TargetRefusalFamily::Ambiguous,
-                format!(
-                    "document resolves ambiguously by stem: {} → {:?}",
-                    params.target, candidates
-                ),
-            );
-            return Err(DeleteRefusal { code, message });
-        }
-    };
+    let doc_rel = resolve_target(index, &params.target)
+        .or_refuse(TargetSlot::Target, &params.target)
+        .map_err(DeleteRefusal::from)?;
 
     let incoming = backlinks(index, &doc_rel);
 
     let rewrite_to_rel = match &params.rewrite_to {
         Some(alt) => {
-            let alt_rel = match resolve_target(index, alt) {
-                TargetResolution::Resolved(path) => path,
-                TargetResolution::NotFound => {
-                    return Err(DeleteRefusal {
-                        code: "rewrite-to-not-found",
-                        message: format!("rewrite-to target does not exist: {alt}"),
-                    });
-                }
-                TargetResolution::Ambiguous(candidates) => {
-                    return Err(DeleteRefusal {
-                        code: "rewrite-to-ambiguous",
-                        message: format!(
-                            "rewrite-to target resolves ambiguously by stem: {} → {:?}",
-                            alt, candidates
-                        ),
-                    });
-                }
-            };
+            let alt_rel = resolve_target(index, alt)
+                .or_refuse(TargetSlot::RewriteTo, alt)
+                .map_err(DeleteRefusal::from)?;
             if alt_rel == doc_rel {
                 return Err(DeleteRefusal {
                     code: "rewrite-to-self",

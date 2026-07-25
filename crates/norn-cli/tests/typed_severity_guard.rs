@@ -33,27 +33,38 @@
 //!    `#[serde(rename_all = "kebab-case")]` name via `display::serde_label`, not
 //!    `Debug` — neither the positional `format!("{:?}", value)` nor its
 //!    inline-capture sibling `format!("{value:?}")` (both derive the variant
-//!    identifier and only accidentally lowercase). So no PRODUCTION line
-//!    under `src/display/render/` may carry a `:?}` in either form. Test
-//!    assertions legitimately print `Debug` for failure messages (`{err:?}`,
-//!    `{s:?}`, …), so this too only scans each file's non-`#[cfg(test)]`
-//!    body.
+//!    identifier and only accidentally lowercase). The same shape reaches a
+//!    reader from the other direction too — a `norn-core` verb building a
+//!    report message by `Debug`-formatting a value or a path list — and both
+//!    land as operator-facing text, so the scan covers the CLI's renderers
+//!    (`src/display/render/`) AND the two `norn-core` subtrees that construct
+//!    verb messages (`mutate/`, `read/`). No PRODUCTION line in any of the
+//!    three may carry a `:?}` in either form; a candidate list renders through
+//!    `target::join_candidates`. Test assertions legitimately print `Debug`
+//!    for failure messages (`{err:?}`, `{s:?}`, …), so this too only scans each
+//!    file's non-`#[cfg(test)]` body.
 //!
-//!    **Scope decision (NRN-448):** this scans `src/display/render/` only,
-//!    matching the boundary `docs/architecture.md` invariant 2 states
-//!    (`format!("{:?}")` never appears in DISPLAY code). The same `{:?}`
-//!    shape also appears outside display code: `norn-core`'s
-//!    `mutate/delete.rs` and `mutate/move_doc.rs` build an ambiguous-target
-//!    refusal message by `Debug`-formatting the candidate path list
-//!    (`{candidates:?}`). That is a `norn-core` message-construction site,
-//!    not a renderer, so it sits outside this guard's scope; wording it to
-//!    match `mutate/edit.rs` and `mutate/set.rs`'s comma-joined candidate
-//!    list is a separate task, not this invariant's job.
+//!    **This is a partial net, not a whole-tree one.** Three other trees build
+//!    operator-facing message text and are NOT scanned:
+//!    `norn-core/src/edit/` — the `transform`/`ops` module, NOT the scanned
+//!    `norn-core/src/mutate/edit.rs` verb — which still carries `Debug`
+//!    placeholders in op diagnostics; `norn-core/src/planner/intent/` (the
+//!    folder-move and wikilink-rewrite pre-flight refusals); and
+//!    `norn-core/src/standards/apply.rs` (whose minimal-edit refusal renders a
+//!    scalar style through `Debug`). They stay out because widening the scan
+//!    means first fixing the placeholders inside them — tracked separately —
+//!    and because `norn-core`'s storage and apply layers use `Debug` in
+//!    `anyhow` context and internal diagnostics where it is the right
+//!    rendering, so a blanket crate-wide scan would forbid the legitimate uses
+//!    along with the message-construction ones. Naming the gap here is the
+//!    point: a reader must not read this invariant as covering every message a
+//!    verb can emit.
 //!
 //! It lives in `tests/` (outside every scanned `src/` tree) so its own needle
 //! literals are not scanned by invariant 1, and its `{:?}`/`:?}`-free source is
 //! not scanned by invariant 3.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -80,6 +91,130 @@ fn workspace_root() -> PathBuf {
         .nth(2)
         .expect("workspace root is two levels above the crate manifest dir")
         .to_path_buf()
+}
+
+/// Scan one HARDCODED scope directory, failing loudly if it no longer exists.
+///
+/// `scan_rs` returns silently on an unreadable directory, which is right for
+/// the crate walk (a crate without a `src/` is simply skipped) and wrong for a
+/// scope this file names by path: renaming or moving `src/display/render/` or
+/// `norn-core/src/mutate/` would make the invariant pass vacuously, scanning
+/// nothing. The assertion converts that into a failing test naming the stale
+/// path.
+fn scan_scope<F: FnMut(&Path, &str)>(dir: &Path, visit: &mut F) {
+    assert!(
+        dir.is_dir(),
+        "guard scope {dir:?} no longer exists — update the scan"
+    );
+    scan_module_tree(dir, visit);
+}
+
+/// Walk a scope as a RUST MODULE TREE, skipping the files a parent declares
+/// test-only.
+///
+/// A file whose entire contents are test support carries no `#[cfg(test)]` of
+/// its own — the attribute lives at the INCLUDE SITE, as `#[cfg(test)] mod
+/// name;` in the parent's `mod.rs`. `production_source` excises INLINE
+/// `#[cfg(test)]` items and so reads such a file as production from its first
+/// byte to its last, flagging every `Debug` placeholder a test legitimately
+/// prints. Reading the parent's declarations is the only thing that tells the
+/// two apart, so the walk consults them at each directory it descends into.
+///
+/// This is scoped to the production-only invariants (2 and 3), which is where
+/// the distinction means something; the crate-wide sniff walk keeps `scan_rs`,
+/// which scans every file including test code.
+fn scan_module_tree<F: FnMut(&Path, &str)>(dir: &Path, visit: &mut F) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let test_only = test_only_modules(dir);
+    for entry in entries {
+        let path = entry.expect("dir entry").path();
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if test_only.contains(&stem) {
+            continue;
+        }
+        if path.is_dir() {
+            scan_module_tree(&path, visit);
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let src = fs::read_to_string(&path).expect("read source file");
+        visit(&path, &src);
+    }
+}
+
+/// The module names `dir`'s own declaration file marks test-only. A directory
+/// module declares its children in `dir/mod.rs`, or — under the sibling-file
+/// layout — in `dir.rs` next to it; only one of the two is legal, so the first
+/// that reads wins.
+fn test_only_modules(dir: &Path) -> BTreeSet<String> {
+    for candidate in [dir.join("mod.rs"), dir.with_extension("rs")] {
+        if let Ok(text) = fs::read_to_string(&candidate) {
+            return cfg_test_module_names(&text);
+        }
+    }
+    BTreeSet::new()
+}
+
+/// Parse the `#[cfg(test)] mod <name>;` declarations out of a module file.
+///
+/// Both spellings rustc accepts are matched: the attribute on its own line
+/// above the declaration, and both on one line. An INLINE `#[cfg(test)] mod
+/// tests { … }` is deliberately NOT matched — the trailing `;` is the
+/// discriminator, and an inline module's body is `production_source`'s job.
+/// Any visibility (`pub`, `pub(crate)`, `pub(super)`, `pub(in path)`) is
+/// accepted ahead of `mod`, and a `#[cfg(test)]` that gates anything other than
+/// a bare module declaration clears rather than leaks onto the next one.
+fn cfg_test_module_names(source: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut gated = false;
+    for line in source.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        let (gate_here, decl) = match line.strip_prefix("#[cfg(test)]") {
+            Some(rest) => (true, rest.trim()),
+            None => (false, line),
+        };
+        if let Some(name) = out_of_line_mod_name(decl) {
+            if gate_here || gated {
+                names.insert(name);
+            }
+            gated = false;
+            continue;
+        }
+        // A bare attribute line gates the NEXT declaration; anything else
+        // (including `#[cfg(test)] mod tests {`) clears a pending gate.
+        gated = gate_here && decl.is_empty();
+    }
+    names
+}
+
+/// `mod foo;` with any visibility → `foo`. An inline `mod foo { … }` has no
+/// trailing `;` and yields `None`.
+fn out_of_line_mod_name(decl: &str) -> Option<String> {
+    let rest = decl.strip_suffix(';')?.trim();
+    let rest = match rest.strip_prefix("pub") {
+        Some(after_pub) => {
+            let after_pub = after_pub.trim_start();
+            match after_pub.strip_prefix('(') {
+                Some(scoped) => scoped.split_once(')')?.1.trim_start(),
+                None => after_pub,
+            }
+        }
+        None => rest,
+    };
+    let name = rest.strip_prefix("mod ")?.trim();
+    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .then(|| name.to_string())
 }
 
 fn scan_rs<F: FnMut(&Path, &str)>(dir: &Path, visit: &mut F) {
@@ -486,6 +621,45 @@ fn production_source_still_excludes_a_trailing_cfg_test_module() {
     );
 }
 
+/// A file-level test module is invisible to `production_source` — its
+/// `#[cfg(test)]` sits at the include site — so the walk reads the declarations
+/// instead. Both accepted spellings are recognized, with any visibility.
+#[test]
+fn cfg_test_module_names_reads_include_site_declarations() {
+    let src = "pub mod delete;\n\
+               #[cfg(test)]\n\
+               mod new_scope_independence;\n\
+               #[cfg(test)] mod one_liner;\n\
+               #[cfg(test)]\n\
+               pub(crate) mod scoped_equivalence;\n\
+               pub mod set;\n";
+    let names = cfg_test_module_names(src);
+    assert!(names.contains("new_scope_independence"), "{names:?}");
+    assert!(names.contains("one_liner"), "{names:?}");
+    assert!(names.contains("scoped_equivalence"), "{names:?}");
+    assert!(!names.contains("delete"), "{names:?}");
+    assert!(!names.contains("set"), "{names:?}");
+}
+
+/// The gate must not leak. An INLINE `#[cfg(test)] mod tests { .. }` is
+/// `production_source`'s job (no trailing `;`), and a `#[cfg(test)]` spent on
+/// something else must not silently mark the next module test-only — that
+/// would drop a real production file from the scan.
+#[test]
+fn cfg_test_module_names_ignores_inline_modules_and_does_not_leak_the_gate() {
+    let inline = "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\nmod real;\n";
+    let names = cfg_test_module_names(inline);
+    assert!(names.is_empty(), "{names:?}");
+
+    let spent = "#[cfg(test)]\nuse std::fs;\nmod real;\n";
+    let names = cfg_test_module_names(spent);
+    assert!(names.is_empty(), "{names:?}");
+
+    let commented = "// #[cfg(test)]\nmod real;\n";
+    let names = cfg_test_module_names(commented);
+    assert!(names.is_empty(), "{names:?}");
+}
+
 /// Sensitivity check (1/5, NRN-448 review round): a char literal containing
 /// an open brace (`'{'`) inside an early `#[cfg(test)]` item's body must not
 /// desync the depth count that finds the item's own closing `}` — if it did,
@@ -652,20 +826,33 @@ fn no_surface_sniffs_severity_from_message_text() {
 }
 
 #[test]
-fn renderers_label_enums_via_serde_name_not_debug() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/display/render");
+fn no_renderer_or_verb_message_carries_a_debug_placeholder() {
+    let dirs = [
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/display/render"),
+        norn_core_src().join("mutate"),
+        norn_core_src().join("read"),
+    ];
     let mut hits = Vec::new();
-    scan_rs(&dir, &mut |path, text| {
-        if production_source(path, text).contains(":?}") {
-            hits.push(path.display().to_string());
-        }
-    });
+    for dir in &dirs {
+        scan_scope(dir, &mut |path, text| {
+            if production_source(path, text).contains(":?}") {
+                hits.push(path.display().to_string());
+            }
+        });
+    }
     assert!(
         hits.is_empty(),
-        "a renderer must label enum values via display::serde_label (the serde \
-         kebab name), never a `Debug` placeholder — positional `{{:?}}` or \
-         inline-capture `{{ident:?}}` (NRN-407):\n{hits:#?}"
+        "a renderer or verb must label values via display::serde_label (the \
+         serde kebab name) and render lists through a shared joiner, never a \
+         `Debug` placeholder — positional `{{:?}}` or inline-capture \
+         `{{ident:?}}` (NRN-407):\n{hits:#?}"
     );
+}
+
+/// `norn-core`'s source root, reached from this crate's manifest dir. The
+/// message-construction half of invariant 3 scans two of its subtrees.
+fn norn_core_src() -> PathBuf {
+    workspace_root().join("crates/norn-core/src")
 }
 
 #[test]
@@ -683,7 +870,7 @@ fn no_render_or_output_surface_emits_a_raw_stderr_prefix() {
     ];
     let mut hits = Vec::new();
     for dir in &dirs {
-        scan_rs(dir, &mut |path, text| {
+        scan_scope(dir, &mut |path, text| {
             let production = production_source(path, text);
             for body in macro_call_bodies(path, &production) {
                 for needle in RAW_PREFIX_NEEDLES {
