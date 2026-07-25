@@ -59,6 +59,9 @@ impl SpawnEnv {
         let home = root.join("scratch-home");
         let cache = root.join("scratch-cache");
         let config = root.join("scratch-config");
+        // Created, not just named: an XDG consumer may assume its base
+        // directory exists and not create parents, and a write that fails for
+        // that reason reads as the binary's behavior rather than as setup.
         for dir in [&home, &cache, &config] {
             std::fs::create_dir_all(dir)?;
         }

@@ -93,14 +93,32 @@ pub fn short_runtime_dir(prefix: &str) -> std::io::Result<TempDir> {
 pub struct ScratchEnv {
     dir: TempDir,
     home: PathBuf,
+    cache: PathBuf,
+    config: PathBuf,
 }
 
 impl ScratchEnv {
+    /// Every directory handed to a spawned binary EXISTS before it runs.
+    /// Pointing `HOME` / `XDG_CACHE_HOME` / `XDG_CONFIG_HOME` at a path that
+    /// merely lies inside the temp root is not enough: an XDG consumer is
+    /// entitled to assume its base directory is already there and need not
+    /// create parents, so a missing one surfaces as a write failure from the
+    /// binary under test — reading as its behavior rather than as the
+    /// harness's setup.
     pub fn new() -> std::io::Result<ScratchEnv> {
         let dir = short_runtime_dir("norn-fixtures-")?;
         let home = dir.path().join("home");
-        std::fs::create_dir_all(&home)?;
-        Ok(ScratchEnv { dir, home })
+        let cache = dir.path().join("cache");
+        let config = dir.path().join("config");
+        for base in [&home, &cache, &config] {
+            std::fs::create_dir_all(base)?;
+        }
+        Ok(ScratchEnv {
+            dir,
+            home,
+            cache,
+            config,
+        })
     }
 
     /// `program` with this environment applied. `XDG_RUNTIME_DIR` is the
@@ -118,8 +136,8 @@ impl ScratchEnv {
         command.env_remove("LANG");
         command.env_remove("LC_CTYPE");
         command.env("HOME", &self.home);
-        command.env("XDG_CACHE_HOME", self.dir.path().join("cache"));
-        command.env("XDG_CONFIG_HOME", self.dir.path().join("config"));
+        command.env("XDG_CACHE_HOME", &self.cache);
+        command.env("XDG_CONFIG_HOME", &self.config);
         command.env("XDG_RUNTIME_DIR", self.dir.path());
         command.env_remove("NORN_ROOT");
         command.env_remove("NORN_CONFIG_DIR");
@@ -227,5 +245,20 @@ mod tests {
                 .is_some_and(|v| v.as_deref().is_some_and(|h| h.ends_with("home"))),
             "HOME points into the scratch tree"
         );
+        for base in [
+            "HOME",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_RUNTIME_DIR",
+        ] {
+            let path = vars
+                .get(base)
+                .and_then(|v| v.as_deref())
+                .unwrap_or_else(|| panic!("{base} is set for the child"));
+            assert!(
+                std::path::Path::new(path).is_dir(),
+                "{base} must EXIST before a binary runs, not just be a path under the temp root"
+            );
+        }
     }
 }
