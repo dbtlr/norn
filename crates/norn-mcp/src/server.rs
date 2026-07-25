@@ -212,7 +212,7 @@ impl McpServer {
     /// `vault.get` — fetch one or more documents with full connection context.
     #[tool(
         name = "vault.get",
-        description = "Fetch structured documents, or one exact on-disk source document with format=markdown.",
+        description = "Fetch document records (format=records, the default), or one exact on-disk source document with format=markdown.",
         output_schema = output_schema_for::<crate::tools::get::GetOutput>()
     )]
     async fn get(
