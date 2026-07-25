@@ -219,7 +219,13 @@ impl std::fmt::Display for LedgerError {
             LedgerError::OracleVersionMismatch { expected, actual } => write!(
                 f,
                 "oracle --version reported `{actual}`, but the ledger's [meta] oracle_version is `{expected}` — \
-                 refusing to compare against an unpinned oracle"
+                 refusing to compare against an unpinned oracle. Install the pinned build beside \
+                 whatever `norn` is already on this PATH (updating that one moves it further from \
+                 the pin, not closer):\n\
+                 \x20 curl --proto '=https' --tlsv1.2 -LsSf \
+                 https://github.com/dbtlr/norn/releases/download/v{expected}/norn-run-installer.sh \
+                 | NORN_RUN_INSTALL_DIR=/tmp/oracle-{expected} sh\n\
+                 then pass --oracle /tmp/oracle-{expected}/bin/norn"
             ),
         }
     }

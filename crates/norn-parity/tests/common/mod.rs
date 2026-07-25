@@ -89,12 +89,14 @@ pub fn scratch_env() -> Scratch {
 /// driving stubs (`tests/mcp.rs`, `tests/mutation.rs`) gets the same
 /// exec-safety handling.
 ///
-/// The mode is set at open time and the handle is flushed and closed before
-/// this returns: a writable descriptor still open on the image is what makes
-/// `execve` refuse with `ExecutableFileBusy`, and a later `set_permissions`
-/// round-trip would widen that window for nothing. The residual cross-thread
-/// window (another test thread forking while this write is in flight, so its
-/// child inherits the descriptor) is absorbed by `exec`'s retry.
+/// The mode is requested at open time (which applies it only when the file is
+/// CREATED — every caller writes a fresh path under its own temp dir) and the
+/// handle is flushed and closed before this returns: a writable descriptor
+/// still open on the image is what makes `execve` refuse with
+/// `ExecutableFileBusy`, and a later `set_permissions` round-trip would widen
+/// that window for nothing. The residual cross-thread window (another test
+/// thread forking while this write is in flight, so its child inherits the
+/// descriptor) is absorbed by `exec`'s retry.
 pub fn write_stub(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     let mut file = std::fs::OpenOptions::new()

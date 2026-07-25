@@ -234,12 +234,10 @@ const HELP_CASES: &[Case] = &[
         normalize: NO_NORM,
         plan: None,
     },
-    // `edit --help` diverges from the oracle beyond the standard GLOBAL
-    // OPTIONS reshape (PD-102): `--ops-file` is a hidden stdin-redirection
-    // alias, declared `hide = true` on both binaries, but the oracle's help
-    // renderer leaks it into the OPTIONS block anyway. The rewrite's
-    // extractor filters `is_hide_set()` on command-local args (NRN-419), so
-    // `--ops-file` correctly stays out of the rewrite's page. See PD-142.
+    // `edit --help` differs from the oracle across the whole page — the
+    // long-about body, the OPTIONS block (a hidden `--ops-file`, and the
+    // converged mutation-flag help text) and GLOBAL OPTIONS. PD-142 is the
+    // one entry covering this case and describes every one of them.
     Case {
         id: "help-edit",
         argv: &["edit", "--help"],
@@ -253,10 +251,10 @@ const HELP_CASES: &[Case] = &[
         normalize: NO_NORM,
         plan: None,
     },
-    // `get --help` diverges from the oracle beyond the standard GLOBAL
-    // OPTIONS reshape (PD-102): the rewrite's `get` gains a `--no-pager` flag
-    // (NRN-454) the oracle's `get` never had, so the OPTIONS block carries one
-    // extra row. See PD-145.
+    // `get --help` differs from the oracle across the whole page — a
+    // `--no-pager` row the oracle's `get` has no counterpart for, the paging
+    // and projection help text, and GLOBAL OPTIONS. PD-145 is the one entry
+    // covering this case and describes every one of them.
     Case {
         id: "help-get",
         argv: &["get", "--help"],

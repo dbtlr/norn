@@ -120,16 +120,22 @@ impl std::fmt::Display for ExecError {
 
 impl std::error::Error for ExecError {}
 
-/// Retry `attempt` while it fails with `ExecutableFileBusy` (ETXTBSY).
+/// Retry `attempt` while it fails with `ExecutableFileBusy` (ETXTBSY), up to
+/// 25 attempts spaced 20ms apart — a bound of roughly 480ms before the error
+/// is returned to the caller.
 ///
-/// `execve` refuses to run an image that any process can still write to. A
-/// binary this process wrote moments ago satisfies that even after its own
-/// descriptor is closed: another thread forking in the write's window leaves
-/// the child holding an inherited writable descriptor until it execs, and
-/// close-on-exec does not clear it early enough for the kernel's check. The
-/// condition is transient — it lifts as soon as that descriptor closes — so
-/// spawning waits it out instead of failing the run. A spawn that fails
-/// never started a process, so retrying repeats no side effect.
+/// `execve` refuses to run an image that is open for writing anywhere on the
+/// system: it takes a write-deny reference on the inode, which fails while
+/// any file description still holds a write reference to it. A binary this
+/// process wrote moments ago can satisfy that even after its own descriptor
+/// is closed — another thread forking inside the write's window gives the
+/// child a copy of the parent's file descriptor table, and that inherited
+/// description keeps the inode's writer count above zero until the child
+/// execs. Close-on-exec does clear it, but the kernel takes the write-deny
+/// reference for the NEW image before flushing the old table, so the window
+/// is real. It is also transient, lifting as soon as that descriptor closes,
+/// so spawning waits it out rather than failing the run. A spawn that fails
+/// never started a process, so a retry repeats no side effect.
 fn retry_while_busy<T>(mut attempt: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
     const MAX_ATTEMPTS: u32 = 25;
     const BACKOFF: Duration = Duration::from_millis(20);
@@ -400,4 +406,64 @@ pub fn probe_version(binary: &Path, env: &SpawnEnv) -> Result<RawOutput, ExecErr
         stderr: output.stderr,
         exit_code: output.status.code(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn busy() -> std::io::Error {
+        std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy)
+    }
+
+    #[test]
+    fn a_transient_busy_is_waited_out() {
+        let attempts = Cell::new(0);
+        let result = retry_while_busy(|| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() < 3 {
+                Err(busy())
+            } else {
+                Ok("spawned")
+            }
+        });
+        assert_eq!(result.unwrap(), "spawned");
+        assert_eq!(attempts.get(), 3, "retried exactly until it succeeded");
+    }
+
+    #[test]
+    fn a_permanent_busy_gives_up_after_the_attempt_budget() {
+        let attempts = Cell::new(0);
+        let result: std::io::Result<()> = retry_while_busy(|| {
+            attempts.set(attempts.get() + 1);
+            Err(busy())
+        });
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::ExecutableFileBusy,
+            "the last error reaches the caller rather than being swallowed"
+        );
+        assert_eq!(
+            attempts.get(),
+            25,
+            "the budget is 25 attempts, not unbounded"
+        );
+    }
+
+    #[test]
+    fn any_other_error_is_returned_on_the_first_attempt() {
+        let attempts = Cell::new(0);
+        let result: std::io::Result<()> = retry_while_busy(|| {
+            attempts.set(attempts.get() + 1);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such binary",
+            ))
+        });
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(err.to_string(), "no such binary", "propagated verbatim");
+        assert_eq!(attempts.get(), 1, "only ETXTBSY is worth waiting out");
+    }
 }

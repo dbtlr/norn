@@ -62,6 +62,13 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     // frozen — it never grows, and renumbering it would break every external
     // reference to an id.
     let ids: Vec<&str> = ledger.entries.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        ids.len() >= LEGACY_BLOCK.len(),
+        "the frozen block is {} entries and the ledger has {} — an entry was deleted from it \
+         rather than left in place",
+        LEGACY_BLOCK.len(),
+        ids.len()
+    );
     for (offset, id) in ids.iter().take(LEGACY_BLOCK.len()).enumerate() {
         assert_eq!(
             *id, LEGACY_BLOCK[offset],

@@ -26,10 +26,21 @@
 # at rebase — a merge conflict between two branches that both appended is
 # resolved by keeping BOTH blocks. Ids are permanent: they are cited from
 # tests, other entries, the CHANGELOG and PR history, so an id is never reused
-# and never renumbered. `PD-101`..`PD-151` predate this protocol and were
-# allocated as one contiguous run; that block is closed and frozen at the head
-# of the file (`crates/norn-parity/tests/ledger.rs` pins it, and pins the
-# `PD-<digits>[a-z]` shape for every id).
+# and never renumbered.
+#
+# The one case that still needs a word between humans: TWO branches working
+# the SAME task, each adding an entry. They share a number, so agree the
+# suffixes up front (`PD-471`, then `PD-471b`). A collision is caught — a
+# duplicate id is a load error, not a silent shadow — but the cheap fix is
+# agreeing beforehand, because renumbering afterwards means re-grepping the
+# id across `crates/` and `docs/` for every citation of it.
+#
+# `PD-101`..`PD-151` predate this protocol and were allocated as one
+# contiguous run; that block is closed and never grows.
+# `crates/norn-parity/tests/ledger.rs` pins the block's ids and their order
+# (not their content), and pins the `PD-<digits>[a-z]` shape for every id.
+# Both are enforced by `cargo test -p norn-parity --test ledger` — which
+# needs no oracle — rather than by the runner.
 #
 # `observed` is what keeps `old`/`new` honest. A case passes by CITATION, and
 # a citation says nothing about WHAT differs — so without this an entry
@@ -70,10 +81,23 @@
 #   1. write the entry with `observed = {}` (the field is required, and may
 #      be empty until the first run measures it);
 #   2. run the gated comparison — `norn-parity --oracle <pinned> --rewrite
-#      <built>`. A drifting case's extent is printed under "uncovered
-#      divergence extents"; a covered case whose extent disagrees with the
-#      table is printed under "ledger extent gaps", with the `observed` line
-#      to record;
+#      <built>` (`--ledger <path>` runs it against a copy of this file, for
+#      trying a variant without editing the real one). A drifting case's
+#      extent is printed under "uncovered divergence extents"; a covered case
+#      whose extent disagrees with the table is printed under "ledger extent
+#      gaps", with the `observed` line to record.
+#
+#      <pinned> is the [meta] oracle_version build, not whatever `norn` is on
+#      your PATH — the runner refuses to compare against anything else. CI
+#      installs it (`.github/workflows/ci.yml`); locally, install it BESIDE
+#      your own without replacing it:
+#
+#        curl --proto '=https' --tlsv1.2 -LsSf \
+#          https://github.com/dbtlr/norn/releases/download/v<version>/norn-run-installer.sh \
+#          | NORN_RUN_INSTALL_DIR=/tmp/oracle-<version> sh
+#
+#      then `--oracle /tmp/oracle-<version>/bin/norn`. `norn self-update` is
+#      the wrong move here: it moves the installed binary AWAY from the pin;
 #   3. re-read the actual diff for every region before recording the line —
 #      `old`/`new` must describe every CAUSE, since one entry is the only
 #      description that case will ever have. A region count that changed
@@ -1057,6 +1081,7 @@ new = "bare `repair --format json` emits the findings-summary report envelope as
 reason = "decided-better"
 decision = "docs/decisions/0021-verbs-return-one-layer-renders.md"
 observed = { "repair-summary-json-zoo" = { stdout = 1 } }
+
 # `get --help` is the ONE entry covering that whole page, so this describes all
 # six regions it differs in:
 #
