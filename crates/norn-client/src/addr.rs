@@ -333,6 +333,24 @@ mod tests {
     /// A present-but-unreadable config (permissions) and a config path that is a
     /// DIRECTORY are both owner read errors, and both must be distinct from the
     /// no-config identity and from a content hash.
+    /// Are file permission bits actually enforced for this process? A process
+    /// that bypasses DAC — euid 0, or `CAP_DAC_OVERRIDE` — reads a `0o000` file
+    /// anyway, so permission bits are advisory to it and a test encoding
+    /// "`0o000` means unreadable" would invert rather than skip. Probed
+    /// behaviorally, not by euid, so it also covers the capability case and a
+    /// filesystem mounted without permission enforcement.
+    #[cfg(unix)]
+    fn permission_bits_enforced() -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(probe) = tempfile::NamedTempFile::new() else {
+            return true;
+        };
+        if std::fs::set_permissions(probe.path(), std::fs::Permissions::from_mode(0o000)).is_err() {
+            return true;
+        }
+        std::fs::read(probe.path()).is_err()
+    }
+
     #[cfg(unix)]
     #[test]
     fn present_but_unreadable_configs_are_distinct_from_absent() {
@@ -345,21 +363,25 @@ mod tests {
         let absent = config_identity(&tmp.path().join("empty"), None);
         assert_eq!(absent, NO_CONFIG_IDENTITY);
 
-        let config = norn_dir.join("config.yaml");
-        std::fs::write(&config, "validate:\n  rules: []\n").unwrap();
-        let readable = config_identity(&root, None);
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let unreadable = config_identity(&root, None);
-        // Restore before the tempdir cleanup walks it.
-        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(
-            unreadable.starts_with(UNREADABLE_CONFIG_PREFIX),
-            "a chmod-000 config must read as unreadable, got {unreadable:?}"
-        );
-        assert_ne!(unreadable, absent);
-        assert_ne!(unreadable, readable);
+        // The permission half only means anything where the bits bind.
+        if permission_bits_enforced() {
+            let config = norn_dir.join("config.yaml");
+            std::fs::write(&config, "validate:\n  rules: []\n").unwrap();
+            let readable = config_identity(&root, None);
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let unreadable = config_identity(&root, None);
+            // Restore before the tempdir cleanup walks it.
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(
+                unreadable.starts_with(UNREADABLE_CONFIG_PREFIX),
+                "a chmod-000 config must read as unreadable, got {unreadable:?}"
+            );
+            assert_ne!(unreadable, absent);
+            assert_ne!(unreadable, readable);
+        }
 
-        // A directory where the config file belongs.
+        // A directory where the config file belongs — `EISDIR`/`ENOTDIR`, which
+        // no uid or capability bypasses.
         let dir_root = tmp.path().join("asdir");
         std::fs::create_dir_all(dir_root.join(".norn").join("config.yaml")).unwrap();
         let as_dir = config_identity(&dir_root, None);

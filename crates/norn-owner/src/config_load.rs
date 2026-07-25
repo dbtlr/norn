@@ -113,6 +113,24 @@ mod tests {
         (tmp, root)
     }
 
+    /// Are file permission bits actually enforced for this process? A process
+    /// that bypasses DAC — euid 0, or `CAP_DAC_OVERRIDE` — reads a `0o000` file
+    /// anyway, so permission bits are advisory to it and a test encoding
+    /// "`0o000` means unreadable" would invert rather than skip. Probed
+    /// behaviorally, not by euid, so it also covers the capability case and a
+    /// filesystem mounted without permission enforcement.
+    #[cfg(unix)]
+    fn permission_bits_enforced() -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(probe) = tempfile::NamedTempFile::new() else {
+            return true;
+        };
+        if std::fs::set_permissions(probe.path(), std::fs::Permissions::from_mode(0o000)).is_err() {
+            return true;
+        }
+        std::fs::read(probe.path()).is_err()
+    }
+
     #[test]
     fn missing_config_yields_defaults() {
         let (_tmp, root) = root();
@@ -172,6 +190,13 @@ mod tests {
     #[test]
     fn an_unstattable_config_is_an_error_not_defaults() {
         use std::os::unix::fs::PermissionsExt;
+
+        // Permission bits are advisory to a process that bypasses DAC (euid 0,
+        // or `CAP_DAC_OVERRIDE`): it traverses the 0o000 directory and stats the
+        // config anyway, so there is no denial here to assert on.
+        if !permission_bits_enforced() {
+            return;
+        }
 
         let (_tmp, root) = root();
         let norn_dir = root.join(".norn");

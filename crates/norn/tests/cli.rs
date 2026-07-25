@@ -469,6 +469,24 @@ fn norn_summoning(runtime_dir: &Path, cfg_home: &Path) -> Command {
     cmd
 }
 
+/// Are file permission bits actually enforced for this process? A process that
+/// bypasses DAC — euid 0, or `CAP_DAC_OVERRIDE` — reads a `0o000` file anyway,
+/// so permission bits are advisory to it and a test encoding "`0o000` means
+/// unreadable" would invert rather than skip. Probed behaviorally, not by euid,
+/// so it also covers the capability case and a filesystem mounted without
+/// permission enforcement.
+#[cfg(unix)]
+fn permission_bits_enforced() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(probe) = tempfile::NamedTempFile::new() else {
+        return true;
+    };
+    if std::fs::set_permissions(probe.path(), std::fs::Permissions::from_mode(0o000)).is_err() {
+        return true;
+    }
+    std::fs::read(probe.path()).is_err()
+}
+
 /// Every `*.sock` name currently bound under `runtime_dir`'s norn subdir. Called
 /// after each invocation and unioned across a run, this counts the DISTINCT
 /// owners a sequence of commands addressed — robust to an owner reaping (and
@@ -941,25 +959,28 @@ fn a_config_that_appears_after_warm_up_but_cannot_be_read_is_not_served_as_absen
     );
 
     // (1) A chmod-000 config appears. The warm owner runs under defaults; a
-    // cold one would refuse.
+    // cold one would refuse. Only meaningful where the bits bind.
     let config = vault.join(".norn").join("config.yaml");
-    std::fs::write(&config, "validate:\n  rules: []\n").unwrap();
-    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let out = count("chmod-000");
-    let stderr = stderr_of(&out);
-    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "an unreadable config must not be served as absent; stderr was: {stderr:?}"
-    );
-    assert!(
-        stderr.contains("norn: failed to read config "),
-        "expected the read-failure diagnostic, got: {stderr:?}"
-    );
+    if permission_bits_enforced() {
+        std::fs::write(&config, "validate:\n  rules: []\n").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let out = count("chmod-000");
+        let stderr = stderr_of(&out);
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "an unreadable config must not be served as absent; stderr was: {stderr:?}"
+        );
+        assert!(
+            stderr.contains("norn: failed to read config "),
+            "expected the read-failure diagnostic, got: {stderr:?}"
+        );
+        std::fs::remove_file(&config).unwrap();
+    }
 
-    // (2) The config path is a DIRECTORY. `exists()` is true, the read fails.
-    std::fs::remove_file(&config).unwrap();
+    // (2) The config path is a DIRECTORY — `EISDIR`/`ENOTDIR`, which no uid or
+    // capability bypasses. The stat succeeds, the read fails.
     std::fs::create_dir_all(&config).unwrap();
     let out = count("as-directory");
     let stderr = stderr_of(&out);
@@ -1057,6 +1078,12 @@ fn a_registered_override_pointing_at_nothing_is_not_served_as_absent() {
 fn a_config_hidden_by_an_unreadable_parent_dir_is_not_served_as_absent() {
     use std::os::unix::fs::PermissionsExt;
 
+    // The whole premise is a traversal denial, which a DAC-bypassing process
+    // does not experience.
+    if !permission_bits_enforced() {
+        return;
+    }
+
     let guard = tempfile::tempdir().unwrap();
     let vault = guard.path().join("vault");
     std::fs::create_dir_all(&vault).unwrap();
@@ -1132,6 +1159,12 @@ fn a_config_hidden_by_an_unreadable_parent_dir_is_not_served_as_absent() {
 #[test]
 fn an_unreadable_registry_refuses_on_every_addressing_via() {
     use std::os::unix::fs::PermissionsExt;
+
+    // The registry is made unreadable with permission bits, which a
+    // DAC-bypassing process ignores.
+    if !permission_bits_enforced() {
+        return;
+    }
 
     let guard = tempfile::tempdir().unwrap();
     let vault = guard.path().join("vault");
