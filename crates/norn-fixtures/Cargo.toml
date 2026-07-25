@@ -17,6 +17,3 @@ path = "src/main.rs"
 # `testing::ScratchEnv` builds the isolated environment its oracle probe
 # spawns under, so this is a normal dependency, not a dev one.
 tempfile = "3"
-
-[dev-dependencies]
-tempfile = "3"
