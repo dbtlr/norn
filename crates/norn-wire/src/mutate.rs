@@ -64,6 +64,12 @@ pub enum MutationOutcome {
 /// Every slot is additive: a caller that reads only `code` + `message` is
 /// unaffected by a new one.
 ///
+/// **Absent is not empty.** A slot is `None` — omitted from the JSON — when the
+/// refusal has no fact of that kind at all; a slot the code DOES own is always
+/// present, even when the fact is an empty set. That distinction is the point of
+/// the pattern: an empty `allowed` says "nothing satisfies this schema", which a
+/// consumer must be able to read as data rather than sniff out of prose.
+///
 /// `allowed` is the recovery slot for the `value-not-allowed` family; the
 /// message still renders the same facts for a human.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,11 +82,13 @@ pub struct CodedError {
     /// the offending field, so a caller retries from data instead of parsing
     /// the allowed list out of `message`. It is the INTERSECTION of every
     /// co-applying rule's `allowed_values` set — every listed value satisfies
-    /// the whole schema, not just one rule. Empty (omitted) for every other
-    /// code, and for the pathological config whose co-applying rules share no
-    /// value at all.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allowed: Vec<Value>,
+    /// the whole schema, not just one rule.
+    ///
+    /// `None` (omitted) for every code outside that family. The family always
+    /// sets it, so `[]` is a fact in its own right: the co-applying rules share
+    /// no value, and no retry can pass without `--force` or a config fix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed: Option<Vec<Value>>,
 }
 
 impl CodedError {
@@ -90,13 +98,14 @@ impl CodedError {
             code: code.into(),
             message: message.into(),
             path,
-            allowed: Vec::new(),
+            allowed: None,
         }
     }
 
-    /// Attach the [`CodedError::allowed`] recovery slot.
+    /// Attach the [`CodedError::allowed`] recovery slot. An empty `allowed` is
+    /// still attached — the slot's presence is what says the code owns the fact.
     pub fn with_allowed(mut self, allowed: Vec<Value>) -> Self {
-        self.allowed = allowed;
+        self.allowed = Some(allowed);
         self
     }
 }
@@ -608,6 +617,21 @@ mod tests {
         assert_eq!(v["allowed"], json!(["backlog", "done"]));
         let back: CodedError = serde_json::from_value(v).unwrap();
         assert_eq!(back, e);
+    }
+
+    #[test]
+    fn an_unsatisfiable_schema_emits_an_empty_slot_not_an_absent_one() {
+        // The distinction the slot exists for: absent means "this code carries
+        // no allowed-values fact"; `[]` means "the fact is that nothing passes".
+        let e = CodedError::new("value-not-allowed", "…", None).with_allowed(vec![]);
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["allowed"], json!([]));
+        assert!(
+            v.as_object().unwrap().contains_key("allowed"),
+            "an owned-but-empty slot stays present"
+        );
+        let back: CodedError = serde_json::from_value(v).unwrap();
+        assert_eq!(back.allowed, Some(vec![]));
     }
 
     #[test]

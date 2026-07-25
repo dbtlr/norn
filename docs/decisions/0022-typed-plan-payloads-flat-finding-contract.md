@@ -16,11 +16,15 @@ one flat struct:
 
 ```json
 { path, code, severity, message,
-  rule?, field?, target?, candidates?: [path], next_actions?: [string] }
+  rule?, field?, value?, target?, candidates?: [path], next_actions?: [string] }
 ```
 
 No untagged enum, no variant-specific field sets, no internal model embedded in
-output. The pre-serialized-string carriage of findings on the wire
+output. `value` — the offending frontmatter value, for the codes that fault one —
+is part of the closed set rather than a per-variant field: it is the fact that
+tells two findings on the same field apart (which list element failed), so the
+contract carries it as one universally-named optional slot every code either
+populates or omits, exactly as `target` and `candidates` work for link findings. The pre-serialized-string carriage of findings on the wire
 (`ValidateReport.findings: Vec<String>`) is retired in the same stroke: the wire
 carries the typed struct.
 

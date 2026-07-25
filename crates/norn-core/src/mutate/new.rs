@@ -173,9 +173,9 @@ pub fn execute(
                     None,
                 )
             });
-        return Ok(refused_new(
-            refusal_owned(coded.code, coded.message, coded.path).with_allowed(coded.allowed),
-        ));
+        let mut refusal = refusal_owned(coded.code, coded.message, coded.path);
+        refusal.allowed = coded.allowed;
+        return Ok(refused_new(refusal));
     }
 
     let applied = params.confirm;
@@ -884,14 +884,15 @@ struct Refusal {
     code_owned: Option<String>,
     message: String,
     path: Option<String>,
-    allowed: Vec<Value>,
+    allowed: Option<Vec<Value>>,
 }
 
 impl Refusal {
     /// Attach the satisfiable value set the refusal envelope carries as its
-    /// `allowed` recovery slot.
+    /// `allowed` recovery slot. An empty set still attaches — presence is what
+    /// says the refusal owns the fact.
     fn with_allowed(mut self, allowed: Vec<Value>) -> Self {
-        self.allowed = allowed;
+        self.allowed = Some(allowed);
         self
     }
 }
@@ -902,7 +903,7 @@ fn refusal(code: &'static str, message: impl Into<String>, path: Option<String>)
         code_owned: None,
         message: message.into(),
         path,
-        allowed: Vec::new(),
+        allowed: None,
     }
 }
 
@@ -916,7 +917,7 @@ fn refusal_owned(
         code_owned: Some(code.into()),
         message: message.into(),
         path,
-        allowed: Vec::new(),
+        allowed: None,
     }
 }
 
@@ -935,7 +936,10 @@ fn refused_new(r: Refusal) -> MutationExecution<NewReport> {
             body_bytes: 0,
             warnings: Vec::new(),
             predicted_path: None,
-            error: Some(CodedError::new(code, r.message, r.path).with_allowed(r.allowed)),
+            error: Some(CodedError {
+                allowed: r.allowed,
+                ..CodedError::new(code, r.message, r.path)
+            }),
         },
         touched_paths: Vec::new(),
     }

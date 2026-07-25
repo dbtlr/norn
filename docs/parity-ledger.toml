@@ -582,7 +582,13 @@ observed = { "apply-authored-wrong-typed-bool-refusal-zoo" = { stderr = 1 }, "ap
 # model collapses to plain-string `candidates` + a `target`, variant detail whose
 # decision value mattered folded into `message` at construction (e.g. the length
 # bounds `(7 > 5)`) and otherwise dropped, and field order is `path`-first with
-# absent optionals omitted (not serialized as `null`). No compatibility shim in
+# absent optionals omitted (not serialized as `null`). ONE piece of that variant
+# detail is deliberately retained rather than dropped: the offending value, as the
+# closed contract's universal `value` slot (NRN-476) — it is what distinguishes
+# two findings on the same field, and the contract names it once for every code
+# instead of per-variant. `frontmatter-exceeds-max-length` is excluded from it
+# (its value is the whole over-long content; its message already carries both
+# lengths). No compatibility shim in
 # the pre-1.0 break window. Covers the CLI `--format json` and `--format jsonl`
 # single-code shapes and the MCP `vault.validate` structuredContent that follows
 # them. See `crates/norn-wire/src/finding.rs` (the flat `Finding` / `Severity`)
@@ -592,7 +598,7 @@ id = "PD-122"
 surface = "validate --format json / jsonl + vault.validate (per-finding shape)"
 cases = ["validate-code-filter-zoo", "validate-jsonl-code-zoo", "mcp-tools-call-validate-code-zoo"]
 old = "each finding serializes an untagged per-variant body flattened onto `{code, severity, path, message}`: a link finding embeds the whole internal `link` model (raw, kind, spans, source_context, resolved_path, unresolved_reason, status, and `candidates` as path objects); a frontmatter finding emits its variant fields (`rule` even when `null`, `field`, plus `allowed_values` / `actual_value` / `max_length` / `allowed_paths` / … as applicable) — an output shape that is an accident of internal representation"
-new = "each finding serializes the flat closed contract `{ path, code, severity, message, rule?, field?, target?, candidates?, next_actions? }`: `path`-first field order, absent optionals omitted rather than `null`, `candidates` as plain vault-path strings, no internal `link` / diagnostic model and no variant-specific frontmatter fields — the detail that carried fix-vs-skip value folded into `message`, the rest dropped"
+new = "each finding serializes the flat closed contract `{ path, code, severity, message, rule?, field?, value?, target?, candidates?, next_actions? }`: `path`-first field order, absent optionals omitted rather than `null`, `candidates` as plain vault-path strings, no internal `link` / diagnostic model and no variant-specific frontmatter fields — the detail that carried fix-vs-skip value folded into `message`, the rest dropped EXCEPT the offending value, retained as the contract's universal optional `value` slot (populated by `value-not-allowed` / `field-type-invalid` / `frontmatter-forbidden-field`, and for an element-wise `value-not-allowed` carrying the single violating element; `frontmatter-exceeds-max-length` is excluded, its message already naming both lengths)"
 reason = "decided-better"
 decision = "docs/decisions/0022-typed-plan-payloads-flat-finding-contract.md"
 observed = { "validate-code-filter-zoo" = { stdout = 3 }, "validate-jsonl-code-zoo" = { stdout = 1 }, "mcp-tools-call-validate-code-zoo" = { mcp = 1 } }
@@ -1143,7 +1149,7 @@ id = "PD-146"
 surface = "new allowed_values enforcement (schema-violating create refuses at preflight; --force bypasses)"
 cases = ["mutate-new-allowed-values-refusal-zoo"]
 old = "`new` never enforces allowed_values before writing: a `--field status=someday` outside the matching rule's allowed set passes type coercion, the create APPLIES (exit 0, file written), and the violation surfaces only as a non-blocking `value-not-allowed` warning from the post-create validate pass — and only on a confirmed apply, so a forecast reports clean"
-new = "the synthesized frontmatter is validated for allowed_values at forecast/preflight: a value outside a matching rule's allowed set REFUSES (`value-not-allowed`, exit 2, write-free) with the allowed list carried in the refusal message; `--force` bypasses to a `force-bypass` warning and applies. Enforcement is identical on the CLI `norn new` and the MCP `vault.new` (one owner seam)"
+new = "the synthesized frontmatter is validated for allowed_values at forecast/preflight: a value outside the schema's allowed set REFUSES (`value-not-allowed`, exit 2, write-free). The allowed set is the INTERSECTION of every co-applying rule that declares the field (NRN-474), not one rule's list, so rule order carries no weight; it is carried both in the refusal message and in the envelope's structured `allowed` recovery slot (NRN-473). `--force` bypasses to a `force-bypass` warning and applies. Enforcement is identical on the CLI `norn new` and the MCP `vault.new` (one owner seam)"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 observed = { "mutate-new-allowed-values-refusal-zoo" = { stdout = 1, stderr = 1, exit = 1, tree = 1 } }
@@ -1163,7 +1169,7 @@ id = "PD-147"
 surface = "validate (allowed_values on a list_of_strings field — element-wise match)"
 cases = ["validate-list-allowed-values-elementwise"]
 old = "`allowed_values` matches an array-valued field WHOLE against the configured scalar set — `frontmatter_value_matches` has no `(Array, String)` arm, so the match never succeeds and every array value on a constrained field reports `value-not-allowed`, even when every element is in the set"
-new = "`allowed_values` matches an array-valued field ELEMENT-WISE — one finding per violating element, none when every element is allowed (an empty array yields no findings); a scalar field is unaffected, matching whole as before"
+new = "`allowed_values` matches an array-valued field ELEMENT-WISE — one finding per violating element, none when every element is allowed (an empty array yields no findings). Each element finding names the offending element in its message (`… disallowed value: tags (element: bogus)`) and carries it in the `value` slot, so siblings on one field are distinguishable (NRN-476); a scalar field is unaffected, matching whole with its message unchanged"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 observed = { "validate-list-allowed-values-elementwise" = { stdout = 1 } }

@@ -148,7 +148,6 @@ pub(crate) fn check_allowed_values(
                             rule.map(str::to_string),
                             field.clone(),
                             item.clone(),
-                            allowed_values.clone(),
                         ));
                     }
                 }

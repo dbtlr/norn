@@ -82,7 +82,7 @@ These commands never write to the vault. An agent can run them with confidence:
 ### Validation finding (JSONL row)
 
 ```json
-{"code":"value-not-allowed","severity":"warning","path":"tasks/triage.md","rule":"task-status","field":"status","actual_value":"someday","allowed_values":["backlog","in_progress","completed","wont_do"]}
+{"path":"tasks/triage.md","code":"value-not-allowed","severity":"warning","message":"frontmatter field has a disallowed value: status","rule":"task-status","field":"status","value":"someday"}
 ```
 
 ### Migration plan (JSON)

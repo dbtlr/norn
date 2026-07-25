@@ -260,6 +260,17 @@ pub(super) fn is_known_field(cfg: &VaultConfig, doc: &Document, field: &str) -> 
 ///
 /// The one multi-rule resolution `set` and `new` both call, so the two verbs
 /// answer the same way as `validate`, which checks each rule in turn.
+///
+/// Declaration order is preserved and repeats are dropped, so a rule listing a
+/// value twice is rendered and carried once.
+///
+/// Correctness dependency: folding the per-rule checks into a single
+/// intersection is sound and complete only while
+/// [`crate::standards::predicates::frontmatter_value_matches`] is an
+/// equivalence relation (it is: same-typed scalar equality). A future matcher
+/// that is asymmetric or non-transitive — case-insensitive, or coercing across
+/// types — breaks the fold, and enforcement would have to test the value
+/// against each rule's own set instead.
 pub(super) fn allowed_values_in_rules<'a>(
     rules: impl IntoIterator<Item = &'a ValidateRule>,
     field: &str,
@@ -270,7 +281,15 @@ pub(super) fn allowed_values_in_rules<'a>(
             continue;
         };
         resolved = Some(match resolved {
-            None => declared.clone(),
+            None => {
+                let mut seed: Vec<Value> = Vec::with_capacity(declared.len());
+                for value in declared {
+                    if !seed.contains(value) {
+                        seed.push(value.clone());
+                    }
+                }
+                seed
+            }
             Some(narrowed) => narrowed
                 .into_iter()
                 .filter(|value| matches_one_allowed(value, declared))
@@ -422,6 +441,14 @@ mod tests {
             expected,
             "the narrower rule constrains the field whichever order it is declared in"
         );
+    }
+
+    #[test]
+    fn a_repeated_declared_value_resolves_once_in_declaration_order() {
+        let rules = rules("validate:\n  rules:\n    - name: r\n      allowed_values:\n        status: [x, x, y]\n");
+        let resolved = allowed_values_in_rules(rules.iter(), "status").expect("the rule declares");
+        assert_eq!(resolved, vec![json!("x"), json!("y")]);
+        assert_eq!(display_allowed(&resolved), "x, y");
     }
 
     #[test]

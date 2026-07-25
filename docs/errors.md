@@ -108,9 +108,16 @@ A slot is populated by the codes that have that fact and omitted entirely otherw
 so the envelope stays one flat shape. Slots are additive: a client reading only
 `code` and `message` is unaffected when a new one appears.
 
+**Absent is not empty.** A slot is *omitted* when the refusal carries no fact of
+that kind at all; a slot the code *does* own is always present, even when the fact
+is an empty collection. So `"allowed": []` is itself the answer — nothing satisfies
+the schema — and is distinguishable from a code that simply has no allowed-values
+fact. Every future slot follows this rule: absent means "not applicable", empty
+means "applicable, and the set is empty".
+
 | Slot | Populated by | Contents |
 |---|---|---|
-| `allowed` | `value-not-allowed` | The values the schema accepts for the offending field — the intersection of every co-applying rule's `allowed_values` set, so each listed value is a retry that passes. Omitted when the co-applying rules share no value at all (the message renders `<none>`) |
+| `allowed` | `value-not-allowed` | The values the schema accepts for the offending field — the intersection of every co-applying rule's `allowed_values` set, so each listed value is a retry that passes. Always present on this code; `[]` when the co-applying rules share no value at all, so nothing passes without `--force` or a config fix (the message renders `<none>`) |
 
 ```json
 {

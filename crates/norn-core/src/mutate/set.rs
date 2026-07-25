@@ -99,11 +99,11 @@ pub fn execute(
     let synthed = match synth(cfg, &index, &doc, &current_fm, params) {
         Ok(s) => s,
         Err(e) => {
-            return Ok(refused(
-                target_str,
-                CodedError::new(e.code(), e.to_string(), Some(target_path.to_string()))
-                    .with_allowed(e.allowed()),
-            ));
+            let mut error = CodedError::new(e.code(), e.to_string(), Some(target_path.to_string()));
+            if let Some(allowed) = e.allowed() {
+                error = error.with_allowed(allowed);
+            }
+            return Ok(refused(target_str, error));
         }
     };
 
@@ -700,14 +700,15 @@ impl SetError {
         }
     }
 
-    /// The `allowed` recovery slot for the refusal envelope: the satisfiable
-    /// value set for the `value-not-allowed` family, empty for every other
-    /// refusal.
-    fn allowed(&self) -> Vec<Value> {
+    /// The `allowed` recovery slot for the refusal envelope: `Some` (possibly
+    /// empty, when co-applying rules share no value) for the
+    /// `value-not-allowed` family, `None` for every refusal that owns no
+    /// allowed-values fact.
+    fn allowed(&self) -> Option<Vec<Value>> {
         match self {
             SetError::ValueNotAllowed { allowed, .. }
-            | SetError::FieldJsonNotAllowed { allowed, .. } => allowed.clone(),
-            _ => Vec::new(),
+            | SetError::FieldJsonNotAllowed { allowed, .. } => Some(allowed.clone()),
+            _ => None,
         }
     }
 }
@@ -1333,7 +1334,10 @@ mod tests {
         );
         assert_eq!(
             err.allowed,
-            vec![serde_json::json!("backlog"), serde_json::json!("done")],
+            Some(vec![
+                serde_json::json!("backlog"),
+                serde_json::json!("done")
+            ]),
             "the recovery slot carries the same satisfiable set as data"
         );
     }
@@ -1349,7 +1353,7 @@ mod tests {
         assert!(err.message.contains("(allowed: a, b)"), "{}", err.message);
         assert_eq!(
             err.allowed,
-            vec![serde_json::json!("a"), serde_json::json!("b")]
+            Some(vec![serde_json::json!("a"), serde_json::json!("b")])
         );
     }
 
@@ -1368,7 +1372,10 @@ mod tests {
         );
         assert_eq!(
             err.allowed,
-            vec![serde_json::json!("backlog"), serde_json::json!("done")]
+            Some(vec![
+                serde_json::json!("backlog"),
+                serde_json::json!("done")
+            ])
         );
     }
 
@@ -1396,7 +1403,10 @@ mod tests {
         );
         assert_eq!(
             err.allowed,
-            vec![serde_json::json!("backlog"), serde_json::json!("done")],
+            Some(vec![
+                serde_json::json!("backlog"),
+                serde_json::json!("done")
+            ]),
             "`new` carries the same recovery slot as `set`"
         );
         assert!(
