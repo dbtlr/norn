@@ -4,18 +4,28 @@
 //!
 //! # Coupling to the single-writer boundary (load-bearing)
 //!
-//! `max+1` allocation is only correct when it runs inside the same critical
-//! section that serializes every writer to one vault, so two concurrent creates
-//! observe each other's files and get distinct sequential ids. In the pre-owner
-//! world that boundary was a cross-process advisory `flock` (the mutation lock);
-//! under the summoned-owner model (ADR 0013/0017) it is a triad: the owner-
-//! lifetime `flock` (`acquire_owner_lock`, flock-then-bind) guarantees one
-//! owner process per vault, the client's connect-or-summon path leaves no
-//! direct-write route, and the owner's in-process single-writer queue then
-//! serializes writes within that process. Either way the invariant is the same and
-//! it is NOT enforced by this module: the caller MUST hold the writer boundary
-//! across [`resolve_seq_create`] and the subsequent create. Resolving `{{seq}}`
-//! outside that boundary races and can mint duplicate ids.
+//! `max+1` allocation is only correct when it runs inside the critical section
+//! that serializes writers, so two concurrent creates observe each other's files
+//! and get distinct sequential ids. In the pre-owner world that boundary was a
+//! cross-process advisory `flock` (the mutation lock); under the summoned-owner
+//! model (ADR 0013/0017) it is a triad: the owner-lifetime `flock`
+//! (`acquire_owner_lock`, flock-then-bind), the client's connect-or-summon path
+//! leaving no direct-write route, and the owner's in-process single-writer queue
+//! serializing writes within that process.
+//!
+//! **The boundary is per OWNER, not per vault.** An owner is addressed by
+//! (vault root, build fingerprint, config identity), and its lifetime `flock`
+//! sits beside that address — so a build or config-content difference puts two
+//! owners over one vault, each serializing only its own writes. Two such owners
+//! can therefore allocate the SAME `{{seq}}` id concurrently. That collision is
+//! loud, not silent: the second create finds the destination occupied and
+//! refuses `create-destination-exists` (only `--force` overwrites). N owners
+//! over one vault is a transient state — a rebuild window, or the window between
+//! a config edit and the previous owner's idle reap.
+//!
+//! The invariant is NOT enforced by this module: the caller MUST hold the writer
+//! boundary across [`resolve_seq_create`] and the subsequent create. Resolving
+//! `{{seq}}` outside that boundary races and can mint duplicate ids.
 
 use camino::{Utf8Path, Utf8PathBuf};
 

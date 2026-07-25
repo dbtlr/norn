@@ -14,7 +14,7 @@ mod common;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use norn_client::{open, socket_path, ClientError, SummonConfig};
+use norn_client::{config_identity, open, socket_path, ClientError, SummonConfig};
 use norn_wire::ServingState;
 
 fn base_config(vault_root: PathBuf, runtime_dir: PathBuf, ttl: Duration) -> SummonConfig {
@@ -206,7 +206,12 @@ fn invalid_config_surfaces_error_eager_reaps_then_a_fix_is_picked_up() {
         runtime_dir.clone(),
         Duration::from_secs(60),
     );
-    let socket = socket_path(&vault_root, &runtime_dir, &config.fingerprint);
+    let socket = socket_path(
+        &vault_root,
+        &runtime_dir,
+        &config.fingerprint,
+        &config_identity(&vault_root, config.config_override.as_deref()),
+    );
 
     // The config error surfaces at whichever ping observes the failed warm-up
     // first — the `open` handshake or a `wait_until_ready` poll. Both must be a

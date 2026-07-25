@@ -7,19 +7,23 @@
 //!
 //! Resolution (root resolution lives in `norn-config`, not here): an
 //! explicit `[vaults.<name>].config` override path wins; otherwise
-//! `<vault_root>/.norn/config.yaml` is used if it exists; otherwise the vault
-//! runs under [`CacheOpenConfig::default`] (the fixed `aliases` frontmatter
-//! convention, no ignores, empty index set).
+//! `<vault_root>/.norn/config.yaml`, when a stat of it succeeds; otherwise —
+//! and ONLY when that stat says the file is not there — the vault runs under
+//! [`CacheOpenConfig::default`] (the fixed `aliases` frontmatter convention, no
+//! ignores, empty index set). See [`config_path`] for why "not there" has to
+//! mean `NotFound` specifically. A dangling symlink at that path stats as
+//! `NotFound` (the stat follows the link), so a broken link runs under defaults.
 //!
 //! Both errors below feed the NRN-360 user-error surface (a warm-up config
 //! failure becomes an `OwnerFrame::Rejected`, not exit-to-heal), but they carry
 //! two distinct message shapes: a present-but-unparseable file yields the
 //! `invalid config <path>: <detail>` message (from
 //! [`norn_core::standards::parse_config`]), while a present-but-unreadable file
-//! (a permissions/IO access error) yields `failed to read config <path>: <io>`.
-//! Both render the same way (`eprintln!("{error:#}")`, exit 1); the parse-error
-//! branch carries the stable `invalid config <path>: ` prefix as a contract,
-//! and the access-error branch is a rarer edge with its own wording.
+//! (a permissions/IO access error, from the stat or the read) yields
+//! `failed to read config <path>: <io>`. Both render the same way
+//! (`eprintln!("{error:#}")`, exit 1); the parse-error branch carries the stable
+//! `invalid config <path>: ` prefix as a contract, and the access-error branch
+//! is a rarer edge with its own wording.
 
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -28,13 +32,29 @@ use norn_core::standards::VaultConfig;
 
 /// Resolve the config file path an owner should load: an explicit
 /// `[vaults.<name>].config` override wins; else `<vault_root>/.norn/config.yaml`
-/// if it exists; else `None` (the vault runs under defaults).
-fn config_path(vault_root: &Utf8Path, config_override: Option<&Utf8Path>) -> Option<Utf8PathBuf> {
+/// when it is there; else `None` (the vault runs under defaults).
+///
+/// Only `NotFound` means defaults. `Path::exists` cannot express that — it
+/// answers `false` for ANY stat failure, including an `EACCES` on the PARENT
+/// directory (`chmod 000 .norn/`), so a config the owner is merely forbidden to
+/// see would be served as a config that does not exist: the vault would run
+/// unvalidated at exit 0 instead of refusing. Every non-`NotFound` stat error is
+/// therefore a hard error carrying the same `failed to read config <path>`
+/// prefix the read path uses, so the operator gets one message shape for "this
+/// config is here but I cannot use it" regardless of which syscall found out.
+fn config_path(
+    vault_root: &Utf8Path,
+    config_override: Option<&Utf8Path>,
+) -> anyhow::Result<Option<Utf8PathBuf>> {
     match config_override {
-        Some(p) => Some(p.to_path_buf()),
+        Some(p) => Ok(Some(p.to_path_buf())),
         None => {
             let default = vault_root.join(".norn/config.yaml");
-            default.exists().then_some(default)
+            match std::fs::metadata(default.as_std_path()) {
+                Ok(_) => Ok(Some(default)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(anyhow::anyhow!("failed to read config {default}: {e}")),
+            }
         }
     }
 }
@@ -48,7 +68,7 @@ pub fn load_vault_config(
     vault_root: &Utf8Path,
     config_override: Option<&Utf8Path>,
 ) -> anyhow::Result<Option<VaultConfig>> {
-    let Some(path) = config_path(vault_root, config_override) else {
+    let Some(path) = config_path(vault_root, config_override)? else {
         return Ok(None);
     };
     let text = std::fs::read_to_string(path.as_std_path())
@@ -63,21 +83,15 @@ pub fn load_vault_config(
 /// `config_override` is the registry-resolved `[vaults.<name>].config` path (an
 /// absolute or already-grounded path); `None` falls back to the default
 /// `<vault_root>/.norn/config.yaml`. A missing file yields defaults; a present
-/// but unparseable file is a hard error (the vault cannot be served under an
-/// unknown config).
+/// but unparseable — or unstattable, or unreadable — file is a hard error (the
+/// vault cannot be served under an unknown config). Resolution goes through
+/// [`config_path`], the one place that decides "missing" vs "present but
+/// unusable".
 pub fn load_cache_config(
     vault_root: &Utf8Path,
     config_override: Option<&Utf8Path>,
 ) -> anyhow::Result<CacheOpenConfig> {
-    let path: Option<Utf8PathBuf> = match config_override {
-        Some(p) => Some(p.to_path_buf()),
-        None => {
-            let default = vault_root.join(".norn/config.yaml");
-            default.exists().then_some(default)
-        }
-    };
-
-    let Some(path) = path else {
+    let Some(path) = config_path(vault_root, config_override)? else {
         return Ok(CacheOpenConfig::default());
     };
 
@@ -97,6 +111,24 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         (tmp, root)
+    }
+
+    /// Are file permission bits actually enforced for this process? A process
+    /// that bypasses DAC — euid 0, or `CAP_DAC_OVERRIDE` — reads a `0o000` file
+    /// anyway, so permission bits are advisory to it and a test encoding
+    /// "`0o000` means unreadable" would invert rather than skip. Probed
+    /// behaviorally, not by euid, so it also covers the capability case and a
+    /// filesystem mounted without permission enforcement.
+    #[cfg(unix)]
+    fn permission_bits_enforced() -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(probe) = tempfile::NamedTempFile::new() else {
+            return true;
+        };
+        if std::fs::set_permissions(probe.path(), std::fs::Permissions::from_mode(0o000)).is_err() {
+            return true;
+        }
+        std::fs::read(probe.path()).is_err()
     }
 
     #[test]
@@ -148,6 +180,57 @@ mod tests {
         .unwrap();
         let cfg = load_cache_config(&root, Some(&other)).unwrap();
         assert_eq!(cfg.files_ignore, vec!["Override/**".to_string()]);
+    }
+
+    /// A config the owner cannot STAT — here because its parent directory denies
+    /// access — is present-but-unusable, not missing. Serving it as missing would
+    /// run the vault unvalidated at exit 0, which is exactly the failure the
+    /// config-keyed socket exists to prevent.
+    #[cfg(unix)]
+    #[test]
+    fn an_unstattable_config_is_an_error_not_defaults() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Permission bits are advisory to a process that bypasses DAC (euid 0,
+        // or `CAP_DAC_OVERRIDE`): it traverses the 0o000 directory and stats the
+        // config anyway, so there is no denial here to assert on.
+        if !permission_bits_enforced() {
+            return;
+        }
+
+        let (_tmp, root) = root();
+        let norn_dir = root.join(".norn");
+        std::fs::create_dir_all(norn_dir.as_std_path()).unwrap();
+        std::fs::write(
+            norn_dir.join("config.yaml").as_std_path(),
+            "validate:\n  rules: []\n",
+        )
+        .unwrap();
+        // The file itself stays 0644; only the directory denies traversal.
+        std::fs::set_permissions(
+            norn_dir.as_std_path(),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+
+        let cache = load_cache_config(&root, None);
+        let vault = load_vault_config(&root, None);
+        // Restore before the assertions so a failure still cleans up.
+        std::fs::set_permissions(
+            norn_dir.as_std_path(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        let err = cache.expect_err("an unstattable config must not resolve to defaults");
+        assert!(
+            err.to_string().starts_with("failed to read config "),
+            "expected the read-failure surface, got {err:?}"
+        );
+        assert!(
+            vault.is_err(),
+            "the full-config load must refuse it identically"
+        );
     }
 
     #[test]

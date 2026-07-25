@@ -98,11 +98,12 @@ struct OwnerState {
     /// (exit-to-heal): a bad config is a user mistake, not a crashed owner, so
     /// the owner serves the error and exits CLEANLY (exit 0) instead of
     /// `go_fatal`. It also EAGER-REAPS: once a client has the rejection in hand,
-    /// `handle_connection` latches shutdown (the socket key is config-blind, so
-    /// a lingering bad-config owner would shadow every retry within the idle
-    /// TTL). A resummon therefore spawns a FRESH owner that re-reads the config
-    /// from disk — a fix is picked up immediately, never a crash loop and never
-    /// a stale error.
+    /// `handle_connection` latches shutdown, so a lingering error-holding owner
+    /// cannot shadow retries for the idle TTL. The reap carries the VAULT-ROOT
+    /// case (NRN-414): the socket key covers the root and the config's content,
+    /// so a corrected config already addresses a different owner, but a restored
+    /// root addresses this same one — without the reap it would keep serving
+    /// `vault root does not exist` after the root came back.
     warmup_error: Mutex<Option<String>>,
     last_activity: Mutex<Instant>,
     in_flight: AtomicUsize,
@@ -574,13 +575,15 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
         wr.flush().await?;
 
         if warmup_reject {
-            // The client has now received the config error (the write+flush
+            // The client has now received the warm-up error (the write+flush
             // above completed before this point), so eager-reap: latch a CLEAN
             // shutdown (never go_fatal) so a resummon spawns a FRESH owner that
-            // re-reads `.norn/config.yaml` — a fix is picked up immediately
-            // instead of after the full idle TTL against this stale-error owner.
-            // The socket key is config-blind, so a lingering bad-config owner
-            // would otherwise shadow every retry within the TTL window.
+            // re-reads its inputs, instead of burning the full idle TTL against
+            // this stale-error owner. This carries the VAULT-ROOT case (NRN-414):
+            // the socket key covers the root path and the config's content, so a
+            // corrected config already addresses a different owner, but a
+            // restored root addresses this same one — and without the reap it
+            // would keep answering `vault root does not exist` for the TTL.
             state.request_shutdown();
             break;
         }
