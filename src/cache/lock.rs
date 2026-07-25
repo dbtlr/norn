@@ -96,6 +96,25 @@ pub(crate) fn acquire_flock(
     lock_path: &Utf8Path,
     timeout: std::time::Duration,
 ) -> Result<std::fs::File, std::io::Error> {
+    acquire_flock_reported(
+        lock_path,
+        timeout,
+        crate::progress::ProgressReporter::none(),
+    )
+}
+
+/// [`acquire_flock`] plus a work-evidenced progress hook (NRN-465). Each bounded
+/// contended retry is progress toward this acquire's OWN timeout, so ticking one
+/// per retry keeps the warm daemon's writer-progress sequence advancing while a
+/// refresh/rebuild waits out a cross-process cache lock held by another writer —
+/// instead of the sequence freezing and tripping the client's false stall. The
+/// tick fires only on the contended (`WouldBlock`) branch: a clean or errored
+/// acquire returns immediately and needs no evidence.
+pub(crate) fn acquire_flock_reported(
+    lock_path: &Utf8Path,
+    timeout: std::time::Duration,
+    progress: crate::progress::ProgressReporter,
+) -> Result<std::fs::File, std::io::Error> {
     let file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -121,6 +140,9 @@ pub(crate) fn acquire_flock(
                         "lock timeout",
                     ));
                 }
+                // Evidence of a real bounded retry (not a timer): the writer is
+                // alive and waiting on a contended cross-process lock.
+                progress.tick();
                 std::thread::sleep(interval);
             }
             // Any other failure is a real fault (e.g. a filesystem/locking
@@ -143,8 +165,25 @@ impl WriteLock {
     /// polling until the deadline. Returns `CacheError::LockTimeout` if
     /// another holder is still holding the lock at deadline.
     pub fn acquire(cache_dir: &Utf8Path, timeout: std::time::Duration) -> Result<Self, CacheError> {
+        Self::acquire_reported(
+            cache_dir,
+            timeout,
+            crate::progress::ProgressReporter::none(),
+        )
+    }
+
+    /// [`acquire`](Self::acquire) plus a work-evidenced progress hook (NRN-465):
+    /// the warm refresh/rebuild path passes a live reporter so a contended cache
+    /// write lock ticks the writer-progress sequence once per bounded retry rather
+    /// than freezing it. Direct paths pass
+    /// [`ProgressReporter::none`](crate::progress::ProgressReporter::none).
+    pub(crate) fn acquire_reported(
+        cache_dir: &Utf8Path,
+        timeout: std::time::Duration,
+        progress: crate::progress::ProgressReporter,
+    ) -> Result<Self, CacheError> {
         let lock_path = cache_dir.join(".lock");
-        acquire_flock(&lock_path, timeout)
+        acquire_flock_reported(&lock_path, timeout, progress)
             .map(|f| WriteLock { _file: f })
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::WouldBlock {

@@ -8,7 +8,9 @@ use crate::core::{Document, GraphIndex, Link, VaultFile};
 use camino::{Utf8Path, Utf8PathBuf};
 use rusqlite::{params, Transaction, TransactionBehavior};
 
-use crate::cache::change_detection::{detect, ChangeDetectOptions, FileChange};
+#[cfg(test)]
+use crate::cache::change_detection::detect;
+use crate::cache::change_detection::{ChangeDetectOptions, FileChange};
 use crate::cache::error::CacheError;
 
 #[cfg(test)]
@@ -175,9 +177,25 @@ impl crate::cache::Cache {
     /// Full rebuild: walk the vault, parse every document, replace all rows.
     /// Used by `norn cache rebuild` and the implicit rebuild after a self-heal trigger.
     pub fn rebuild(&mut self, vault_root: &Utf8Path) -> Result<IndexReport, CacheError> {
-        let _lock = crate::cache::lock::WriteLock::acquire(
+        self.rebuild_reported(vault_root, crate::progress::ProgressReporter::none())
+    }
+
+    /// [`rebuild`](Self::rebuild) plus a work-evidenced progress hook (NRN-465).
+    /// This is the whole-vault build the cold FIRST-touch path runs (via
+    /// [`index_incremental`](Self::index_incremental_reported) deferring here when
+    /// the cache has never been built), so it is the multi-second liveness-op cost
+    /// that must tick the writer-progress sequence. The reporter reaches the
+    /// contended write-lock retry, the parse, and the row-insert loops. Direct
+    /// paths pass [`ProgressReporter::none`](crate::progress::ProgressReporter::none).
+    pub(crate) fn rebuild_reported(
+        &mut self,
+        vault_root: &Utf8Path,
+        progress: crate::progress::ProgressReporter,
+    ) -> Result<IndexReport, CacheError> {
+        let _lock = crate::cache::lock::WriteLock::acquire_reported(
             &self.lock_dir,
             crate::cache::lock::write_lock_timeout(),
+            progress,
         )?;
         let start = std::time::Instant::now();
         let options = crate::graph::IndexOptions {
@@ -185,17 +203,20 @@ impl crate::cache::Cache {
             alias_field: self.alias_field.clone(),
             ..Default::default()
         };
-        let index = crate::graph::build_index_with_options(vault_root, &options)?;
+        let index = crate::graph::build_index_with_progress(vault_root, &options, progress)?;
 
         let tx = self.conn.transaction()?;
         clear_all_rows(&tx)?;
         let mut report = IndexReport::default();
+        let mut batch = crate::progress::BatchProgress::new(progress);
         for doc in &index.documents {
             insert_document(&tx, vault_root, doc, &mut report, &self.index_set)?;
+            batch.record();
         }
         for file in &index.files {
             insert_file(&tx, vault_root, file)?;
             report.file_count += 1;
+            batch.record();
         }
         update_meta_graph_fingerprint(&tx, &graph_fingerprint(&index))?;
         update_meta_rebuild_ts(&tx)?;
@@ -235,15 +256,39 @@ impl crate::cache::Cache {
         vault_root: &Utf8Path,
         options: &ChangeDetectOptions,
     ) -> Result<IndexReport, CacheError> {
+        self.index_incremental_reported(
+            vault_root,
+            options,
+            crate::progress::ProgressReporter::none(),
+        )
+    }
+
+    /// [`index_incremental`](Self::index_incremental) plus a work-evidenced
+    /// progress hook (NRN-465). This is the freshness-refresh body the warm
+    /// writer-queue liveness op runs; on a changed vault its whole-vault reparse is
+    /// the multi-second cost that froze the writer-progress sequence and tripped
+    /// the client's false stall. The reporter reaches the change-detection sweep,
+    /// the contended write-lock retry, the reparse, and the row / link loops. It
+    /// also covers the cold FIRST-touch full build by threading through the
+    /// `rebuild` deferral below. Direct paths pass
+    /// [`ProgressReporter::none`](crate::progress::ProgressReporter::none).
+    pub(crate) fn index_incremental_reported(
+        &mut self,
+        vault_root: &Utf8Path,
+        options: &ChangeDetectOptions,
+        progress: crate::progress::ProgressReporter,
+    ) -> Result<IndexReport, CacheError> {
         if !self.has_been_built()? {
-            return self.rebuild(vault_root);
+            return self.rebuild_reported(vault_root, progress);
         }
-        let _lock = crate::cache::lock::WriteLock::acquire(
+        let _lock = crate::cache::lock::WriteLock::acquire_reported(
             &self.lock_dir,
             crate::cache::lock::write_lock_timeout(),
+            progress,
         )?;
         let start = std::time::Instant::now();
-        let mut changes = detect(vault_root, self, options)?;
+        let mut changes =
+            crate::cache::change_detection::detect_reported(vault_root, self, options, progress)?;
         if changes.is_empty() {
             return Ok(IndexReport::default());
         }
@@ -260,7 +305,8 @@ impl crate::cache::Cache {
             alias_field: self.alias_field.clone(),
             ..Default::default()
         };
-        let mut fresh_index = crate::graph::build_index_with_options(vault_root, &options)?;
+        let mut fresh_index =
+            crate::graph::build_index_with_progress(vault_root, &options, progress)?;
         #[cfg(test)]
         run_after_increment_parse_hook();
 
@@ -365,8 +411,10 @@ impl crate::cache::Cache {
         run_after_increment_publication_authority_hook();
         let authoritative_metadata = source_authority.verify(vault_root)?;
         let mut report = IndexReport::default();
+        let mut batch = crate::progress::BatchProgress::new(progress);
 
         for change in &changes {
+            batch.record();
             let path = change_path(change);
             tx.execute("DELETE FROM files WHERE path = ?", [path.as_str()])?;
             if let Some(&file_i) = fresh_files.get(path) {
@@ -402,7 +450,7 @@ impl crate::cache::Cache {
         // to a full rebuild — the per-doc invalidation above updates doc rows;
         // link resolution is not decomposable per-doc (NRN-126). This supersedes
         // any incoming-link fixup, so no `unresolve_incoming` is needed above.
-        rerun_link_resolution(&tx, &fresh_index)?;
+        rerun_link_resolution(&tx, &fresh_index, progress)?;
         update_meta_graph_fingerprint(&tx, &graph_fingerprint(&fresh_index))?;
 
         tx.commit()?;
@@ -1664,12 +1712,20 @@ fn stage_link(tx: &Transaction, job_id: i64, sequence: i64, link: &Link) -> Resu
 /// incremental refresh identical to a rebuild by construction. The parse is
 /// already paid for above; only the links table is fully rewritten (doc/field/
 /// heading rows for unchanged docs are left untouched).
-fn rerun_link_resolution(tx: &Transaction, fresh_index: &GraphIndex) -> Result<(), CacheError> {
+fn rerun_link_resolution(
+    tx: &Transaction,
+    fresh_index: &GraphIndex,
+    progress: crate::progress::ProgressReporter,
+) -> Result<(), CacheError> {
     tx.execute("DELETE FROM links", [])?;
+    // The global link rewrite touches every document's links — a whole-vault loop
+    // on a large vault, so it ticks per batch of documents (NRN-465).
+    let mut batch = crate::progress::BatchProgress::new(progress);
     for doc in &fresh_index.documents {
         for link in &doc.links {
             insert_link(tx, link)?;
         }
+        batch.record();
     }
     Ok(())
 }

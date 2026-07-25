@@ -53,6 +53,7 @@ mod mutation_lock;
 mod new;
 mod output;
 pub mod planner;
+mod progress;
 pub mod prompt;
 mod query;
 mod repair;
