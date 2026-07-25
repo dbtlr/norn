@@ -19,7 +19,7 @@
 //! owners over one vault, each serializing only its own writes. Two such owners
 //! can therefore allocate the SAME `{{seq}}` id concurrently. That collision is
 //! loud, not silent: the second create finds the destination occupied and
-//! refuses `destination-already-exists` (only `--force` overwrites). N owners
+//! refuses `create-destination-exists` (only `--force` overwrites). N owners
 //! over one vault is a transient state — a rebuild window, or the window between
 //! a config edit and the previous owner's idle reap.
 //!
