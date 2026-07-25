@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS documents (
     stem             TEXT NOT NULL,
     hash             TEXT NOT NULL,
     frontmatter_json TEXT,
+    head_text        TEXT NOT NULL DEFAULT '',
     body_text        TEXT NOT NULL,
     mtime_ns         INTEGER NOT NULL,
     size_bytes       INTEGER NOT NULL

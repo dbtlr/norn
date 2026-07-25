@@ -1304,8 +1304,8 @@ pub(crate) fn rewrite_one_backlink(
 /// backlinker's CURRENT content and whether the new target is representable — the
 /// shared decision both the apply path ([`rewrite_one_backlink`]) and the dry-run
 /// forecast ([`forecast_link_rewrites`]) route through, so a same-content apply
-/// and forecast reach the identical verdict for canonical-form frontmatter
-/// (NRN-161). Pure: no IO, no write. It owns every content-intrinsic skip: an
+/// and forecast reach the identical verdict. Pure: no IO, no write. It owns every
+/// content-intrinsic skip: an
 /// `unrepresentable` new target (`WouldCorruptWikilink`, decided from the flag
 /// before any content is inspected), a link that no longer matches the content
 /// (`Drifted`), and a rewrite that would break the backlinker's frontmatter
@@ -1366,51 +1366,34 @@ pub(crate) fn plan_backlink_rewrite(
     BacklinkPlan::Rewrite(updated)
 }
 
-/// Reconstruct a backlinker document's content from the GRAPH-INDEX SNAPSHOT — the
-/// canonical serialization of its parsed frontmatter followed by its indexed body
-/// text — so the dry-run cascade forecast can classify a rewrite without reading
-/// the live filesystem (NRN-161). This is the deliberate boundary: the forecast
-/// consults only what the index knows. A document whose indexed frontmatter is
-/// absent or is not a top-level mapping reconstructs as its body alone — the same
-/// input `verify_frontmatter_not_degraded` treats as having no rewritable
-/// mapping, so the forecast's frontmatter-degradation verdict matches apply's on a
-/// same-snapshot vault whose on-disk frontmatter is in norn's canonical form.
+/// Reconstruct a backlinker document's content from the GRAPH-INDEX SNAPSHOT so
+/// the dry-run cascade forecast can classify a rewrite without reading the live
+/// filesystem. This is the deliberate boundary: the forecast consults only what
+/// the index knows.
 ///
-/// Residual divergence, on-disk quoting that deviates from canonical form: the
-/// index has parsed the scalar's quoting away, so this reconstruction re-serializes
-/// it canonically (double-quoted), while apply splices the raw disk bytes. When the
-/// two quotings classify the rewrite differently the forecast diverges — and the
-/// dangerous direction is over-optimistic: a single-quoted on-disk value (norn-
-/// native state) whose rewrite target carries an apostrophe reconstructs to a
-/// double-quoted scalar that tolerates it (forecast: rewrite), while the raw single-
-/// quoted splice does not (apply: skip `would-corrupt-frontmatter`) — the forecast
-/// applies where apply skips. The mirror (forecast skips, apply lands — a target
-/// carrying a double-quote against a single-quoted value) is the pessimistic, less
-/// dangerous case. Both resolve when apply reads the real bytes; closing the gap
-/// needs the cache to retain the on-disk quoting style.
+/// The index retains the document's raw frontmatter head (`head_text` — BOM,
+/// fences, and the frontmatter block with its on-disk quoting, key order, and
+/// comments intact) alongside its body, so the concatenation reproduces the
+/// snapshot's file byte for byte. The forecast therefore classifies against the
+/// same bytes apply splices: on an unchanged vault the two agree for every
+/// on-disk frontmatter form, not just norn's canonical serialization.
 fn reconstruct_backlinker_content(doc: &crate::domain::Document) -> String {
-    match &doc.frontmatter {
-        Some(serde_json::Value::Object(map)) => {
-            let btree: std::collections::BTreeMap<String, serde_json::Value> =
-                map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            norn_frontmatter::frontmatter::serialize_new_document(&btree, &doc.body_text)
-                .unwrap_or_else(|_| doc.body_text.clone())
-        }
-        _ => doc.body_text.clone(),
-    }
+    let mut content = String::with_capacity(doc.head_text.len() + doc.body_text.len());
+    content.push_str(&doc.head_text);
+    content.push_str(&doc.body_text);
+    content
 }
 
 /// Dry-run twin of [`apply_link_rewrites`]: classify every affected backlink of a
 /// move/delete cascade against the GRAPH-INDEX SNAPSHOT (never the live
 /// filesystem), producing the `rewritten` / `skipped` buckets a same-snapshot
-/// apply would (NRN-161). It shares the exact per-link decision via
-/// [`plan_backlink_rewrite`], so for canonical-form frontmatter the forecast's
-/// skip classification cannot drift from apply's. The one residual divergence is
-/// non-canonical on-disk quoting, which the snapshot has parsed away — see
-/// [`reconstruct_backlinker_content`] for the direction (over-optimistic:
-/// forecast rewrites where apply skips; or, less commonly, pessimistic).
+/// apply would. It shares the exact per-link decision via
+/// [`plan_backlink_rewrite`], run over the byte-exact snapshot content
+/// [`reconstruct_backlinker_content`] rebuilds, so the forecast's skip
+/// classification cannot drift from apply's on an unchanged vault — whatever
+/// form the on-disk frontmatter takes.
 ///
-/// Boundary (NRN-161): only the two skip reasons a snapshot can KNOW are forecast
+/// Boundary: only the two skip reasons a snapshot can KNOW are forecast
 /// here — `WouldCorruptWikilink` (the target is not a representable wikilink, a
 /// pre-decided flag on the affected link) and `WouldCorruptFrontmatter` (the
 /// rewrite would break the backlinker's frontmatter, decided from the

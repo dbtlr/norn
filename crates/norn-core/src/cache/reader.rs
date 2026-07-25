@@ -64,20 +64,22 @@ fn load_documents(
     alias_field: Option<&str>,
 ) -> Result<Vec<Document>, CacheError> {
     let mut docs_stmt = conn.prepare(
-        "SELECT path, stem, hash, frontmatter_json, body_text FROM documents ORDER BY path",
+        "SELECT path, stem, hash, frontmatter_json, head_text, body_text \
+         FROM documents ORDER BY path",
     )?;
     let rows = docs_stmt.query_map([], |row| {
         let path: String = row.get(0)?;
         let stem: String = row.get(1)?;
         let hash: String = row.get(2)?;
         let frontmatter_json: Option<String> = row.get(3)?;
-        let body_text: String = row.get(4)?;
-        Ok((path, stem, hash, frontmatter_json, body_text))
+        let head_text: String = row.get(4)?;
+        let body_text: String = row.get(5)?;
+        Ok((path, stem, hash, frontmatter_json, head_text, body_text))
     })?;
 
     let mut documents = Vec::new();
     for r in rows {
-        let (path, stem, hash, fm_json, body_text) = r?;
+        let (path, stem, hash, fm_json, head_text, body_text) = r?;
         let frontmatter = fm_json
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
@@ -101,6 +103,7 @@ fn load_documents(
             stem,
             hash,
             frontmatter,
+            head_text,
             body_text,
             headings,
             block_ids,
@@ -404,8 +407,8 @@ mod tests {
                 .execute_batch(
                     "BEGIN IMMEDIATE;
                          INSERT INTO documents
-                           (path, stem, hash, frontmatter_json, body_text, mtime_ns, size_bytes)
-                         VALUES ('delta.md', 'delta', 'delta-hash', NULL, 'Delta', 1, 5);
+                           (path, stem, hash, frontmatter_json, head_text, body_text, mtime_ns, size_bytes)
+                         VALUES ('delta.md', 'delta', 'delta-hash', NULL, '', 'Delta', 1, 5);
                          INSERT INTO files (path, ext, size_bytes, mtime_ns)
                          VALUES ('delta.md', 'md', 5, 1);
                          COMMIT;",

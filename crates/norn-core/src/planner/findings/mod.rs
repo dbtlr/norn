@@ -71,6 +71,7 @@ mod tests {
                 stem: stem.to_string(),
                 hash: format!("hash-{path}"),
                 frontmatter: None,
+                head_text: String::new(),
                 body_text: String::new(),
                 headings: vec![],
                 block_ids: vec![],

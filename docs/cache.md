@@ -92,7 +92,7 @@ norn --no-cache-refresh validate --code 'link-*' --format jsonl
 
 ## What's cached
 
-Stored: document path, stem, content hash, frontmatter, body text, mtime, size; outgoing links with resolved targets (including the unresolved reason and candidate list for ambiguous links); headings; block IDs; non-Markdown file inventory.
+Stored: document path, stem, content hash, frontmatter, the raw frontmatter head (the verbatim leading bytes — BOM, `---` fences, and the frontmatter block with its on-disk quoting, key order, and comments — so head plus body text reproduces the file byte for byte), body text, mtime, size; outgoing links with resolved targets (including the unresolved reason and candidate list for ambiguous links); headings; block IDs; non-Markdown file inventory.
 
 Not stored: validation findings — they depend on `.norn/config.yaml`, which can change between runs. Findings always recompute fresh against the in-memory graph loaded from the cache.
 

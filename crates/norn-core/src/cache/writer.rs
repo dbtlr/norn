@@ -746,8 +746,8 @@ impl crate::cache::Cache {
         )?;
         tx.execute(
             "INSERT INTO main.documents \
-             (path, stem, hash, frontmatter_json, body_text, mtime_ns, size_bytes) \
-             SELECT path, stem, hash, frontmatter_json, body_text, mtime_ns, size_bytes \
+             (path, stem, hash, frontmatter_json, head_text, body_text, mtime_ns, size_bytes) \
+             SELECT path, stem, hash, frontmatter_json, head_text, body_text, mtime_ns, size_bytes \
              FROM temp.norn_increment_documents WHERE job_id = ? ORDER BY path",
             [job_id],
         )?;
@@ -833,6 +833,7 @@ fn ensure_increment_staging_tables(conn: &rusqlite::Connection) -> Result<(), Ca
              stem TEXT NOT NULL,
              hash TEXT NOT NULL,
              frontmatter_json TEXT,
+             head_text TEXT NOT NULL,
              body_text TEXT NOT NULL,
              mtime_ns INTEGER NOT NULL,
              size_bytes INTEGER NOT NULL,
@@ -915,14 +916,15 @@ fn stage_document(
         .map(|v| serde_json::to_string(v).unwrap_or_default());
     tx.execute(
         "INSERT INTO temp.norn_increment_documents
-         (job_id, path, stem, hash, frontmatter_json, body_text, mtime_ns, size_bytes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         (job_id, path, stem, hash, frontmatter_json, head_text, body_text, mtime_ns, size_bytes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             job_id,
             doc.path.as_str(),
             doc.stem,
             doc.hash,
             frontmatter_json,
+            doc.head_text,
             doc.body_text,
             mtime_ns,
             size_bytes,
@@ -1196,13 +1198,14 @@ fn insert_document_with_metadata(
 
     tx.execute(
         "INSERT INTO documents
-           (path, stem, hash, frontmatter_json, body_text, mtime_ns, size_bytes)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+           (path, stem, hash, frontmatter_json, head_text, body_text, mtime_ns, size_bytes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             doc.path.as_str(),
             doc.stem,
             doc.hash,
             frontmatter_json,
+            doc.head_text,
             doc.body_text,
             mtime_ns,
             size_bytes,
