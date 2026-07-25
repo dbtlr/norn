@@ -619,3 +619,154 @@ fn missing_vault_root_precheck_refuses_with_no_owner_summoned() {
         "the precheck refusal must summon no owner, but found runtime artifacts: {leftover:?}"
     );
 }
+
+/// NRN-475: an owner reads `.norn/config.yaml` ONCE, at warm-up, so a socket
+/// keyed by the vault root alone kept every later invocation running under the
+/// PREVIOUS schema for the rest of the idle TTL (120s by default) — a write that
+/// the edited config forbids applied at exit 0. The socket is now keyed by the
+/// config's content identity too, so the invocation that follows an edit
+/// summons an owner holding the new schema and the constraint is enforced.
+///
+/// Repro shape: warm an owner under a config with NO `allowed_values`, add the
+/// constraint, then write a value it forbids.
+#[cfg(unix)]
+#[test]
+fn config_edited_after_warm_up_is_enforced_by_the_next_invocation() {
+    let guard = tempfile::tempdir().unwrap();
+    // A non-hidden subdir: the graph walk skips dot-prefixed dirs, and
+    // `tempfile::tempdir()` names its dir `.tmpXXXX`.
+    let vault = guard.path().join("vault");
+    std::fs::create_dir_all(vault.join(".norn")).unwrap();
+    std::fs::write(
+        vault.join("a.md"),
+        "---\ntype: note\ntitle: A\nstatus: backlog\n---\nbody\n",
+    )
+    .unwrap();
+    let config = vault.join(".norn").join("config.yaml");
+    std::fs::write(
+        &config,
+        "validate:\n  rules:\n    - name: notes\n      field_types:\n        status:\n          type: string\n",
+    )
+    .unwrap();
+
+    let runtime_dir = isolated_runtime_dir("cfgedit");
+    let cfg_home = tempfile::tempdir().unwrap();
+
+    // Warm an owner under the permissive config.
+    let warm = norn()
+        .arg("-C")
+        .arg(&vault)
+        .args(["count"])
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("NORN_CONFIG_DIR", cfg_home.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        warm.status.code(),
+        Some(0),
+        "warming must succeed; stderr was: {:?}",
+        stderr_of(&warm)
+    );
+
+    // Constrain `status`. The warm owner still holds the permissive schema.
+    std::fs::write(
+        &config,
+        "validate:\n  rules:\n    - name: notes\n      field_types:\n        status:\n          type: string\n      allowed_values:\n        status:\n          - backlog\n          - done\n",
+    )
+    .unwrap();
+
+    let out = norn()
+        .arg("-C")
+        .arg(&vault)
+        .args(["set", "a.md", "--field", "status=bogus", "--yes"])
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("NORN_CONFIG_DIR", cfg_home.path())
+        .output()
+        .unwrap();
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+
+    let stderr = stderr_of(&out);
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "the edited config's allowed_values must be enforced; stderr was: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("is not allowed for 'status'"),
+        "expected the allowed-values refusal, got: {stderr:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(vault.join("a.md")).unwrap(),
+        "---\ntype: note\ntitle: A\nstatus: backlog\n---\nbody\n",
+        "a refused write must leave the document untouched"
+    );
+}
+
+/// NRN-475 companion: a config CREATED after an owner warmed (the fresh-vault
+/// shape — first command, then write the config) was invisible for the owner's
+/// whole idle TTL, so an invalid config produced clean exit-0 reads. Creating
+/// the file changes the config identity, so the next invocation summons an owner
+/// that reads it and surfaces the load error.
+#[cfg(unix)]
+#[test]
+fn config_created_after_warm_up_surfaces_its_load_error() {
+    let guard = tempfile::tempdir().unwrap();
+    let vault = guard.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::write(vault.join("a.md"), "---\ntype: note\ntitle: A\n---\nbody\n").unwrap();
+
+    let runtime_dir = isolated_runtime_dir("cfgnew");
+    let cfg_home = tempfile::tempdir().unwrap();
+
+    // Warm an owner with NO config file present.
+    let warm = norn()
+        .arg("-C")
+        .arg(&vault)
+        .args(["count"])
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("NORN_CONFIG_DIR", cfg_home.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        warm.status.code(),
+        Some(0),
+        "warming must succeed; stderr was: {:?}",
+        stderr_of(&warm)
+    );
+
+    // A rule whose own default its own `allowed_values` forbids — rejected at
+    // config load, not per document.
+    std::fs::create_dir_all(vault.join(".norn")).unwrap();
+    std::fs::write(
+        vault.join(".norn").join("config.yaml"),
+        "validate:\n  rules:\n    - name: notes\n      allowed_values:\n        status:\n          - backlog\n          - done\n      frontmatter_defaults:\n        status: active\n",
+    )
+    .unwrap();
+
+    let out = norn()
+        .arg("-C")
+        .arg(&vault)
+        .args(["validate"])
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("NORN_CONFIG_DIR", cfg_home.path())
+        .output()
+        .unwrap();
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+
+    let stderr = stderr_of(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "an invalid config must exit 1; stderr was: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("norn: invalid config "),
+        "expected the config-load diagnostic, got: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("is not in this rule's allowed_values"),
+        "expected the self-contradicting-default detail, got: {stderr:?}"
+    );
+}

@@ -2,15 +2,16 @@
 //!
 //! A summoned owner's control socket lives in a short runtime dir — NEVER under
 //! a per-vault cache path — and its filename is fixed-width: `<h>.<fp>.sock`,
-//! where `<h>` is the first 16 hex chars of the blake3 of the canonical vault
-//! root and `<fp>` is the build fingerprint (short form).
+//! where `<h>` is the first 16 hex chars of the blake3 of the **vault identity**
+//! (the canonical vault root + the vault config's content identity) and `<fp>`
+//! is the build fingerprint (short form).
 //!
 //! ## Why this shape (decided, NRN-345)
 //!
 //! - **Fixed-width names in a short base dir structurally eliminate the
 //!   `sockaddr_un` `SUN_LEN` overflow class.** A `sun_path` is ~104 bytes;
 //!   deriving sockets under long per-vault cache paths risks overflow, which a
-//!   silent fallback would mask (a real bug). Hashing the root to 16 hex
+//!   silent fallback would mask (a real bug). Hashing the identity to 16 hex
 //!   chars gives a bounded name regardless of how long or unicode-heavy the real
 //!   root path is; a short runtime base keeps the whole path well under the cap.
 //! - **The fingerprint isolates builds.** It keys the socket by ADR 0012 build
@@ -19,6 +20,16 @@
 //!   ephemeral; N worktree agents each summon their own owner on their own
 //!   socket, and a rebuild mints a new fingerprint → new socket, orphaning the
 //!   old owner to idle out.
+//! - **The config identity isolates schema revisions.** An owner reads
+//!   `.norn/config.yaml` ONCE, at warm-up, and serves every later request under
+//!   that in-memory schema — so a socket keyed by the root alone would keep
+//!   answering `find` / `get` / `validate` / `set` / `new` under the PREVIOUS
+//!   config for the rest of the owner's idle TTL, silently skipping enforcement
+//!   the edited config declares. Folding the config's content hash into `<h>`
+//!   makes a created, edited, or removed config mint a new socket, so the very
+//!   next invocation summons an owner that reads the config from disk. The old
+//!   owner is orphaned to idle out — the same trade the build fingerprint
+//!   already makes on a rebuild.
 //!
 //! ## Fingerprint definition (stand-in, flagged)
 //!
@@ -36,8 +47,13 @@ use std::path::{Path, PathBuf};
 
 use crate::error::ClientError;
 
-/// Length of the vault-root hash prefix in the socket name (hex chars).
+/// Length of the vault-identity hash prefix in the socket name (hex chars).
 const ROOT_HASH_HEX_LEN: usize = 16;
+
+/// The config-identity stand-in for a vault with no config file at the resolved
+/// path. Distinct from any content hash, so creating or removing the file mints
+/// a different socket.
+const NO_CONFIG_IDENTITY: &str = "no-config";
 
 /// Length of the build-fingerprint segment in the socket name (hex chars).
 const FINGERPRINT_HEX_LEN: usize = 16;
@@ -109,19 +125,51 @@ pub(crate) fn current_uid() -> u32 {
     0
 }
 
-/// The control socket path for `vault_root` under `runtime_dir` for `fingerprint`:
-/// `<runtime_dir>/<h>.<fp>.sock`. `<h>` is the blake3 of the canonicalized root
-/// (best-effort — a not-yet-existing root hashes by its grounded form).
-pub fn socket_path(vault_root: &Path, runtime_dir: &Path, fingerprint: &str) -> PathBuf {
+/// The content identity of the config file an owner summoned for `vault_root`
+/// would warm under: the blake3 of the file's bytes, or [`NO_CONFIG_IDENTITY`]
+/// when no file is present at the resolved path.
+///
+/// Resolution mirrors the owner's: an explicit `[vaults.<name>].config` override
+/// wins, else `<vault_root>/.norn/config.yaml`. The path is resolved whether or
+/// not it exists, so a config CREATED after an owner warmed changes the identity
+/// exactly as an edit does.
+///
+/// Content-hashed rather than stat-keyed: a same-bytes rewrite (a checkout, a
+/// `touch`) must NOT orphan a warm owner, and a same-size edit within one mtime
+/// tick must not be missed. Config files are small, so the read is negligible
+/// against the per-invocation budget. An unreadable file hashes as absent — the
+/// owner surfaces the read error itself.
+pub fn config_identity(vault_root: &Path, config_override: Option<&Path>) -> String {
+    let path = match config_override {
+        Some(p) => p.to_path_buf(),
+        None => vault_root.join(".norn").join("config.yaml"),
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) => blake3::hash(&bytes).to_hex().to_string(),
+        Err(_) => NO_CONFIG_IDENTITY.to_string(),
+    }
+}
+
+/// The control socket path for `vault_root` under `runtime_dir` for `fingerprint`
+/// and `config_identity`: `<runtime_dir>/<h>.<fp>.sock`. `<h>` is the blake3 of
+/// the canonicalized root (best-effort — a not-yet-existing root hashes by its
+/// grounded form) joined with the config identity from [`config_identity`].
+pub fn socket_path(
+    vault_root: &Path,
+    runtime_dir: &Path,
+    fingerprint: &str,
+    config_identity: &str,
+) -> PathBuf {
     let canonical = vault_root
         .canonicalize()
         .unwrap_or_else(|_| vault_root.to_path_buf());
-    let h = short_hex_n(
-        blake3::hash(canonical.as_os_str().as_encoded_bytes())
-            .to_hex()
-            .as_str(),
-        ROOT_HASH_HEX_LEN,
-    );
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(canonical.as_os_str().as_encoded_bytes());
+    // A separator no path byte can supply, so no root+config pair can collide
+    // with a different pair by concatenation.
+    hasher.update(&[0u8]);
+    hasher.update(config_identity.as_bytes());
+    let h = short_hex_n(hasher.finalize().to_hex().as_str(), ROOT_HASH_HEX_LEN);
     let fp = short_hex_n(fingerprint, FINGERPRINT_HEX_LEN);
     runtime_dir.join(format!("{h}.{fp}.sock"))
 }
@@ -139,7 +187,7 @@ mod tests {
     fn socket_name_is_fixed_width_and_bounded() {
         let rt = PathBuf::from("/run/norn");
         let long_root = PathBuf::from("/some/extremely/long/and/deeply/nested/unicode-héavy/παθ/that/would/blow/sun_len/if/used/verbatim/vault");
-        let sp = socket_path(&long_root, &rt, "deadbeefcafef00d");
+        let sp = socket_path(&long_root, &rt, "deadbeefcafef00d", NO_CONFIG_IDENTITY);
         let name = sp.file_name().unwrap().to_string_lossy();
         // <16 hex>.<16 hex>.sock == 16 + 1 + 16 + 5 == 38 chars, always.
         assert_eq!(name.len(), 38, "socket name must be fixed-width: {name}");
@@ -150,17 +198,87 @@ mod tests {
     #[test]
     fn distinct_roots_get_distinct_sockets() {
         let rt = PathBuf::from("/run/norn");
-        let a = socket_path(&PathBuf::from("/vault/a"), &rt, "fp00");
-        let b = socket_path(&PathBuf::from("/vault/b"), &rt, "fp00");
+        let a = socket_path(&PathBuf::from("/vault/a"), &rt, "fp00", NO_CONFIG_IDENTITY);
+        let b = socket_path(&PathBuf::from("/vault/b"), &rt, "fp00", NO_CONFIG_IDENTITY);
         assert_ne!(a, b);
     }
 
     #[test]
     fn distinct_fingerprints_get_distinct_sockets() {
         let rt = PathBuf::from("/run/norn");
-        let a = socket_path(&PathBuf::from("/vault"), &rt, "aaaaaaaaaaaaaaaa");
-        let b = socket_path(&PathBuf::from("/vault"), &rt, "bbbbbbbbbbbbbbbb");
+        let a = socket_path(
+            &PathBuf::from("/vault"),
+            &rt,
+            "aaaaaaaaaaaaaaaa",
+            NO_CONFIG_IDENTITY,
+        );
+        let b = socket_path(
+            &PathBuf::from("/vault"),
+            &rt,
+            "bbbbbbbbbbbbbbbb",
+            NO_CONFIG_IDENTITY,
+        );
         assert_ne!(a, b, "the fingerprint must isolate builds");
+    }
+
+    /// The socket is keyed by the config an owner would warm under: an edited
+    /// config addresses a DIFFERENT owner, so the next invocation summons one
+    /// that reads the new schema instead of reusing the warm owner's stale one.
+    #[test]
+    fn distinct_config_identities_get_distinct_sockets() {
+        let rt = PathBuf::from("/run/norn");
+        let root = PathBuf::from("/vault");
+        let before = socket_path(&root, &rt, "fp00", "aaaa");
+        let after = socket_path(&root, &rt, "fp00", "bbbb");
+        assert_ne!(after, before, "an edited config must mint a new socket");
+        let absent = socket_path(&root, &rt, "fp00", NO_CONFIG_IDENTITY);
+        assert_ne!(
+            absent, before,
+            "creating a config must mint a new socket too"
+        );
+        // Same identity, same socket — an unchanged config reuses the warm owner.
+        assert_eq!(before, socket_path(&root, &rt, "fp00", "aaaa"));
+    }
+
+    #[test]
+    fn config_identity_tracks_content_not_stat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let absent = config_identity(&root, None);
+        assert_eq!(absent, NO_CONFIG_IDENTITY);
+
+        let norn_dir = root.join(".norn");
+        std::fs::create_dir_all(&norn_dir).unwrap();
+        let config = norn_dir.join("config.yaml");
+        std::fs::write(&config, "validate:\n  rules: []\n").unwrap();
+        let first = config_identity(&root, None);
+        assert_ne!(first, absent, "a created config changes the identity");
+
+        // A same-bytes rewrite must NOT change the identity (no owner churn on a
+        // checkout or a `touch`).
+        std::fs::write(&config, "validate:\n  rules: []\n").unwrap();
+        assert_eq!(config_identity(&root, None), first);
+
+        // An edit does.
+        std::fs::write(&config, "validate:\n  rules: []\nfiles:\n  ignore: []\n").unwrap();
+        assert_ne!(config_identity(&root, None), first);
+    }
+
+    /// The override path is what a registered vault's owner loads, so it is what
+    /// the identity must follow — not the (possibly absent) default path.
+    #[test]
+    fn config_identity_follows_the_override_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let elsewhere = tmp.path().join("elsewhere.yaml");
+        std::fs::write(&elsewhere, "files:\n  ignore: []\n").unwrap();
+        let with_override = config_identity(&root, Some(&elsewhere));
+        assert_ne!(with_override, NO_CONFIG_IDENTITY);
+        assert_ne!(
+            with_override,
+            config_identity(&root, None),
+            "the default path is absent here, so the two must differ"
+        );
     }
 
     #[test]

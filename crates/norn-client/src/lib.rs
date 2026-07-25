@@ -26,7 +26,7 @@ mod summon;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-pub use addr::{build_fingerprint, runtime_dir_from_env, socket_path};
+pub use addr::{build_fingerprint, config_identity, runtime_dir_from_env, socket_path};
 pub use error::ClientError;
 pub use session::{OwnerSession, Pong, STALL_BUDGET};
 pub use summon::OWNER_MODE_ARG;
@@ -99,8 +99,9 @@ pub struct SummonConfig {
     pub connect_budget: Duration,
     /// The resolver-derived `[vaults.<name>].config` override path (ADR 0017),
     /// when the resolved vault is registered with one. `None` → the owner loads
-    /// `<vault_root>/.norn/config.yaml` (the default). Passed to a freshly
-    /// summoned owner; an already-live owner keeps the config it warmed under.
+    /// `<vault_root>/.norn/config.yaml` (the default). It is also the path whose
+    /// contents key the socket ([`config_identity`]), so pointing at a different
+    /// config — or editing the one pointed at — addresses a different owner.
     pub config_override: Option<PathBuf>,
     /// The durable telemetry events directory (NRN-400), set ONLY for a
     /// registered vault — registration is what unlocks the durable event
@@ -152,9 +153,19 @@ pub(crate) fn connect_or_summon(
     // path is computable, so a symlinked or foreign-owned runtime dir must be
     // rejected before we ever dial a socket inside it (security).
     ensure_runtime_dir_0700(&config.runtime_dir)?;
-    let socket = socket_path(&config.vault_root, &config.runtime_dir, &config.fingerprint);
+    // The socket is keyed by the config the owner warms under as well as the
+    // root and the build: an owner reads the config once and serves every later
+    // request under that in-memory schema, so an edited config must address a
+    // DIFFERENT owner rather than reuse the one holding the previous revision.
+    let identity = config_identity(&config.vault_root, config.config_override.as_deref());
+    let socket = socket_path(
+        &config.vault_root,
+        &config.runtime_dir,
+        &config.fingerprint,
+        &identity,
+    );
 
-    // A live owner already serving this vault+build? Connect and done.
+    // A live owner already serving this vault+build+config? Connect and done.
     if let Ok(stream) = session::connect(&socket) {
         return Ok((stream, socket));
     }
