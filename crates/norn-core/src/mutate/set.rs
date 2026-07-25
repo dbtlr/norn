@@ -1277,4 +1277,129 @@ mod tests {
             result.findings
         );
     }
+
+    // ── Multi-rule allowed_values: set, new, and validate answer alike ────────
+
+    // A permissive rule declared FIRST and a narrower one declared second, both
+    // applying to the same document. The satisfiable set is their intersection
+    // ([backlog, done] for `status`, [a, b] for `tags`), so `active` / `bogus`
+    // violate the schema no matter which rule is consulted first.
+    const TWO_RULE_CFG: &str = "validate:\n  rules:\n    - name: global\n      match:\n        path: \"**/*.md\"\n      field_types:\n        tags: list_of_strings\n      allowed_values:\n        status: [backlog, done, active]\n        tags: [a, b, bogus]\n    - name: notes\n      match:\n        frontmatter:\n          type: note\n      allowed_values:\n        status: [backlog, done]\n        tags: [a, b]\n";
+
+    fn two_rule_vault() -> (TempDir, Utf8PathBuf, VaultConfig) {
+        let (tmp, root) = synth_vault(
+            Some(TWO_RULE_CFG),
+            &[(
+                "notes/a.md",
+                "---\ntype: note\nstatus: backlog\ntags:\n  - a\n---\n",
+            )],
+        );
+        let config = parse_cfg(TWO_RULE_CFG);
+        (tmp, root, config)
+    }
+
+    fn refusal_for(params: SetParams) -> CodedError {
+        let (_t, root, config) = two_rule_vault();
+        let cache = built(&root);
+        let exec = execute(&cache, Some(&config), &params, TODAY, &mut sink()).unwrap();
+        assert_eq!(exec.report.outcome, MutationOutcome::Refused);
+        exec.report.error.clone().expect("a refusal is coded")
+    }
+
+    #[test]
+    fn set_field_refuses_a_value_only_the_permissive_rule_allows() {
+        let err = refusal_for(SetParams {
+            target: "notes/a.md".into(),
+            fields: vec!["status=active".into()],
+            ..Default::default()
+        });
+        assert_eq!(err.code, "value-not-allowed");
+        assert!(
+            err.message.contains("(allowed: backlog, done)"),
+            "the refusal names the intersection, not one rule's list: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn set_push_refuses_an_element_only_the_permissive_rule_allows() {
+        let err = refusal_for(SetParams {
+            target: "notes/a.md".into(),
+            push: vec!["tags=bogus".into()],
+            ..Default::default()
+        });
+        assert_eq!(err.code, "value-not-allowed");
+        assert!(err.message.contains("(allowed: a, b)"), "{}", err.message);
+    }
+
+    #[test]
+    fn set_field_json_refuses_a_value_only_the_permissive_rule_allows() {
+        let err = refusal_for(SetParams {
+            target: "notes/a.md".into(),
+            field_json: vec!["status=\"active\"".into()],
+            ..Default::default()
+        });
+        assert_eq!(err.code, "value-not-allowed");
+        assert!(
+            err.message.contains("(allowed: backlog, done)"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn new_and_validate_agree_with_set_on_the_same_two_rule_schema() {
+        let (_t, root, config) = two_rule_vault();
+        let mut cache = built(&root);
+
+        // new: the same value `set` refuses is refused at preflight.
+        let new_params = norn_wire::NewParams {
+            path: Some("notes/b.md".into()),
+            fields: vec!["type=note".into(), "status=active".into()],
+            ..Default::default()
+        };
+        let created =
+            crate::mutate::new::execute(&cache, Some(&config), &new_params, TODAY, &mut sink())
+                .unwrap();
+        assert_eq!(created.report.outcome, MutationOutcome::Refused);
+        let err = created.report.error.as_ref().unwrap();
+        assert_eq!(err.code, "value-not-allowed");
+        assert!(
+            err.message.contains("(allowed: backlog, done)"),
+            "{}",
+            err.message
+        );
+        assert!(
+            !root.join("notes/b.md").as_std_path().exists(),
+            "a refused create writes nothing"
+        );
+
+        // validate: the same value, already on disk, is a finding — so all three
+        // engines call the document schema-violating.
+        std::fs::write(
+            root.join("notes/c.md").as_std_path(),
+            "---\ntype: note\nstatus: active\ntags:\n  - bogus\n---\n",
+        )
+        .unwrap();
+        cache.full_build(&root).unwrap();
+        let result = crate::read::validate::execute(
+            &cache,
+            Some(&config),
+            &norn_wire::ValidateParams::default(),
+            TODAY,
+        )
+        .unwrap()
+        .unwrap();
+        let disallowed: Vec<_> = result
+            .findings
+            .iter()
+            .filter(|f| f.code == "value-not-allowed" && f.path == "notes/c.md")
+            .collect();
+        assert_eq!(
+            disallowed.len(),
+            2,
+            "status and the tags element each violate the narrower rule: {:?}",
+            result.findings
+        );
+    }
 }

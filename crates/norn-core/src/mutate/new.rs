@@ -736,49 +736,41 @@ fn build_create(
         .cloned()
         .collect();
 
-    // allowed_values enforcement (NRN-430). Every field in the synthesized
-    // frontmatter is a fresh direct write, so a value outside a matching rule's
-    // allowed_values set REFUSES here at forecast/preflight — before any file
-    // lands — with --force the documented bypass. `build_create`'s type coercion
-    // never checked allowed_values (a validate-engine-only rule), so without this
-    // a clean forecast could precede a schema-violating create, defeating
-    // plan-then-apply. The allowed list rides in the refusal message so an agent
-    // can recover without a second query; the code/message converge on `set`'s
-    // `value-not-allowed` family. Every matching rule that declares
-    // allowed_values for the field is checked — not just the first — so two
-    // co-applying rules with different sets both gate the value; a scan
-    // stopping at the first declaring rule would let a value valid under it
-    // but rejected by a second rule pass preflight, surfacing only as the
-    // post-apply warning.
+    // allowed_values enforcement. Every field in the synthesized frontmatter is
+    // a fresh direct write, so a value outside the schema's allowed set REFUSES
+    // here at forecast/preflight — before any file lands — with --force the
+    // documented bypass; without it a clean forecast could precede a
+    // schema-violating create, defeating plan-then-apply. The satisfiable set
+    // rides in the refusal message so an agent can recover without a second
+    // query; the code/message converge on `set`'s `value-not-allowed` family.
+    // `allowed_values_in_rules` intersects EVERY co-applying rule declaring the
+    // field, so a value permitted by one rule but rejected by another never
+    // reaches the write, and the message names the values that satisfy them all.
     let mut allowed_bypass: Vec<MutationWarning> = Vec::new();
     for (field, value) in &resolved_fm {
-        let mut bypassed = false;
-        for (rule, _) in &matched_rules {
-            let Some(allowed) = rule.allowed_values.get(field) else {
-                continue;
-            };
-            if coerce::value_in_allowed(value, allowed) {
-                continue;
-            }
-            if !params.force {
-                return Err(refusal(
-                    "value-not-allowed",
-                    coerce::value_not_allowed_message(
-                        field,
-                        &coerce::display_value(value),
-                        &coerce::display_allowed(allowed),
-                    ),
-                    Some(doc_path.to_string()),
-                ));
-            }
-            if !bypassed {
-                allowed_bypass.push(coerce::force_bypass_warning(
-                    field,
-                    "allowed-values validation",
-                ));
-                bypassed = true;
-            }
+        let Some(allowed) =
+            coerce::allowed_values_in_rules(matched_rules.iter().map(|(rule, _)| *rule), field)
+        else {
+            continue;
+        };
+        if coerce::value_in_allowed(value, &allowed) {
+            continue;
         }
+        if !params.force {
+            return Err(refusal(
+                "value-not-allowed",
+                coerce::value_not_allowed_message(
+                    field,
+                    &coerce::display_value(value),
+                    &coerce::display_allowed(&allowed),
+                ),
+                Some(doc_path.to_string()),
+            ));
+        }
+        allowed_bypass.push(coerce::force_bypass_warning(
+            field,
+            "allowed-values validation",
+        ));
     }
 
     let mut created: Vec<FrontmatterCreated> = Vec::new();
@@ -1430,11 +1422,13 @@ validate:
         );
         let err = exec.report.error.as_ref().unwrap();
         assert_eq!(err.code, "value-not-allowed");
-        // The refusal names the SECOND (violated) rule's allowed set, not the
-        // first rule's (which `active` does satisfy).
+        // The refusal names the INTERSECTION of the two rules' sets — the only
+        // values that satisfy both — not either rule's list on its own
+        // (`active` satisfies the path rule, `done` the global rule; neither
+        // satisfies both).
         assert!(err.message.contains("active"), "{}", err.message);
         assert!(
-            err.message.contains("backlog") && err.message.contains("done"),
+            err.message.contains("(allowed: backlog)"),
             "{}",
             err.message
         );
