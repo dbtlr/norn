@@ -63,6 +63,31 @@ impl std::fmt::Display for ExecError {
 
 impl std::error::Error for ExecError {}
 
+/// Retry `attempt` while it fails with `ExecutableFileBusy` (ETXTBSY).
+///
+/// `execve` refuses to run an image that any process can still write to. A
+/// binary this process wrote moments ago satisfies that even after its own
+/// descriptor is closed: another thread forking in the write's window leaves
+/// the child holding an inherited writable descriptor until it execs, and
+/// close-on-exec does not clear it early enough for the kernel's check. The
+/// condition is transient — it lifts as soon as that descriptor closes — so
+/// spawning waits it out instead of failing the run. A spawn that fails
+/// never started a process, so retrying repeats no side effect.
+fn retry_while_busy<T>(mut attempt: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    const MAX_ATTEMPTS: u32 = 25;
+    const BACKOFF: Duration = Duration::from_millis(20);
+
+    for _ in 1..MAX_ATTEMPTS {
+        match attempt() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(BACKOFF);
+            }
+            other => return other,
+        }
+    }
+    attempt()
+}
+
 /// A spawned child plus its (optional) stdin-writer thread — the setup
 /// [`run_argv`] and [`run_argv_bounded`] share; only how they WAIT for the
 /// child differs (unbounded `wait_with_output` vs. a polled, killable
@@ -85,17 +110,19 @@ fn spawn_with_stdin(
     vault: &Path,
     binary_label: &str,
 ) -> Result<Spawned, ExecError> {
-    let mut child = Command::new(binary)
-        .args(argv)
-        .current_dir(vault)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| ExecError::Spawn {
-            binary: binary_label.to_string(),
-            source,
-        })?;
+    let mut child = retry_while_busy(|| {
+        Command::new(binary)
+            .args(argv)
+            .current_dir(vault)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    })
+    .map_err(|source| ExecError::Spawn {
+        binary: binary_label.to_string(),
+        source,
+    })?;
 
     let stdin_writer = if let Some(stdin_text) = stdin {
         // `.expect` on the piped handle is safe: we just requested it above.
@@ -292,14 +319,16 @@ pub fn run_argv_bounded(
 /// a notice, and only its existence is required).
 pub fn probe_version(binary: &Path) -> Result<RawOutput, ExecError> {
     let binary_label = binary.display().to_string();
-    let output = Command::new(binary)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|source| ExecError::Spawn {
-            binary: binary_label,
-            source,
-        })?;
+    let output = retry_while_busy(|| {
+        Command::new(binary)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .output()
+    })
+    .map_err(|source| ExecError::Spawn {
+        binary: binary_label,
+        source,
+    })?;
     Ok(RawOutput {
         stdout: output.stdout,
         stderr: output.stderr,

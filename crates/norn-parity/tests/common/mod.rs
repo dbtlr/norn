@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 pub use norn_fixtures::testing::oracle_present;
@@ -64,6 +66,32 @@ pub fn rewrite_debug_binary() -> PathBuf {
         "{} not found even after `cargo build -p norn --bin norn` — non-default CARGO_TARGET_DIR?",
         path.display()
     );
+    path
+}
+
+/// Write `body` as an executable `/bin/sh` script at `dir/name` — the one
+/// place this crate's tests materialize a fake binary, so every suite
+/// driving stubs (`tests/mcp.rs`, `tests/mutation.rs`) gets the same
+/// exec-safety handling.
+///
+/// The mode is set at open time and the handle is flushed and closed before
+/// this returns: a writable descriptor still open on the image is what makes
+/// `execve` refuse with `ExecutableFileBusy`, and a later `set_permissions`
+/// round-trip would widen that window for nothing. The residual cross-thread
+/// window (another test thread forking while this write is in flight, so its
+/// child inherits the descriptor) is absorbed by `exec`'s retry.
+pub fn write_stub(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let path = dir.join(name);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o755)
+        .open(&path)
+        .unwrap();
+    file.write_all(body.as_bytes()).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
     path
 }
 

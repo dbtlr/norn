@@ -18,9 +18,9 @@
 
 mod common;
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use common::write_stub;
 use norn_parity::cases::{Case, Fixture, Suite};
 use norn_parity::fixtures::{FixtureCache, Side};
 use norn_parity::report;
@@ -33,16 +33,6 @@ const CLEAN_1: Fixture = Fixture {
 };
 
 const MUT_CASE_ID: &str = "fab-mutation-clean";
-
-/// Write `body` as an executable `/bin/sh` script at `dir/name`.
-fn write_stub(dir: &Path, name: &str, body: &str) -> PathBuf {
-    let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
-}
 
 /// A stub that answers `--version` with the pinned token and otherwise writes
 /// `content` verbatim into `mutation.md` in its cwd, exit 0.

@@ -11,10 +11,10 @@
 
 mod common;
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
+use common::write_stub;
 use norn_parity::cases::{Case, Fixture, Suite};
 use norn_parity::run::{self, Mode, RunConfig, RunError};
 use norn_parity::Verdict;
@@ -31,16 +31,6 @@ const REQUEST_FRAMES: &[&str] = &[
     r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
     r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
 ];
-
-/// Write `body` as an executable `/bin/sh` script at `dir/name`.
-fn write_stub(dir: &Path, name: &str, body: &str) -> PathBuf {
-    let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
-}
 
 /// The `--version` preamble every stub shares, plus dispatch on `mcp` vs.
 /// anything else (any non-mcp/non-version argv exits 0 quietly — this
