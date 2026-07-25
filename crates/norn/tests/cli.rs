@@ -453,6 +453,41 @@ fn isolated_runtime_dir(tag: &str) -> std::path::PathBuf {
     dir
 }
 
+/// The owner idle TTL a summon-driven test runs its owners under. Short, because
+/// a test removes its runtime dir the moment it finishes while the detached
+/// owners it summoned are still alive: at the 120s production default those
+/// owners squat a deleted directory for two minutes after the suite exits.
+#[cfg(unix)]
+const TEST_OWNER_TTL_SECS: &str = "5";
+
+/// A `norn` invocation that will summon an owner: isolated runtime dir, isolated
+/// central-config home, and [`TEST_OWNER_TTL_SECS`] so anything left behind
+/// reaps promptly.
+#[cfg(unix)]
+fn norn_summoning(runtime_dir: &Path, cfg_home: &Path) -> Command {
+    let mut cmd = norn_cfg(cfg_home);
+    cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    cmd.env("NORN_EPHEMERAL_TTL_SECS", TEST_OWNER_TTL_SECS);
+    cmd
+}
+
+/// Every `*.sock` name currently bound under `runtime_dir`'s norn subdir. Called
+/// after each invocation and unioned across a run, this counts the DISTINCT
+/// owners a sequence of commands addressed — robust to an owner reaping (and
+/// deleting its socket) between two invocations, which a single end-of-test
+/// listing would miss.
+#[cfg(unix)]
+fn socket_names(runtime_dir: &Path) -> std::collections::BTreeSet<String> {
+    let Ok(entries) = std::fs::read_dir(runtime_dir.join("norn")) else {
+        return std::collections::BTreeSet::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".sock"))
+        .collect()
+}
+
 /// A single-document vault seeded with `title` / `status` frontmatter, returned
 /// as `(guard, vault_root)`. The vault is a NON-hidden `vault/` subdirectory of
 /// the tempdir: `tempfile::tempdir()` names its dir `.tmpXXXX` (dot-prefixed),
@@ -653,12 +688,10 @@ fn config_edited_after_warm_up_is_enforced_by_the_next_invocation() {
     let cfg_home = tempfile::tempdir().unwrap();
 
     // Warm an owner under the permissive config.
-    let warm = norn()
+    let warm = norn_summoning(&runtime_dir, cfg_home.path())
         .arg("-C")
         .arg(&vault)
         .args(["count"])
-        .env("XDG_RUNTIME_DIR", &runtime_dir)
-        .env("NORN_CONFIG_DIR", cfg_home.path())
         .output()
         .unwrap();
     assert_eq!(
@@ -675,22 +708,20 @@ fn config_edited_after_warm_up_is_enforced_by_the_next_invocation() {
     )
     .unwrap();
 
-    let out = norn()
+    let out = norn_summoning(&runtime_dir, cfg_home.path())
         .arg("-C")
         .arg(&vault)
         .args(["set", "a.md", "--field", "status=bogus", "--yes"])
-        .env("XDG_RUNTIME_DIR", &runtime_dir)
-        .env("NORN_CONFIG_DIR", cfg_home.path())
         .output()
         .unwrap();
 
     let _ = std::fs::remove_dir_all(&runtime_dir);
 
     let stderr = stderr_of(&out);
-    assert_ne!(
+    assert_eq!(
         out.status.code(),
-        Some(0),
-        "the edited config's allowed_values must be enforced; stderr was: {stderr:?}"
+        Some(2),
+        "a schema refusal is exit 2 (docs/errors.md); stderr was: {stderr:?}"
     );
     assert!(
         stderr.contains("is not allowed for 'status'"),
@@ -720,12 +751,10 @@ fn config_created_after_warm_up_surfaces_its_load_error() {
     let cfg_home = tempfile::tempdir().unwrap();
 
     // Warm an owner with NO config file present.
-    let warm = norn()
+    let warm = norn_summoning(&runtime_dir, cfg_home.path())
         .arg("-C")
         .arg(&vault)
         .args(["count"])
-        .env("XDG_RUNTIME_DIR", &runtime_dir)
-        .env("NORN_CONFIG_DIR", cfg_home.path())
         .output()
         .unwrap();
     assert_eq!(
@@ -744,12 +773,10 @@ fn config_created_after_warm_up_surfaces_its_load_error() {
     )
     .unwrap();
 
-    let out = norn()
+    let out = norn_summoning(&runtime_dir, cfg_home.path())
         .arg("-C")
         .arg(&vault)
         .args(["validate"])
-        .env("XDG_RUNTIME_DIR", &runtime_dir)
-        .env("NORN_CONFIG_DIR", cfg_home.path())
         .output()
         .unwrap();
 
@@ -768,5 +795,256 @@ fn config_created_after_warm_up_surfaces_its_load_error() {
     assert!(
         stderr.contains("is not in this rule's allowed_values"),
         "expected the self-contradicting-default detail, got: {stderr:?}"
+    );
+}
+
+/// NRN-475 / NRN-487: the owner is addressed by (vault root, build, config
+/// identity), so every addressing via for one registered root MUST derive the
+/// same config — otherwise the four vias split into two owners holding two
+/// schemas over one vault, each with its own writer lock.
+///
+/// `-C <root>` and `NORN_ROOT` resolve with `vault: None` even for a registered
+/// root, so reading the `[vaults.<name>].config` override off the resolved entry
+/// gave those two vias the vault's DEFAULT config path while `--vault` and the
+/// cwd via got the override. The override is now reverse-looked-up from the
+/// canonical root, independent of addressing.
+///
+/// The assertion is the observable one: one registered root whose override
+/// constrains `status`, four vias, one socket name and four identical refusals.
+#[cfg(unix)]
+#[test]
+fn all_addressing_vias_for_one_registered_root_derive_one_owner() {
+    let guard = tempfile::tempdir().unwrap();
+    let vault = guard.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::write(
+        vault.join("a.md"),
+        "---\ntype: note\ntitle: A\nstatus: backlog\n---\nbody\n",
+    )
+    .unwrap();
+    // The schema lives OUTSIDE the vault, reachable only through the
+    // registration — so a via that misses the override sees no config at all.
+    let override_config = guard.path().join("schema.yaml");
+    std::fs::write(
+        &override_config,
+        "validate:\n  rules:\n    - name: notes\n      allowed_values:\n        status:\n          - backlog\n          - done\n",
+    )
+    .unwrap();
+
+    let runtime_dir = isolated_runtime_dir("vias");
+    let cfg_home = tempfile::tempdir().unwrap();
+
+    let out = norn_summoning(&runtime_dir, cfg_home.path())
+        .args(["vault", "register", "reg"])
+        .arg(&vault)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "register: {:?}",
+        stderr_of(&out)
+    );
+    let out = norn_summoning(&runtime_dir, cfg_home.path())
+        .args(["vault", "set", "reg", "--config"])
+        .arg(&override_config)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "set: {:?}", stderr_of(&out));
+
+    let forbidden = ["set", "a.md", "--field", "status=bogus", "--yes"];
+    let mut sockets = std::collections::BTreeSet::new();
+    let mut run = |label: &str, cmd: &mut Command| {
+        let out = cmd.output().unwrap();
+        let stderr = stderr_of(&out);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "via {label}: a schema refusal is exit 2; stderr was: {stderr:?}"
+        );
+        assert!(
+            stderr.contains("is not allowed for 'status'"),
+            "via {label}: expected the override's constraint, got: {stderr:?}"
+        );
+        sockets.extend(socket_names(&runtime_dir));
+    };
+
+    run(
+        "--vault",
+        norn_summoning(&runtime_dir, cfg_home.path())
+            .args(["--vault", "reg"])
+            .args(forbidden),
+    );
+    run(
+        "-C",
+        norn_summoning(&runtime_dir, cfg_home.path())
+            .arg("-C")
+            .arg(&vault)
+            .args(forbidden),
+    );
+    run(
+        "NORN_ROOT",
+        norn_summoning(&runtime_dir, cfg_home.path())
+            .env("NORN_ROOT", &vault)
+            .args(forbidden),
+    );
+    run(
+        "cwd",
+        norn_summoning(&runtime_dir, cfg_home.path())
+            .current_dir(&vault)
+            .args(forbidden),
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+
+    assert_eq!(
+        sockets.len(),
+        1,
+        "all four vias must address ONE owner, saw sockets: {sockets:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(vault.join("a.md")).unwrap(),
+        "---\ntype: note\ntitle: A\nstatus: backlog\n---\nbody\n",
+        "no via may have applied the forbidden value"
+    );
+}
+
+/// NRN-475: a config that is PRESENT but the owner cannot READ is a hard error
+/// (`failed to read config <path>`, exit 1), not the run-under-defaults case —
+/// so its identity must differ from the no-config identity, or a warm
+/// defaults-owner keeps answering exit 0 where a cold owner exits 1. Covers the
+/// three unreadable shapes: a permissions denial, a directory where the file
+/// belongs, and a registered override pointing at nothing.
+#[cfg(unix)]
+#[test]
+fn a_config_that_appears_after_warm_up_but_cannot_be_read_is_not_served_as_absent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let guard = tempfile::tempdir().unwrap();
+    let vault = guard.path().join("vault");
+    std::fs::create_dir_all(vault.join(".norn")).unwrap();
+    std::fs::write(vault.join("a.md"), "---\ntype: note\ntitle: A\n---\nbody\n").unwrap();
+
+    let runtime_dir = isolated_runtime_dir("unreadable");
+    let cfg_home = tempfile::tempdir().unwrap();
+
+    let count = |label: &str| {
+        norn_summoning(&runtime_dir, cfg_home.path())
+            .arg("-C")
+            .arg(&vault)
+            .args(["count"])
+            .output()
+            .unwrap_or_else(|e| panic!("{label}: {e}"))
+    };
+
+    // Warm an owner with NO config file: it serves under defaults, exit 0.
+    let warm = count("warm");
+    assert_eq!(
+        warm.status.code(),
+        Some(0),
+        "warming must succeed; stderr was: {:?}",
+        stderr_of(&warm)
+    );
+
+    // (1) A chmod-000 config appears. The warm owner runs under defaults; a
+    // cold one would refuse.
+    let config = vault.join(".norn").join("config.yaml");
+    std::fs::write(&config, "validate:\n  rules: []\n").unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let out = count("chmod-000");
+    let stderr = stderr_of(&out);
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "an unreadable config must not be served as absent; stderr was: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("norn: failed to read config "),
+        "expected the read-failure diagnostic, got: {stderr:?}"
+    );
+
+    // (2) The config path is a DIRECTORY. `exists()` is true, the read fails.
+    std::fs::remove_file(&config).unwrap();
+    std::fs::create_dir_all(&config).unwrap();
+    let out = count("as-directory");
+    let stderr = stderr_of(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a config-as-directory must not be served as absent; stderr was: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("norn: failed to read config "),
+        "expected the read-failure diagnostic, got: {stderr:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+}
+
+/// NRN-475 companion: a registered `[vaults.<name>].config` override pointing at
+/// a MISSING file is an owner error (exit 1) — the owner does not fall back to
+/// the vault's default path — so it must not collide with the no-config identity
+/// of a warm owner summoned before the override was set.
+#[cfg(unix)]
+#[test]
+fn a_registered_override_pointing_at_nothing_is_not_served_as_absent() {
+    let guard = tempfile::tempdir().unwrap();
+    let vault = guard.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::write(vault.join("a.md"), "---\ntype: note\ntitle: A\n---\nbody\n").unwrap();
+
+    let runtime_dir = isolated_runtime_dir("missingovr");
+    let cfg_home = tempfile::tempdir().unwrap();
+
+    let out = norn_summoning(&runtime_dir, cfg_home.path())
+        .args(["vault", "register", "reg"])
+        .arg(&vault)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "register: {:?}",
+        stderr_of(&out)
+    );
+
+    // Warm an owner while the vault has no config at all.
+    let warm = norn_summoning(&runtime_dir, cfg_home.path())
+        .args(["--vault", "reg", "count"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        warm.status.code(),
+        Some(0),
+        "warming must succeed; stderr was: {:?}",
+        stderr_of(&warm)
+    );
+
+    // Point the registration at a config that does not exist.
+    let missing = guard.path().join("gone.yaml");
+    let out = norn_summoning(&runtime_dir, cfg_home.path())
+        .args(["vault", "set", "reg", "--config"])
+        .arg(&missing)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "set: {:?}", stderr_of(&out));
+
+    let out = norn_summoning(&runtime_dir, cfg_home.path())
+        .args(["--vault", "reg", "count"])
+        .output()
+        .unwrap();
+
+    let _ = std::fs::remove_dir_all(&runtime_dir);
+
+    let stderr = stderr_of(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a missing override must not be served by the warm no-config owner; stderr was: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("norn: failed to read config "),
+        "expected the read-failure diagnostic, got: {stderr:?}"
     );
 }

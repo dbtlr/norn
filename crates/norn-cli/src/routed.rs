@@ -73,49 +73,44 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
         return Err(diagnostic);
     }
 
-    // A registered vault may carry a `[vaults.<name>].config` override; the
-    // summoned owner warms under it (ADR 0017 resolver-derived config). An
-    // unregistered cwd (the common ephemeral case) has no override — the owner
-    // loads `<root>/.norn/config.yaml`. `resolve` already looked the entry up
-    // for a registry via, so the resolved entry itself carries the override —
-    // no second registry lookup here.
-    let config_override = resolved.vault.as_ref().and_then(|v| v.config.clone());
-
-    // Registration is what unlocks durable telemetry (NRN-400): a registered
-    // vault resolves an events dir (honoring a `logs` override) the owner writes
-    // the mutation event stream under and `audit` reads back; an unregistered
-    // root resolves `None`, so its owner keeps in-memory (ephemeral) telemetry.
-    //
-    // Durability is keyed on whether the RESOLVED ROOT is registered, NOT on how
-    // this invocation addressed it — an owner is keyed by vault root + build, so
-    // a registered root reached by `-C <path>` (resolver name `None`) must
-    // resolve the SAME events dir as one reached by `--vault <name>`, or the
-    // first summon would decide durability by luck of addressing. A reverse
-    // lookup over the canonical root answers "is this root registered?"
-    // independent of the addressing.
+    // Both owner inputs a registration supplies — the `[vaults.<name>].config`
+    // override the owner warms under (ADR 0017) and the durable events dir
+    // (NRN-400) — are keyed on whether the RESOLVED ROOT is registered, NOT on
+    // how this invocation addressed it. The `-C <path>` and `NORN_ROOT` vias
+    // resolve with `vault: None` even for a registered root, so reading the
+    // override off `resolved.vault` would hand those two vias a different
+    // config than `--vault <name>` and the binding via get. Since the owner is
+    // addressed by (root, build, config identity), that is not a cosmetic
+    // difference: the four vias would split into two owners holding two
+    // schemas over one vault, each with its own writer lock. One reverse lookup
+    // over the canonical root answers "is this root registered?" independent of
+    // the addressing, and both inputs are read from it.
     //
     // Fail-safe on a registry I/O or parse error: `.ok()` alone would collapse
-    // `Err` onto the same `None` as a genuinely unregistered root, silently
-    // dropping durability for a vault that IS registered — the operator would
-    // lose the audit trail with no signal. Distinguish the two: an `Err` prints
-    // one client-side warning through the closed `warning:` vocabulary and
-    // proceeds with `events_dir = None`; the mutation itself is never blocked
+    // `Err` onto the same `None` as a genuinely unregistered root — silently
+    // dropping durability, and silently falling back to `<root>/.norn/config.yaml`
+    // for a vault whose schema lives elsewhere. Distinguish the two: an `Err`
+    // prints one client-side warning through the closed `warning:` vocabulary
+    // and proceeds with both inputs `None`; the command itself is never blocked
     // on the registry read.
-    let events_dir = match registry.reverse_lookup(&resolved.root) {
-        Ok(found) => found.and_then(|vault| {
-            norn_config::events_dir_for(
-                |key| std::env::var_os(key),
-                &resolved.root,
-                vault.logs.as_deref(),
-            )
-        }),
+    let registered = match registry.reverse_lookup(&resolved.root) {
+        Ok(found) => found,
         Err(e) => {
             eprintln!(
-                "warning: vault registry unreadable; audit trail disabled for this invocation ({e})"
+                "warning: vault registry unreadable; this invocation falls back to \
+                 <root>/.norn/config.yaml and keeps no audit trail ({e})"
             );
             None
         }
     };
+    let config_override = registered.as_ref().and_then(|vault| vault.config.clone());
+    let events_dir = registered.as_ref().and_then(|vault| {
+        norn_config::events_dir_for(
+            |key| std::env::var_os(key),
+            &resolved.root,
+            vault.logs.as_deref(),
+        )
+    });
 
     let exe = std::env::current_exe()
         .map_err(|e| Diagnostic::new(format!("cannot locate the norn executable: {e}")))?;

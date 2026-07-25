@@ -50,10 +50,22 @@ use crate::error::ClientError;
 /// Length of the vault-identity hash prefix in the socket name (hex chars).
 const ROOT_HASH_HEX_LEN: usize = 16;
 
-/// The config-identity stand-in for a vault with no config file at the resolved
-/// path. Distinct from any content hash, so creating or removing the file mints
-/// a different socket.
+/// The config-identity stand-in for a vault the owner would run under DEFAULTS:
+/// no override registered and no `<root>/.norn/config.yaml` on disk. Distinct
+/// from any content hash, so creating or removing the file mints a different
+/// socket.
 const NO_CONFIG_IDENTITY: &str = "no-config";
+
+/// Prefix of the config identity for a config the owner would fail to READ — a
+/// permissions denial, a directory where a file belongs, or an override path
+/// pointing at nothing. Such a config is PRESENT-but-unusable, which the owner
+/// reports as `failed to read config <path>: <io>` and exits 1 on; it must
+/// therefore never share an identity with [`NO_CONFIG_IDENTITY`] (which serves
+/// exit 0 under defaults). The suffix is the `io::ErrorKind` label, so the three
+/// unreadable shapes also stay distinct from each other. The label only has to
+/// differ — if a toolchain renames a kind, the effect is a new socket and one
+/// fresh owner, never a wrong answer.
+const UNREADABLE_CONFIG_PREFIX: &str = "unreadable-config:";
 
 /// Length of the build-fingerprint segment in the socket name (hex chars).
 const FINGERPRINT_HEX_LEN: usize = 16;
@@ -125,28 +137,42 @@ pub(crate) fn current_uid() -> u32 {
     0
 }
 
-/// The content identity of the config file an owner summoned for `vault_root`
-/// would warm under: the blake3 of the file's bytes, or [`NO_CONFIG_IDENTITY`]
-/// when no file is present at the resolved path.
+/// The identity of the config an owner summoned for `vault_root` would warm
+/// under: the blake3 of the file's bytes when it reads, [`NO_CONFIG_IDENTITY`]
+/// when the owner would run under defaults, and an
+/// [`UNREADABLE_CONFIG_PREFIX`]-tagged kind when the file is present but the
+/// owner's read would fail.
 ///
-/// Resolution mirrors the owner's: an explicit `[vaults.<name>].config` override
-/// wins, else `<vault_root>/.norn/config.yaml`. The path is resolved whether or
-/// not it exists, so a config CREATED after an owner warmed changes the identity
-/// exactly as an edit does.
+/// Resolution mirrors the owner's (`norn-owner`'s `config_path` +
+/// `load_cache_config`): an explicit `[vaults.<name>].config` override wins,
+/// else `<vault_root>/.norn/config.yaml`. Two asymmetries in that mirror are
+/// load-bearing:
+///
+/// - **A missing DEFAULT path means defaults** — the owner serves the vault with
+///   an empty config and exits 0 — so it maps to [`NO_CONFIG_IDENTITY`].
+/// - **A missing OVERRIDE path is an ERROR** — the owner reports `failed to read
+///   config <path>` and exits 1 — so it maps to the unreadable identity, never
+///   to [`NO_CONFIG_IDENTITY`]. Collapsing the two would let a warm
+///   defaults-owner keep answering exit 0 where a cold owner exits 1, which is
+///   the same class of staleness the config keying exists to close.
 ///
 /// Content-hashed rather than stat-keyed: a same-bytes rewrite (a checkout, a
 /// `touch`) must NOT orphan a warm owner, and a same-size edit within one mtime
-/// tick must not be missed. Config files are small, so the read is negligible
-/// against the per-invocation budget. An unreadable file hashes as absent — the
-/// owner surfaces the read error itself.
+/// tick must not be missed. The whole file is read on every invocation, so an
+/// unbounded config costs its own size per command.
 pub fn config_identity(vault_root: &Path, config_override: Option<&Path>) -> String {
-    let path = match config_override {
-        Some(p) => p.to_path_buf(),
-        None => vault_root.join(".norn").join("config.yaml"),
+    let (path, is_override) = match config_override {
+        Some(p) => (p.to_path_buf(), true),
+        None => (vault_root.join(".norn").join("config.yaml"), false),
     };
     match std::fs::read(&path) {
         Ok(bytes) => blake3::hash(&bytes).to_hex().to_string(),
-        Err(_) => NO_CONFIG_IDENTITY.to_string(),
+        // Absent DEFAULT path only: the owner runs under defaults here. An
+        // absent OVERRIDE path falls through to the unreadable arm.
+        Err(e) if !is_override && e.kind() == std::io::ErrorKind::NotFound => {
+            NO_CONFIG_IDENTITY.to_string()
+        }
+        Err(e) => format!("{UNREADABLE_CONFIG_PREFIX}{:?}", e.kind()),
     }
 }
 
@@ -279,6 +305,63 @@ mod tests {
             config_identity(&root, None),
             "the default path is absent here, so the two must differ"
         );
+    }
+
+    /// An override pointing at nothing is an owner ERROR (`failed to read config
+    /// <path>`, exit 1), not the run-under-defaults case — so it must not share
+    /// the no-config identity, or a warm defaults-owner would keep answering
+    /// exit 0.
+    #[test]
+    fn a_missing_override_is_unreadable_not_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let missing = tmp.path().join("nowhere.yaml");
+        let identity = config_identity(&root, Some(&missing));
+        assert!(
+            identity.starts_with(UNREADABLE_CONFIG_PREFIX),
+            "expected an unreadable identity, got {identity:?}"
+        );
+        assert_ne!(identity, config_identity(&root, None));
+    }
+
+    /// A present-but-unreadable config (permissions) and a config path that is a
+    /// DIRECTORY are both owner read errors, and both must be distinct from the
+    /// no-config identity and from a content hash.
+    #[cfg(unix)]
+    #[test]
+    fn present_but_unreadable_configs_are_distinct_from_absent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("perm");
+        let norn_dir = root.join(".norn");
+        std::fs::create_dir_all(&norn_dir).unwrap();
+        let absent = config_identity(&tmp.path().join("empty"), None);
+        assert_eq!(absent, NO_CONFIG_IDENTITY);
+
+        let config = norn_dir.join("config.yaml");
+        std::fs::write(&config, "validate:\n  rules: []\n").unwrap();
+        let readable = config_identity(&root, None);
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = config_identity(&root, None);
+        // Restore before the tempdir cleanup walks it.
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            unreadable.starts_with(UNREADABLE_CONFIG_PREFIX),
+            "a chmod-000 config must read as unreadable, got {unreadable:?}"
+        );
+        assert_ne!(unreadable, absent);
+        assert_ne!(unreadable, readable);
+
+        // A directory where the config file belongs.
+        let dir_root = tmp.path().join("asdir");
+        std::fs::create_dir_all(dir_root.join(".norn").join("config.yaml")).unwrap();
+        let as_dir = config_identity(&dir_root, None);
+        assert!(
+            as_dir.starts_with(UNREADABLE_CONFIG_PREFIX),
+            "a config-as-directory must read as unreadable, got {as_dir:?}"
+        );
+        assert_ne!(as_dir, absent);
     }
 
     #[test]
