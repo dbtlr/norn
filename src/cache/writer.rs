@@ -379,10 +379,13 @@ impl crate::cache::Cache {
         );
         overlay_files.sort_by(|a, b| a.path.cmp(&b.path));
         fresh_index.files = overlay_files;
-        crate::links::resolve_links(&fresh_index.files, &mut fresh_index.documents);
-        // Global link resolution is an O(vault) pass with no natural inner loop to
-        // batch; tick once on completion so the sequence advances across it.
-        progress.tick();
+        // Global link resolution walks every document — batch-tick that per-doc
+        // loop rather than a single post-completion tick (NRN-465 review).
+        crate::links::resolve_links_reported(
+            &fresh_index.files,
+            &mut fresh_index.documents,
+            progress,
+        );
 
         let fresh_docs: std::collections::HashMap<_, _> = fresh_index
             .documents

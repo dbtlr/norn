@@ -4,7 +4,8 @@ use std::path::Path;
 use crate::core::{Diagnostic, Document, GraphIndex, Severity, VaultFile};
 use crate::frontmatter::extract_frontmatter;
 use crate::links::{
-    parse_block_ids, parse_commonmark, parse_frontmatter_wikilinks, parse_wikilinks, resolve_links,
+    parse_block_ids, parse_commonmark, parse_frontmatter_wikilinks, parse_wikilinks,
+    resolve_links_reported,
 };
 use camino::{Utf8Path, Utf8PathBuf};
 use walkdir::WalkDir;
@@ -69,7 +70,9 @@ pub(crate) fn build_index_with_progress(
     files.sort_by(|a, b| a.path.cmp(&b.path));
     ignored_files.sort();
     documents.sort_by(|a, b| a.path.cmp(&b.path));
-    resolve_links(&files, &mut documents);
+    // Tick the per-document link resolution too — it is the O(vault) tail of the
+    // builder that would otherwise run unticked after the parse loop (NRN-465).
+    resolve_links_reported(&files, &mut documents, progress);
 
     Ok(GraphIndex {
         root,

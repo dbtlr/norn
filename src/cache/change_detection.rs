@@ -93,6 +93,9 @@ pub(crate) fn detect_reported(
     }
 
     for path in cached.keys() {
+        // Classifying cached-only deletions — pure in-memory hashmap probing, but
+        // it spans every cached path, so batch-tick it too (NRN-465 review).
+        batch.record();
         if !live.contains_key(path) {
             changes.push(FileChange::Deleted(path.clone()));
         }
