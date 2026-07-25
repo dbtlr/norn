@@ -270,11 +270,11 @@ mod tests {
     fn a_refused_set_prints_the_coded_error_on_stderr_and_exits_usage() {
         let mut report = base_report(false);
         report.outcome = MutationOutcome::Refused;
-        report.error = Some(CodedError {
-            code: "target-not-found".into(),
-            message: "target not found: missing.md".into(),
-            path: None,
-        });
+        report.error = Some(CodedError::new(
+            "target-not-found",
+            "target not found: missing.md",
+            None,
+        ));
         let mut out = Vec::new();
         let mut err = Vec::new();
         let exit = {

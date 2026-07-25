@@ -52,12 +52,53 @@ pub enum MutationOutcome {
 /// A coded, report-shaped mutation error — the wire twin of the core
 /// `ApplyError` envelope. `path` is present when the error is scoped to one
 /// document.
+///
+/// # Recovery slots
+///
+/// Past `code` / `message` / `path`, the envelope carries named, typed,
+/// OPTIONAL **recovery slots**: the facts a caller needs to turn the refusal
+/// into a passing retry, as data rather than prose. A slot is populated by the
+/// codes that have that fact and omitted entirely otherwise, so the envelope
+/// stays ONE flat shape a consumer parses once — the same closed-contract
+/// discipline [`crate::Finding`] follows, rather than a per-code payload union.
+/// Every slot is additive: a caller that reads only `code` + `message` is
+/// unaffected by a new one.
+///
+/// `allowed` is the recovery slot for the `value-not-allowed` family; the
+/// message still renders the same facts for a human.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodedError {
     pub code: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Recovery slot for `value-not-allowed`: the values the schema accepts for
+    /// the offending field, so a caller retries from data instead of parsing
+    /// the allowed list out of `message`. It is the INTERSECTION of every
+    /// co-applying rule's `allowed_values` set — every listed value satisfies
+    /// the whole schema, not just one rule. Empty (omitted) for every other
+    /// code, and for the pathological config whose co-applying rules share no
+    /// value at all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed: Vec<Value>,
+}
+
+impl CodedError {
+    /// A refusal carrying no recovery slot.
+    pub fn new(code: impl Into<String>, message: impl Into<String>, path: Option<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            path,
+            allowed: Vec::new(),
+        }
+    }
+
+    /// Attach the [`CodedError::allowed`] recovery slot.
+    pub fn with_allowed(mut self, allowed: Vec<Value>) -> Self {
+        self.allowed = allowed;
+        self
+    }
 }
 
 /// A non-fatal mutation warning carried in the report (unknown field, an
@@ -547,6 +588,26 @@ mod tests {
         );
         let back: ApplyParams = serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn a_refusal_without_a_recovery_slot_serializes_to_code_message_path() {
+        let e = CodedError::new("target-not-found", "doc not found: x", None);
+        assert_eq!(
+            serde_json::to_value(&e).unwrap(),
+            json!({ "code": "target-not-found", "message": "doc not found: x" }),
+            "an unpopulated recovery slot is omitted, not null"
+        );
+    }
+
+    #[test]
+    fn the_allowed_recovery_slot_round_trips_as_typed_values() {
+        let e = CodedError::new("value-not-allowed", "…", Some("notes/a.md".into()))
+            .with_allowed(vec![json!("backlog"), json!("done")]);
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["allowed"], json!(["backlog", "done"]));
+        let back: CodedError = serde_json::from_value(v).unwrap();
+        assert_eq!(back, e);
     }
 
     #[test]

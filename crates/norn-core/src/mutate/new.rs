@@ -165,22 +165,17 @@ pub fn execute(
             .iter()
             .find(|o| o.status == OpStatus::Failed)
             .and_then(|o| o.error.clone())
-            .map(|e| CodedError {
-                code: e.code,
-                message: e.message,
-                path: e.path,
-            })
-            .unwrap_or_else(|| CodedError {
-                code: "internal-error".into(),
-                message: "apply refused without a coded op error".into(),
-                path: None,
+            .map(|e| CodedError::new(e.code, e.message, e.path))
+            .unwrap_or_else(|| {
+                CodedError::new(
+                    "internal-error",
+                    "apply refused without a coded op error",
+                    None,
+                )
             });
-        return Ok(refused_new(Refusal {
-            code_owned: Some(coded.code.clone()),
-            code: "",
-            message: coded.message.clone(),
-            path: coded.path.clone(),
-        }));
+        return Ok(refused_new(
+            refusal_owned(coded.code, coded.message, coded.path).with_allowed(coded.allowed),
+        ));
     }
 
     let applied = params.confirm;
@@ -741,8 +736,9 @@ fn build_create(
     // here at forecast/preflight — before any file lands — with --force the
     // documented bypass; without it a clean forecast could precede a
     // schema-violating create, defeating plan-then-apply. The satisfiable set
-    // rides in the refusal message so an agent can recover without a second
-    // query; the code/message converge on `set`'s `value-not-allowed` family.
+    // rides in the refusal message and in the envelope's `allowed` recovery
+    // slot, so an agent retries from data rather than a second query; the
+    // code/message/slot converge on `set`'s `value-not-allowed` family.
     // `allowed_values_in_rules` intersects EVERY co-applying rule declaring the
     // field, so a value permitted by one rule but rejected by another never
     // reaches the write, and the message names the values that satisfy them all.
@@ -765,7 +761,8 @@ fn build_create(
                     &coerce::display_allowed(&allowed),
                 ),
                 Some(doc_path.to_string()),
-            ));
+            )
+            .with_allowed(allowed));
         }
         allowed_bypass.push(coerce::force_bypass_warning(
             field,
@@ -880,12 +877,23 @@ fn parse_now(today: &str) -> anyhow::Result<NaiveDateTime> {
 }
 
 /// A coded pre-write refusal. `code_owned` carries a dynamic code (containment /
-/// coercion families) when the discriminator isn't a `'static` literal.
+/// coercion families) when the discriminator isn't a `'static` literal;
+/// `allowed` is the envelope's recovery slot, set by the families that have one.
 struct Refusal {
     code: &'static str,
     code_owned: Option<String>,
     message: String,
     path: Option<String>,
+    allowed: Vec<Value>,
+}
+
+impl Refusal {
+    /// Attach the satisfiable value set the refusal envelope carries as its
+    /// `allowed` recovery slot.
+    fn with_allowed(mut self, allowed: Vec<Value>) -> Self {
+        self.allowed = allowed;
+        self
+    }
 }
 
 fn refusal(code: &'static str, message: impl Into<String>, path: Option<String>) -> Refusal {
@@ -894,6 +902,7 @@ fn refusal(code: &'static str, message: impl Into<String>, path: Option<String>)
         code_owned: None,
         message: message.into(),
         path,
+        allowed: Vec::new(),
     }
 }
 
@@ -907,6 +916,7 @@ fn refusal_owned(
         code_owned: Some(code.into()),
         message: message.into(),
         path,
+        allowed: Vec::new(),
     }
 }
 
@@ -925,11 +935,7 @@ fn refused_new(r: Refusal) -> MutationExecution<NewReport> {
             body_bytes: 0,
             warnings: Vec::new(),
             predicted_path: None,
-            error: Some(CodedError {
-                code,
-                message: r.message,
-                path: r.path,
-            }),
+            error: Some(CodedError::new(code, r.message, r.path).with_allowed(r.allowed)),
         },
         touched_paths: Vec::new(),
     }

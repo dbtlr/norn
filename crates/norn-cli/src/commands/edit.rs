@@ -273,11 +273,7 @@ fn refused_output(args: &EditArgs, message: &str) -> Output {
         body_bytes_new: None,
         applied: false,
         outcome: MutationOutcome::Refused,
-        error: Some(CodedError {
-            code: "edit-input-invalid".into(),
-            message: message.to_string(),
-            path: None,
-        }),
+        error: Some(CodedError::new("edit-input-invalid", message, None)),
     };
     edit_output(args, report)
 }

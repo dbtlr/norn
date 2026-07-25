@@ -45,7 +45,10 @@ pub fn execute(
                 crate::target::TargetRefusalFamily::NotFound,
                 format!("doc not found: {}", params.target),
             );
-            return Ok(refused(params.target.clone(), code, msg, None));
+            return Ok(refused(
+                params.target.clone(),
+                CodedError::new(code, msg, None),
+            ));
         }
         crate::target::TargetResolution::Ambiguous(candidates) => {
             let (code, msg) = crate::target::target_refusal(
@@ -60,7 +63,10 @@ pub fn execute(
                         .join(", ")
                 ),
             );
-            return Ok(refused(params.target.clone(), code, msg, None));
+            return Ok(refused(
+                params.target.clone(),
+                CodedError::new(code, msg, None),
+            ));
         }
     };
     let target_str = target_path.to_string();
@@ -80,9 +86,11 @@ pub fn execute(
         Some(_) => {
             return Ok(refused(
                 target_str,
-                "frontmatter-not-mapping",
-                "frontmatter is not a top-level mapping",
-                Some(target_path.to_string()),
+                CodedError::new(
+                    "frontmatter-not-mapping",
+                    "frontmatter is not a top-level mapping",
+                    Some(target_path.to_string()),
+                ),
             ));
         }
     };
@@ -93,9 +101,8 @@ pub fn execute(
         Err(e) => {
             return Ok(refused(
                 target_str,
-                e.code(),
-                e.to_string(),
-                Some(target_path.to_string()),
+                CodedError::new(e.code(), e.to_string(), Some(target_path.to_string()))
+                    .with_allowed(e.allowed()),
             ));
         }
     };
@@ -174,15 +181,13 @@ pub fn execute(
             .iter()
             .find(|o| o.status == OpStatus::Failed)
             .and_then(|o| o.error.clone())
-            .map(|e| CodedError {
-                code: e.code,
-                message: e.message,
-                path: e.path,
-            })
-            .unwrap_or_else(|| CodedError {
-                code: "internal-error".into(),
-                message: "apply refused without a coded op error".into(),
-                path: None,
+            .map(|e| CodedError::new(e.code, e.message, e.path))
+            .unwrap_or_else(|| {
+                CodedError::new(
+                    "internal-error",
+                    "apply refused without a coded op error",
+                    None,
+                )
             });
         return Ok(MutationExecution {
             report: SetReport {
@@ -316,7 +321,7 @@ fn synth(
                 if !force {
                     return Err(SetError::FieldJsonNotAllowed {
                         field: key.clone(),
-                        allowed: coerce::display_allowed(&allowed),
+                        allowed,
                     });
                 }
                 warnings.push(coerce::force_bypass_warning(
@@ -551,7 +556,7 @@ fn coerce_kv_slice(
                         return Err(SetError::ValueNotAllowed {
                             field: key.clone(),
                             value: coerce::display_value(&coerced),
-                            allowed: coerce::display_allowed(&allowed),
+                            allowed,
                         });
                     }
                     w.push(coerce::force_bypass_warning(
@@ -620,12 +625,7 @@ fn unknown_field(key: &str) -> MutationWarning {
     }
 }
 
-fn refused(
-    target: impl Into<String>,
-    code: &str,
-    message: impl Into<String>,
-    path: Option<String>,
-) -> MutationExecution<SetReport> {
+fn refused(target: impl Into<String>, error: CodedError) -> MutationExecution<SetReport> {
     MutationExecution {
         report: SetReport {
             schema_version: 2,
@@ -639,11 +639,7 @@ fn refused(
             body_bytes_old: None,
             applied: false,
             outcome: MutationOutcome::Refused,
-            error: Some(CodedError {
-                code: code.into(),
-                message: message.into(),
-                path,
-            }),
+            error: Some(error),
             warnings: Vec::new(),
         },
         touched_paths: Vec::new(),
@@ -658,7 +654,7 @@ enum SetError {
     ValueNotAllowed {
         field: String,
         value: String,
-        allowed: String,
+        allowed: Vec<Value>,
     },
     FieldJsonInvalid {
         field: String,
@@ -670,7 +666,7 @@ enum SetError {
     },
     FieldJsonNotAllowed {
         field: String,
-        allowed: String,
+        allowed: Vec<Value>,
     },
     RequiredFieldRemoved {
         field: String,
@@ -703,6 +699,17 @@ impl SetError {
             SetError::FrontmatterNotMapping => "frontmatter-not-mapping",
         }
     }
+
+    /// The `allowed` recovery slot for the refusal envelope: the satisfiable
+    /// value set for the `value-not-allowed` family, empty for every other
+    /// refusal.
+    fn allowed(&self) -> Vec<Value> {
+        match self {
+            SetError::ValueNotAllowed { allowed, .. }
+            | SetError::FieldJsonNotAllowed { allowed, .. } => allowed.clone(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 impl std::fmt::Display for SetError {
@@ -713,7 +720,11 @@ impl std::fmt::Display for SetError {
                 field,
                 value,
                 allowed,
-            } => write!(f, "{}", coerce::value_not_allowed_message(field, value, allowed)),
+            } => write!(
+                f,
+                "{}",
+                coerce::value_not_allowed_message(field, value, &coerce::display_allowed(allowed))
+            ),
             SetError::FieldJsonInvalid { field, detail } => {
                 write!(f, "--field-json value is not valid JSON ({field}): {detail}")
             }
@@ -723,7 +734,8 @@ impl std::fmt::Display for SetError {
             ),
             SetError::FieldJsonNotAllowed { field, allowed } => write!(
                 f,
-                "--field-json value for '{field}' is not allowed (allowed: {allowed}); use --force to override"
+                "--field-json value for '{field}' is not allowed (allowed: {}); use --force to override",
+                coerce::display_allowed(allowed)
             ),
             SetError::RequiredFieldRemoved { field } => {
                 write!(f, "cannot remove required field '{field}'; use --force to override")
@@ -1319,6 +1331,11 @@ mod tests {
             "the refusal names the intersection, not one rule's list: {}",
             err.message
         );
+        assert_eq!(
+            err.allowed,
+            vec![serde_json::json!("backlog"), serde_json::json!("done")],
+            "the recovery slot carries the same satisfiable set as data"
+        );
     }
 
     #[test]
@@ -1330,6 +1347,10 @@ mod tests {
         });
         assert_eq!(err.code, "value-not-allowed");
         assert!(err.message.contains("(allowed: a, b)"), "{}", err.message);
+        assert_eq!(
+            err.allowed,
+            vec![serde_json::json!("a"), serde_json::json!("b")]
+        );
     }
 
     #[test]
@@ -1344,6 +1365,10 @@ mod tests {
             err.message.contains("(allowed: backlog, done)"),
             "{}",
             err.message
+        );
+        assert_eq!(
+            err.allowed,
+            vec![serde_json::json!("backlog"), serde_json::json!("done")]
         );
     }
 
@@ -1368,6 +1393,11 @@ mod tests {
             err.message.contains("(allowed: backlog, done)"),
             "{}",
             err.message
+        );
+        assert_eq!(
+            err.allowed,
+            vec![serde_json::json!("backlog"), serde_json::json!("done")],
+            "`new` carries the same recovery slot as `set`"
         );
         assert!(
             !root.join("notes/b.md").as_std_path().exists(),

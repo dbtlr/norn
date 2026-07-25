@@ -416,11 +416,7 @@ mod tests {
             applied,
             outcome,
             error: match outcome {
-                MutationOutcome::Refused => Some(CodedError {
-                    code: "set-refused".into(),
-                    message: "refused".into(),
-                    path: None,
-                }),
+                MutationOutcome::Refused => Some(CodedError::new("set-refused", "refused", None)),
                 MutationOutcome::Applied | MutationOutcome::Forecast => None,
             },
             warnings: vec![],

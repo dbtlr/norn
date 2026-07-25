@@ -99,6 +99,7 @@ pub(crate) fn envelope(confirm: bool, report: SetReport) -> MutationResult<SetOu
 mod tests {
     use super::*;
     use rmcp::handler::server::tool::IntoCallToolResult;
+    use serde_json::json;
 
     fn report(outcome: MutationOutcome, applied: bool) -> SetReport {
         SetReport {
@@ -151,20 +152,28 @@ mod tests {
 
     #[test]
     fn value_not_allowed_refusal_rides_the_mcp_envelope() {
-        // NRN-430: `set --field`/`--push` allowed-values refusals route through
-        // the same owner seam as the CLI, so `vault.set` surfaces the refusal
-        // identically — isError:true, with the coded error and the allowed list
-        // (carried in the message) preserved in structuredContent.
+        // `set --field`/`--push` allowed-values refusals route through the same
+        // owner seam as the CLI, so `vault.set` surfaces the refusal identically
+        // — isError:true, with the coded error, its `allowed` recovery slot, and
+        // the prose preserved in structuredContent.
         let mut r = report(MutationOutcome::Refused, false);
-        r.error = Some(norn_wire::CodedError {
-            code: "value-not-allowed".into(),
-            message: "value 'someday' is not allowed for 'status' (allowed: backlog, done); use --force to override".into(),
-            path: Some("notes/alpha.md".into()),
-        });
+        r.error = Some(
+            norn_wire::CodedError::new(
+                "value-not-allowed",
+                "value 'someday' is not allowed for 'status' (allowed: backlog, done); use --force to override",
+                Some("notes/alpha.md".into()),
+            )
+            .with_allowed(vec![json!("backlog"), json!("done")]),
+        );
         let result = envelope(true, r).into_call_tool_result().unwrap();
         assert_eq!(result.is_error, Some(true));
         let sc = result.structured_content.unwrap();
         assert_eq!(sc["report"]["error"]["code"], "value-not-allowed");
+        assert_eq!(
+            sc["report"]["error"]["allowed"],
+            json!(["backlog", "done"]),
+            "the recovery slot crosses MCP as data, not prose"
+        );
         let msg = sc["report"]["error"]["message"].as_str().unwrap();
         assert!(msg.contains("backlog, done"), "{msg}");
         assert!(msg.contains("--force"), "{msg}");
