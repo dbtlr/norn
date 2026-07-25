@@ -165,3 +165,46 @@ fn consistency_mode_exits_0_with_no_disagreements() {
         output.status.code()
     );
 }
+
+#[test]
+fn help_prints_usage_on_stdout_and_exits_0() {
+    // Asking for usage is a request that succeeded. A nonzero exit here reads
+    // as a parity failure to anything running this bin in a pipeline.
+    for flag in ["--help", "-h"] {
+        let output = Command::new(bin())
+            .current_dir(common::workspace_root())
+            .arg(flag)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run norn-parity {flag}: {e}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "`norn-parity {flag}` must exit 0, got {:?}",
+            output.status.code()
+        );
+        assert!(
+            stdout.starts_with("usage: norn-parity"),
+            "`norn-parity {flag}` must print usage on STDOUT, got:\n{stdout}"
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "usage is not a diagnostic, so stderr stays empty"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_flag_is_a_runner_error_on_stderr() {
+    let output = Command::new(bin())
+        .current_dir(common::workspace_root())
+        .arg("--nonsense")
+        .output()
+        .expect("failed to run norn-parity --nonsense");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected argument: --nonsense"),
+        "the diagnostic names the argument, got:\n{stderr}"
+    );
+}

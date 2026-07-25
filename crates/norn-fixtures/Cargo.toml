@@ -13,5 +13,7 @@ dist = false
 name = "norn-fixtures"
 path = "src/main.rs"
 
-[dev-dependencies]
+[dependencies]
+# `testing::ScratchEnv` builds the isolated environment its oracle probe
+# spawns under, so this is a normal dependency, not a dev one.
 tempfile = "3"

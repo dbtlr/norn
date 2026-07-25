@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 pub use norn_fixtures::testing::oracle_present;
@@ -64,6 +66,70 @@ pub fn rewrite_debug_binary() -> PathBuf {
         "{} not found even after `cargo build -p norn --bin norn` — non-default CARGO_TARGET_DIR?",
         path.display()
     );
+    path
+}
+
+/// A scratch environment for tests that drive `norn_parity::exec` directly:
+/// the cleared-environment `SpawnEnv` plus the temp tree backing it, dropped
+/// together when the test ends.
+pub struct Scratch {
+    _dir: tempfile::TempDir,
+    pub env: norn_parity::exec::SpawnEnv,
+}
+
+pub fn scratch_env() -> Scratch {
+    let dir = tempfile::TempDir::new().expect("failed to create a scratch temp dir");
+    let env = norn_parity::exec::SpawnEnv::create_in(dir.path())
+        .expect("failed to create the scratch HOME/XDG tree");
+    Scratch { _dir: dir, env }
+}
+
+/// Write `body` as an executable `/bin/sh` script at `dir/name` — the one
+/// place this crate's tests materialize a fake binary, so every suite
+/// driving stubs (`tests/mcp.rs`, `tests/mutation.rs`, `tests/environment.rs`,
+/// `tests/verdicts.rs`) gets the same exec-safety and portability handling.
+///
+/// PORTABILITY RULE, enforced below: a stub body is POSIX shell, and uses
+/// `printf`, never `echo`. `/bin/sh` is bash on macOS and dash on
+/// Debian-family CI, and their `echo` builtins disagree — dash's interprets
+/// backslash escapes, so a body that emits one line locally emits several
+/// there and a case's measured divergence changes size with the runner.
+/// `printf '%s\n' '<payload>'` behaves identically under both (with the
+/// payload as an ARGUMENT, so a `%` inside it is never a format directive).
+/// Same reasoning bars the other bashisms — `echo -e`, `[[ ]]`,
+/// `${var/old/new}`.
+///
+/// The mode is requested at open time (which applies it only when the file is
+/// CREATED — every caller writes a fresh path under its own temp dir) and the
+/// handle is flushed and closed before this returns: a writable descriptor
+/// still open on the image is what makes `execve` refuse with
+/// `ExecutableFileBusy`, and a later `set_permissions` round-trip would widen
+/// that window for nothing. The residual cross-thread window (another test
+/// thread forking while this write is in flight, so its child inherits the
+/// descriptor) is absorbed by `exec`'s retry.
+pub fn write_stub(dir: &Path, name: &str, body: &str) -> PathBuf {
+    for (number, line) in body.lines().enumerate() {
+        let first = line.split_whitespace().next().unwrap_or_default();
+        // `if ...; then echo ...` hides the word mid-line, so scan tokens too.
+        let has_echo = line.split_whitespace().any(|tok| tok == "echo");
+        assert!(
+            !(first == "echo" || has_echo),
+            "stub line {} runs `echo`, which is not portable across the shells /bin/sh resolves \
+             to (bash here, dash on Debian-family CI). Use `printf '%s\\n' '<payload>'`:\n  {line}",
+            number + 1
+        );
+    }
+    let path = dir.join(name);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o755)
+        .open(&path)
+        .unwrap();
+    file.write_all(body.as_bytes()).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
     path
 }
 

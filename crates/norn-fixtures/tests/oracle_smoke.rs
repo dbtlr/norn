@@ -16,14 +16,17 @@
 
 mod common;
 
-use std::process::Command;
-
 use common::generate_vault;
-use norn_fixtures::testing::oracle_present;
+use norn_fixtures::testing::{oracle_present, ScratchEnv};
 use norn_fixtures::Profile;
 
 fn validate_json(vault: &std::path::Path) -> String {
-    let output = Command::new("norn")
+    // Spawned under a cleared environment: this asserts on the ORACLE's
+    // findings, so a host daemon, a stray NORN_ROOT or a non-UTF-8 locale
+    // answering instead would be asserting about the host.
+    let env = ScratchEnv::new().expect("failed to create the scratch environment");
+    let output = env
+        .command("norn")
         .args(["-C"])
         .arg(vault)
         .args(["validate", "--summary", "--format", "json"])

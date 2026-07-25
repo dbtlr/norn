@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cases::{self, Case, Suite};
 use crate::exec::{self, ExecError};
+use crate::extent;
 use crate::fixtures::{self, FixtureCache, FixtureError, Side};
 use crate::ledger::{Ledger, LedgerError};
 use crate::mcp;
@@ -64,6 +65,12 @@ pub struct CaseOutcome {
     /// like `post_state`: the verdict already folded this into match/
     /// diverged/drift.
     pub mcp_divergence: Option<mcp::McpDivergence>,
+    /// How large the observed divergence is, per channel
+    /// (`crate::extent`): zero for a Match, and for anything else the extent
+    /// the covering ledger entry must declare. Reported for an uncovered
+    /// case so the entry that covers it can be authored from the run rather
+    /// than by hand.
+    pub extent: extent::Extent,
     /// Set only in `Mode::All` when an MCP case could not be driven to a
     /// comparable result at all (a timeout, a premature EOF, a malformed
     /// frame — see `mcp::McpError`) — rendered as a runner-error row instead
@@ -72,23 +79,53 @@ pub struct CaseOutcome {
     pub runner_error: Option<String>,
 }
 
+/// One cited case whose observed extent disagrees with what its entry
+/// declares.
+pub struct ExtentGapCase {
+    pub case_id: &'static str,
+    pub declared: extent::Extent,
+    pub observed: extent::Extent,
+}
+
+/// A ledger entry whose declared divergence extent disagrees with what the
+/// run observed: the entry covers a divergence of a different shape than the
+/// one its `old`/`new` text describes. Reported per ENTRY — recording the fix
+/// is one edit however many of its cases disagree.
+pub struct ExtentGap {
+    pub entry_id: String,
+    pub cases: Vec<ExtentGapCase>,
+    /// The entry's whole `observed` line as this run measured it — what to
+    /// record once the diff has been re-read.
+    pub replacement: String,
+}
+
 pub struct RunReport {
     pub outcomes: Vec<CaseOutcome>,
+    /// Entries proven dead by this run: every cited case ran and every one
+    /// of them matched. Deleting the entry is the remedy, and the run fails
+    /// until someone does (ADR 0018: entries cannot rot).
     pub stale_entries: Vec<String>,
+    /// Entries whose ran cases all matched but whose cited set was not fully
+    /// executed — a `--suite`-filtered run cannot tell a dead entry from one
+    /// whose surviving divergence it never ran. Advisory only: it does not
+    /// fail the run, because a filtered run has not earned that verdict.
+    pub unverified_stale_entries: Vec<String>,
+    /// Entries whose declared extent no longer matches the observed one.
+    pub extent_gaps: Vec<ExtentGap>,
     pub oracle_version: String,
 }
 
 impl RunReport {
-    /// 0 when every case matched or diverged-with-citation and no ledger
-    /// entry went stale; 1 when any case drifted or any entry is stale.
-    /// (Runner errors that keep a report from ever being built exit 2 —
-    /// see [`RunError`].)
+    /// 0 when every case matched or diverged-with-citation, no ledger entry
+    /// went stale, and every entry's declared extent matches the observed
+    /// one; 1 otherwise. (Runner errors that keep a report from ever being
+    /// built exit 2 — see [`RunError`].)
     pub fn exit_code(&self) -> u8 {
         let any_drift = self
             .outcomes
             .iter()
             .any(|o| matches!(o.verdict, Verdict::Drift));
-        if any_drift || !self.stale_entries.is_empty() {
+        if any_drift || !self.stale_entries.is_empty() || !self.extent_gaps.is_empty() {
             1
         } else {
             0
@@ -111,6 +148,25 @@ pub enum RunError {
     Ledger(LedgerError),
     Fixture(FixtureError),
     Exec(ExecError),
+    /// The scratch `HOME` / XDG tree spawned binaries run against could not
+    /// be created, so there is no isolated environment to run in.
+    ScratchEnvironment {
+        message: String,
+    },
+    /// The oracle wrote to stderr on a freshly generated fixture, where it
+    /// has nothing to report. Something outside the two binaries is reaching
+    /// the run, and every byte it contributes would be measured as a
+    /// difference — so the run stops instead of publishing numbers that
+    /// describe the host.
+    ForeignEnvironment {
+        stderr: String,
+    },
+    /// A case whose two sides differ measured an extent of zero, so no
+    /// ledger entry could honestly declare it: `observed = {}` says nothing
+    /// differs. A measurement bug, not a parity result.
+    UnmeasuredDivergence {
+        case_id: &'static str,
+    },
     /// A binary was killed by a signal rather than exiting — cannot be
     /// compared as a verdict, so the whole run aborts.
     Signaled {
@@ -183,6 +239,24 @@ impl std::fmt::Display for RunError {
             RunError::Ledger(e) => write!(f, "{e}"),
             RunError::Fixture(e) => write!(f, "{e}"),
             RunError::Exec(e) => write!(f, "{e}"),
+            RunError::ScratchEnvironment { message } => write!(
+                f,
+                "could not create the scratch HOME/XDG tree the run spawns binaries under: {message}"
+            ),
+            RunError::ForeignEnvironment { stderr } => write!(
+                f,
+                "the oracle wrote to stderr on a freshly generated fixture, so something outside \
+                 the two binaries is reaching this run and every byte it contributes would be \
+                 measured as a difference. The usual cause is a `norn serve` daemon on this host \
+                 that the client still finds (its version-skew notice lands on stderr); a stray \
+                 NORN_ROOT / NORN_CONFIG_DIR is the other. Stop the daemon (`norn service stop`) \
+                 and re-run. Oracle stderr was:\n{stderr}"
+            ),
+            RunError::UnmeasuredDivergence { case_id } => write!(
+                f,
+                "case `{case_id}` differs but measured zero divergence regions, so no ledger \
+                 entry could declare it honestly — the extent measurement is wrong, not the case"
+            ),
             RunError::Signaled {
                 binary_label,
                 case_id,
@@ -213,8 +287,10 @@ impl std::fmt::Display for RunError {
                 actual,
             } => write!(
                 f,
-                "case `{case_id}`: oracle exited {actual}, expected {expected} — likely case rot \
-                 (the fixture or oracle surface changed under the argv)"
+                "case `{case_id}`: oracle exited {actual}, expected {expected} — either case rot \
+                 (the fixture or oracle surface changed under the argv) or the environment \
+                 reaching the oracle (a stray NORN_ROOT pointing it at another vault, a host \
+                 config), which the run isolates against but a `--cwd`-free argv can still expose"
             ),
             RunError::UnmetRequirement {
                 case_id,
@@ -275,8 +351,12 @@ fn is_semver_prefixed(s: &str) -> bool {
 /// Spawn `binary --version`, require it to succeed, and return its
 /// semver-shaped token (see [`parse_version_token`]). Used for the oracle,
 /// whose version must match the ledger's pinned `meta.oracle_version`.
-fn require_version(binary: &Path, label: &'static str) -> Result<String, RunError> {
-    let raw = exec::probe_version(binary).map_err(|e| RunError::Binary {
+fn require_version(
+    binary: &Path,
+    label: &'static str,
+    env: &exec::SpawnEnv,
+) -> Result<String, RunError> {
+    let raw = exec::probe_version(binary, env).map_err(|e| RunError::Binary {
         label,
         path: binary.display().to_string(),
         message: e.to_string(),
@@ -302,14 +382,63 @@ fn require_version(binary: &Path, label: &'static str) -> Result<String, RunErro
 /// The rewrite binary only needs to exist and be spawnable — the phase-0
 /// skeleton's `--version` prints a notice and exits 2, and that is
 /// accepted; only its existence is required (ADR 0018 phase-0 reality).
-fn require_spawnable(binary: &Path, label: &'static str) -> Result<(), RunError> {
-    exec::probe_version(binary)
+fn require_spawnable(
+    binary: &Path,
+    label: &'static str,
+    env: &exec::SpawnEnv,
+) -> Result<(), RunError> {
+    exec::probe_version(binary, env)
         .map(|_| ())
         .map_err(|e| RunError::Binary {
             label,
             path: binary.display().to_string(),
             message: e.to_string(),
         })
+}
+
+/// The fixture the environment preflight runs against — a freshly generated
+/// vault the oracle has nothing to say about, so any stderr it produces comes
+/// from somewhere else.
+const PREFLIGHT_FIXTURE: cases::Fixture = cases::Fixture {
+    profile_name: "clean",
+    seed: 1,
+};
+
+/// Run the oracle once against a freshly generated fixture and require its
+/// stderr to be EMPTY.
+///
+/// The environment isolation (`exec::SpawnEnv`) is what keeps the host out of
+/// a run; this is the check that the isolation held. Host contributions are
+/// invisible to the verdicts that would otherwise catch them — a `norn serve`
+/// daemon adding one stderr line to every oracle case makes 44 cases drift,
+/// and a self-check stays green throughout because both sides are the oracle
+/// and both carry the line.
+///
+/// Its scope is deliberately narrow, and worth stating so nobody reads it as
+/// a general environment audit: ONE verb, on ONE fixture, on the ORACLE side,
+/// watching ONE stream. It catches the loud shape (something is talking on
+/// stderr) and nothing subtler — a host influence that changes stdout, or
+/// that only appears under another verb, still reaches the run.
+///
+/// There is no override, by design. A future oracle that legitimately writes
+/// to stderr here makes every extent in the ledger untrustworthy until
+/// someone looks, so the fix is a deliberate code change with that judgment
+/// recorded, not a flag a green build can be bought with.
+fn require_quiet_environment(
+    oracle: &Path,
+    fixture_cache: &mut FixtureCache,
+    env: &exec::SpawnEnv,
+) -> Result<(), RunError> {
+    let vault = fixture_cache
+        .materialize(&PREFLIGHT_FIXTURE, Side::Oracle, Some("preflight"))
+        .map_err(RunError::Fixture)?;
+    let raw = exec::run_argv(oracle, &["count"], None, &vault.path, env).map_err(RunError::Exec)?;
+    if raw.stderr.is_empty() {
+        return Ok(());
+    }
+    Err(RunError::ForeignEnvironment {
+        stderr: String::from_utf8_lossy(&raw.stderr).to_string(),
+    })
 }
 
 /// The `(suite_name, case)` pairs a mode + filter selects from `suites`, in
@@ -389,6 +518,63 @@ fn substitute_plan_argv(argv: &[&str], plan_path: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Compare every ledger entry's declared divergence extent against the one
+/// this run observed, for the entry's cases that actually ran. An entry
+/// covers a case by citation, which says nothing about WHAT differs — so a
+/// disagreement here means the divergence changed size since the entry's
+/// `old`/`new` text was written, and the text has to be re-derived from the
+/// current diff. Cases that did not run (mode or suite filter) are skipped:
+/// their extent is unmeasured, not zero.
+fn extent_gaps(
+    ledger: &Ledger,
+    observed: &std::collections::BTreeMap<&'static str, extent::Extent>,
+    stale: &[String],
+) -> Vec<ExtentGap> {
+    let mut gaps = Vec::new();
+    for entry in &ledger.entries {
+        // A CONFIRMED stale entry's every cited case ran and matched, so each
+        // would report a gap whose paste line is `observed = {}` — a line the
+        // ledger's own guard rejects, because the remedy for a divergence
+        // that is gone is deleting the entry, not recording a zero. The stale
+        // report says exactly that; saying it twice, differently, is worse
+        // than once. An UNVERIFIED entry is not suppressed: its gap row is
+        // the corrective information a filtered run can still offer (which
+        // cited case matched), and deleting the entry is not the advice.
+        if stale.contains(&entry.id) {
+            continue;
+        }
+        let ran: Vec<(&'static str, extent::Extent)> = entry
+            .cases
+            .iter()
+            .filter_map(|c| observed.get_key_value(c.as_str()))
+            .map(|(id, e)| (*id, *e))
+            .collect();
+        if ran.is_empty() {
+            continue;
+        }
+        let disagreeing: Vec<ExtentGapCase> = ran
+            .iter()
+            .filter(|(case_id, observed_extent)| entry.declared_extent(case_id) != *observed_extent)
+            .map(|(case_id, observed_extent)| ExtentGapCase {
+                case_id,
+                declared: entry.declared_extent(case_id),
+                observed: *observed_extent,
+            })
+            .collect();
+        if disagreeing.is_empty() {
+            continue;
+        }
+        let measured: std::collections::BTreeMap<&str, extent::Extent> =
+            ran.iter().map(|(id, e)| (*id, *e)).collect();
+        gaps.push(ExtentGap {
+            entry_id: entry.id.clone(),
+            replacement: entry.render_observed(&measured),
+            cases: disagreeing,
+        });
+    }
+    gaps
+}
+
 pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunReport, RunError> {
     if let Some(dup) = cases::duplicate_case_id(suites) {
         return Err(RunError::DuplicateCaseId(dup));
@@ -399,11 +585,21 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
 
     let self_check = matches!(config.mode, Mode::SelfCheck);
 
-    let oracle_version = require_version(config.oracle, "oracle")?;
+    // The fixture cache comes first because it owns the temp root the scratch
+    // environment lives under, and NOTHING is spawned outside that
+    // environment — not even the version probes.
+    let mut fixture_cache = FixtureCache::new().map_err(RunError::Fixture)?;
+    let env = exec::SpawnEnv::create_in(fixture_cache.root()).map_err(|e| {
+        RunError::ScratchEnvironment {
+            message: e.to_string(),
+        }
+    })?;
+
+    let oracle_version = require_version(config.oracle, "oracle", &env)?;
     // Self-check never runs the rewrite binary (candidate := oracle), so its
     // absence must not block vetting a case set — don't require it.
     if !self_check {
-        require_spawnable(config.rewrite, "rewrite")?;
+        require_spawnable(config.rewrite, "rewrite", &env)?;
     }
 
     // Ledger/pin policy is mode-scoped (see the `Mode` doc comment):
@@ -427,12 +623,15 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
         Some(loaded)
     };
 
+    require_quiet_environment(config.oracle, &mut fixture_cache, &env)?;
+
     let selected = select_cases(config.mode, config.suite_filter, suites)?;
 
-    let mut fixture_cache = FixtureCache::new().map_err(RunError::Fixture)?;
     let mut outcomes = Vec::new();
     let mut ran_ids: BTreeSet<&str> = BTreeSet::new();
     let mut diverged_ids: BTreeSet<&str> = BTreeSet::new();
+    let mut observed_extents: std::collections::BTreeMap<&'static str, extent::Extent> =
+        std::collections::BTreeMap::new();
 
     let candidate_binary: &Path = if self_check {
         config.oracle
@@ -482,7 +681,9 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
             .map(PathBuf::as_path)
             .collect();
 
-        let (verdict, post_state, mcp_divergence, runner_error) = if let Some(frames) = case.stdin {
+        let (verdict, post_state, mcp_divergence, runner_error, extent) = if let Some(frames) =
+            case.stdin
+        {
             // An MCP case: driven and compared frame-by-frame by `crate::mcp`,
             // never through the ordinary argv/stdout/stderr path below (see
             // that module's doc for the framing + timeout/EOF-early
@@ -499,7 +700,7 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                 roots: &candidate_roots,
                 label: candidate_label,
             };
-            match mcp::run_case(case.argv, frames, oracle_target, candidate_target) {
+            match mcp::run_case(case.argv, frames, oracle_target, candidate_target, &env) {
                 Ok(result) => {
                     // Case-rot guard, exactly as the non-MCP path below: the
                     // oracle side must exit exactly as declared. Unaffected
@@ -520,12 +721,13 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                         .and_then(|l| l.entry_for_case(case.id))
                         .map(|e| e.id.as_str());
                     let verdict = verdict::classify(matched, self_check, entry_id);
+                    let extent = extent::mcp_extent(&result.divergence);
                     let divergence = if result.divergence.is_empty() {
                         None
                     } else {
                         Some(result.divergence)
                     };
-                    (verdict, None, divergence, None)
+                    (verdict, None, divergence, None, extent)
                 }
                 // `Mode::All` only: an MCP surface that cannot complete a
                 // session (e.g. the rewrite's `mcp` subcommand is still
@@ -537,9 +739,13 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                 // `select_cases`) or both sides are the oracle (which must
                 // never fail to drive), so this arm is unreachable in
                 // practice for those modes today.
-                Err(source) if matches!(config.mode, Mode::All) => {
-                    (Verdict::Drift, None, None, Some(source.to_string()))
-                }
+                Err(source) if matches!(config.mode, Mode::All) => (
+                    Verdict::Drift,
+                    None,
+                    None,
+                    Some(source.to_string()),
+                    extent::Extent::default(),
+                ),
                 Err(source) => {
                     return Err(RunError::Mcp {
                         case_id: case.id,
@@ -573,10 +779,11 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                     .map_err(RunError::Fixture)?;
                 let argv = substitute_plan_argv(case.argv, &plan_path);
                 let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-                exec::run_argv(config.oracle, &argv_refs, None, &oracle_vault.path)
+                exec::run_argv(config.oracle, &argv_refs, None, &oracle_vault.path, &env)
                     .map_err(RunError::Exec)?
             } else {
-                exec::run_case(config.oracle, case, &oracle_vault.path).map_err(RunError::Exec)?
+                exec::run_case(config.oracle, case, &oracle_vault.path, &env)
+                    .map_err(RunError::Exec)?
             };
             let oracle_norm = normalize::normalize_output(&oracle_raw, &oracle_roots, &steps)
                 .map_err(|e| normalize_run_error(e, "oracle", case.id))?;
@@ -603,10 +810,16 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                     .map_err(RunError::Fixture)?;
                 let argv = substitute_plan_argv(case.argv, &plan_path);
                 let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-                exec::run_argv(candidate_binary, &argv_refs, None, &candidate_vault.path)
-                    .map_err(RunError::Exec)?
+                exec::run_argv(
+                    candidate_binary,
+                    &argv_refs,
+                    None,
+                    &candidate_vault.path,
+                    &env,
+                )
+                .map_err(RunError::Exec)?
             } else {
-                exec::run_case(candidate_binary, case, &candidate_vault.path)
+                exec::run_case(candidate_binary, case, &candidate_vault.path, &env)
                     .map_err(RunError::Exec)?
             };
             let candidate_norm =
@@ -649,13 +862,30 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                 .and_then(|l| l.entry_for_case(case.id))
                 .map(|e| e.id.as_str());
             let verdict = verdict::classify(matched, self_check, entry_id);
-            (verdict, post_state, None, None)
+            let extent = extent::output_extent(&oracle_norm, &candidate_norm, post_state.as_ref());
+            (verdict, post_state, None, None, extent)
         };
 
         ran_ids.insert(case.id);
         if let Verdict::Diverged { .. } = &verdict {
             diverged_ids.insert(case.id);
         }
+        // A case that differs must measure as differing, or the ledger could
+        // cover it with `observed = {}` — a declaration that nothing differs,
+        // gating a real divergence.
+        //
+        // `extent::stream_regions` floors a byte-differing stream at 1, and
+        // the tree/mcp/exit channels count concrete items, so every way a
+        // case can be non-matching already contributes a region: this is
+        // unreachable as the code stands. It is kept as insurance on that
+        // invariant rather than as a live path — the floor is one `max(1)`
+        // deep inside the counter, and losing it would otherwise be silent
+        // here (`extent::tests::the_floor_holds_for_every_differing_shape`
+        // pins the same invariant from the other side).
+        if !matches!(verdict, Verdict::Match) && runner_error.is_none() && extent.is_zero() {
+            return Err(RunError::UnmeasuredDivergence { case_id: case.id });
+        }
+        observed_extents.insert(case.id, extent);
         outcomes.push(CaseOutcome {
             case_id: case.id,
             suite_name,
@@ -663,21 +893,29 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
             post_state,
             mcp_divergence,
             runner_error,
+            extent,
         });
     }
 
-    let stale_entries: Vec<String> = match &ledger {
+    let all_stale = match &ledger {
         None => Vec::new(),
-        Some(l) => l
-            .stale_entries(&ran_ids, &diverged_ids)
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect(),
+        Some(l) => l.stale_entries(&ran_ids, &diverged_ids),
+    };
+    let (confirmed, unverified): (Vec<_>, Vec<_>) =
+        all_stale.into_iter().partition(|s| s.every_cited_case_ran);
+    let stale_entries: Vec<String> = confirmed.into_iter().map(|s| s.entry_id).collect();
+    let unverified_stale_entries: Vec<String> =
+        unverified.into_iter().map(|s| s.entry_id).collect();
+    let extent_gaps = match &ledger {
+        None => Vec::new(),
+        Some(l) => extent_gaps(l, &observed_extents, &stale_entries),
     };
 
     Ok(RunReport {
         outcomes,
         stale_entries,
+        unverified_stale_entries,
+        extent_gaps,
         oracle_version,
     })
 }

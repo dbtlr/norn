@@ -9,6 +9,34 @@ use std::path::Path;
 
 use norn_parity::ledger::{Ledger, LedgerError};
 
+/// The ids allocated before ids became task-scoped: one contiguous run,
+/// closed and frozen at the head of the file. This list never grows — new
+/// entries carry their allocating task's number and append after it.
+const LEGACY_BLOCK: [&str; 51] = [
+    "PD-101", "PD-102", "PD-103", "PD-104", "PD-105", "PD-106", "PD-107", "PD-108", "PD-109",
+    "PD-110", "PD-111", "PD-112", "PD-113", "PD-114", "PD-115", "PD-116", "PD-117", "PD-118",
+    "PD-119", "PD-120", "PD-121", "PD-122", "PD-123", "PD-124", "PD-125", "PD-126", "PD-127",
+    "PD-128", "PD-129", "PD-130", "PD-131", "PD-132", "PD-133", "PD-134", "PD-135", "PD-136",
+    "PD-137", "PD-138", "PD-139", "PD-140", "PD-141", "PD-142", "PD-143", "PD-144", "PD-145",
+    "PD-146", "PD-147", "PD-148", "PD-149", "PD-150", "PD-151",
+];
+
+/// `PD-` + at least one digit + at most one lowercase letter: `PD-471`, or
+/// `PD-471b` for a task's second entry.
+fn task_scoped_id(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix("PD-") else {
+        return false;
+    };
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return false;
+    }
+    match &rest[digits.len()..] {
+        "" => true,
+        suffix => suffix.len() == 1 && suffix.chars().all(|c| c.is_ascii_lowercase()),
+    }
+}
+
 fn known_ids() -> BTreeSet<&'static str> {
     norn_parity::cases::all_case_ids().into_iter().collect()
 }
@@ -26,17 +54,45 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
     let ledger = Ledger::load(&path, &known_ids(), &ported_ids())
         .unwrap_or_else(|e| panic!("failed to load {}: {e}", path.display()));
     assert_eq!(ledger.meta.oracle_version, "0.48.1");
-    // The entry ids are DERIVED-checked, not hand-counted (NRN-421
-    // harness-fitness): they must form the contiguous sequence PD-101, PD-102,
-    // ... with no gaps or reuse, so a new entry (the next PD id) updates the
-    // expected set automatically and a dropped/duplicated id fails loudly. This
-    // replaces a hand-edited `entries.len() == 36` pin bumped on every ledger PR.
+    // Ids are allocated from the number of the task that adds the entry
+    // (task NRN-<n> -> `PD-<n>`, suffixed `b`, `c`, … for a second entry from
+    // the same task), so two branches in flight never contend for one id and
+    // nothing is ever renumbered at rebase. `PD-101`..`PD-151` are the
+    // pre-protocol block, allocated contiguously; that prefix is closed and
+    // frozen — it never grows, and renumbering it would break every external
+    // reference to an id.
     let ids: Vec<&str> = ledger.entries.iter().map(|e| e.id.as_str()).collect();
-    for (offset, id) in ids.iter().enumerate() {
-        let expected = format!("PD-{}", 101 + offset);
+    assert!(
+        ids.len() >= LEGACY_BLOCK.len(),
+        "the frozen block is {} entries and the ledger has {} — an entry was deleted from it \
+         rather than left in place",
+        LEGACY_BLOCK.len(),
+        ids.len()
+    );
+    for (offset, id) in ids.iter().take(LEGACY_BLOCK.len()).enumerate() {
         assert_eq!(
-            *id, expected,
-            "ledger entry ids must be contiguous from PD-101 in declaration order;              entry #{offset} is `{id}`, expected `{expected}`"
+            *id, LEGACY_BLOCK[offset],
+            "entry #{offset} is `{id}`; the frozen block PD-101..PD-151 leads the file in order, \
+             and new entries append after it"
+        );
+    }
+    for id in &ids {
+        assert!(
+            task_scoped_id(id),
+            "ledger entry id `{id}` is not `PD-<task number>` with an optional single-letter \
+             suffix — allocate it from the task adding the entry"
+        );
+    }
+
+    // Every committed entry has been measured: `observed = {}` is the
+    // authoring placeholder, legal to parse but never legal to ship — an
+    // unmeasured entry is back to covering its case by citation alone.
+    for entry in &ledger.entries {
+        assert!(
+            entry.observed.values().any(|extent| !extent.is_zero()),
+            "entry {} declares no divergence extent — run the gated comparison and record the \
+             `observed` line it reports",
+            entry.id
         );
     }
 
@@ -396,6 +452,7 @@ old = "old behavior"
 new = "new behavior"
 reason = "vibes"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
@@ -418,6 +475,7 @@ old = "old behavior"
 new = "new behavior"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
@@ -440,6 +498,7 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 
 [[entry]]
 id = "PD-001"
@@ -449,6 +508,7 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
@@ -471,6 +531,7 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
@@ -492,6 +553,7 @@ cases = ["help-bare"]
 old = "old"
 new = "new"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
@@ -529,6 +591,7 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 
 [[entry]]
 id = "PD-002"
@@ -538,6 +601,7 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
@@ -563,6 +627,7 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let empty_ported: BTreeSet<&str> = BTreeSet::new();
     let err = Ledger::parse(toml, &known_ids(), &empty_ported).unwrap_err();
@@ -586,6 +651,7 @@ old = "old behavior"
 new = "new behavior"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let ledger =
         Ledger::parse(toml, &known_ids(), &ported_ids()).expect("well-formed ledger should parse");
@@ -610,12 +676,51 @@ old = "old behavior"
 new = "new behavior"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let ledger = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap();
 
     let ran: BTreeSet<&str> = ["help-bare"].into_iter().collect();
     let diverged: BTreeSet<&str> = BTreeSet::new(); // nothing diverged: PD-001's case matched
-    assert_eq!(ledger.stale_entries(&ran, &diverged), vec!["PD-001"]);
+    let stale = ledger.stale_entries(&ran, &diverged);
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0].entry_id, "PD-001");
+    assert!(
+        stale[0].every_cited_case_ran,
+        "the entry cites one case and it ran, so the entry is provably dead"
+    );
+}
+
+#[test]
+fn stale_is_unverified_when_a_cited_case_never_ran() {
+    // A `--suite` filter ran one of the entry's two cited cases. It matched —
+    // but the case that did not run may still diverge, so this run has not
+    // earned the "delete the entry" verdict.
+    let toml = r#"
+[meta]
+oracle_version = "0.48.0"
+
+[[entry]]
+id = "PD-001"
+surface = "help"
+cases = ["help-bare", "help-validate"]
+old = "old behavior"
+new = "new behavior"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = { "help-bare" = { stdout = 1 }, "help-validate" = { stdout = 1 } }
+"#;
+    let ledger = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap();
+
+    let ran: BTreeSet<&str> = ["help-bare"].into_iter().collect();
+    let diverged: BTreeSet<&str> = BTreeSet::new();
+    let stale = ledger.stale_entries(&ran, &diverged);
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0].entry_id, "PD-001");
+    assert!(
+        !stale[0].every_cited_case_ran,
+        "help-validate never ran, so the entry cannot be judged dead here"
+    );
 }
 
 #[test]
@@ -632,6 +737,7 @@ old = "old behavior"
 new = "new behavior"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let ledger = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap();
 
@@ -654,6 +760,7 @@ old = "old behavior"
 new = "new behavior"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let ledger = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap();
 
@@ -676,5 +783,128 @@ fn load_reports_the_file_path_on_a_missing_ledger() {
     assert!(
         message.contains("/nonexistent/parity-ledger.toml"),
         "diagnostic should name the ledger path, got: {message}"
+    );
+}
+
+#[test]
+fn rejects_an_entry_with_no_observed_table() {
+    // Without `observed` an entry covers its case by citation alone, which
+    // says nothing about what differs — the field is required.
+    let toml = r#"
+[meta]
+oracle_version = "0.48.0"
+
+[[entry]]
+id = "PD-001"
+surface = "a"
+cases = ["help-bare"]
+old = "old"
+new = "new"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+"#;
+    let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            LedgerError::MissingField {
+                field: "observed",
+                ..
+            }
+        ),
+        "expected MissingField {{ field: \"observed\" }}, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_an_observed_entry_for_a_case_the_entry_does_not_cite() {
+    let toml = r#"
+[meta]
+oracle_version = "0.48.0"
+
+[[entry]]
+id = "PD-001"
+surface = "a"
+cases = ["help-bare"]
+old = "old"
+new = "new"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = { "help-validate" = { stdout = 2 } }
+"#;
+    let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
+    assert!(
+        matches!(err, LedgerError::ObservedUncitedCase { ref case, .. } if case == "help-validate"),
+        "expected ObservedUncitedCase, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_a_non_integer_observed_extent() {
+    let toml = r#"
+[meta]
+oracle_version = "0.48.0"
+
+[[entry]]
+id = "PD-001"
+surface = "a"
+cases = ["help-bare"]
+old = "old"
+new = "new"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = { "help-bare" = { stdout = "two" } }
+"#;
+    let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            LedgerError::WrongType {
+                field: "observed",
+                ..
+            }
+        ),
+        "expected WrongType {{ field: \"observed\" }}, got {err:?}"
+    );
+}
+
+#[test]
+fn an_omitted_case_declares_zero_regions() {
+    let toml = r#"
+[meta]
+oracle_version = "0.48.0"
+
+[[entry]]
+id = "PD-001"
+surface = "a"
+cases = ["help-bare", "help-validate"]
+old = "old"
+new = "new"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = { "help-bare" = { stdout = 4 } }
+"#;
+    let ledger = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap();
+    let entry = ledger.entry_for_case("help-bare").unwrap();
+    assert_eq!(entry.declared_extent("help-bare").stdout, 4);
+    assert_eq!(entry.declared_extent("help-bare").total(), 4);
+    assert!(
+        entry.declared_extent("help-validate").is_zero(),
+        "a cited case the table omits is expected to match"
+    );
+}
+
+#[test]
+fn task_scoped_id_shapes() {
+    assert!(task_scoped_id("PD-101"));
+    assert!(task_scoped_id("PD-471"));
+    assert!(task_scoped_id("PD-471b"), "a task's second entry");
+    assert!(!task_scoped_id("PD-"), "a number is required");
+    assert!(!task_scoped_id("PD-471bc"), "at most one suffix letter");
+    assert!(!task_scoped_id("PD-471B"), "the suffix is lowercase");
+    assert!(!task_scoped_id("NRN-471"), "the prefix is PD-");
+    assert!(
+        !task_scoped_id("PD-XXX"),
+        "no placeholders — allocate a real id"
     );
 }

@@ -75,13 +75,74 @@ pub fn render(report: &RunReport, mode: Mode) -> String {
     ));
     if !report.stale_entries.is_empty() {
         out.push_str(&format!(
-            "stale entries (all cited cases currently match — entries cannot rot): {}\n",
+            "stale entries (every cited case ran and now matches — the divergence is gone; \
+             delete the entry): {}\n",
             report.stale_entries.join(", ")
         ));
     }
+    if !report.unverified_stale_entries.is_empty() {
+        out.push_str(&format!(
+            "possibly stale (the cited cases that ran now match, but some cited cases were not \
+             run — re-run unfiltered before deleting): {}\n",
+            report.unverified_stale_entries.join(", ")
+        ));
+    }
+    render_extent_gaps(&mut out, report);
+    render_uncovered_extents(&mut out, report);
     render_post_state(&mut out, report);
     render_mcp_divergences(&mut out, report);
     out
+}
+
+/// Append the entries whose declared divergence extent disagrees with what
+/// this run observed. Each line names the case, both counts, and the
+/// `observed` line to record — the divergence changed size, so the entry's
+/// `old`/`new` text has to be re-derived from the current diff before the
+/// count is updated. Nothing is emitted when every entry agrees.
+fn render_extent_gaps(out: &mut String, report: &RunReport) {
+    if report.extent_gaps.is_empty() {
+        return;
+    }
+    out.push_str(
+        "ledger extent gaps (the divergence changed shape — re-read the diff, \
+         rewrite `old`/`new`, then record):\n",
+    );
+    for gap in &report.extent_gaps {
+        out.push_str(&format!("  {}:\n", gap.entry_id));
+        for case in &gap.cases {
+            out.push_str(&format!(
+                "    {}: declared {}, observed {}\n",
+                case.case_id,
+                case.declared.render(),
+                case.observed.render()
+            ));
+        }
+        // One line per ENTRY, not per case: recording it is a single edit.
+        out.push_str(&format!("    {}\n", gap.replacement));
+    }
+}
+
+/// Append the observed extent of every case that differs with no entry
+/// covering it, so the entry that will cover it can be authored from the run
+/// instead of by counting the diff by hand. Nothing is emitted when nothing
+/// drifted.
+fn render_uncovered_extents(out: &mut String, report: &RunReport) {
+    let uncovered: Vec<&crate::run::CaseOutcome> = report
+        .outcomes
+        .iter()
+        .filter(|o| matches!(o.verdict, Verdict::Drift) && o.runner_error.is_none())
+        .collect();
+    if uncovered.is_empty() {
+        return;
+    }
+    out.push_str("uncovered divergence extents (for the entry that will cover them):\n");
+    for outcome in uncovered {
+        out.push_str(&format!(
+            "  \"{}\" = {}\n",
+            outcome.case_id,
+            outcome.extent.render()
+        ));
+    }
 }
 
 /// Append a legible post-state section for every mutating case whose two

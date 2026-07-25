@@ -11,6 +11,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
+use crate::extent::Extent;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reason {
     DecidedBetter,
@@ -36,6 +38,49 @@ pub struct Entry {
     pub new: String,
     pub reason: Reason,
     pub decision: String,
+    /// How large the divergence is on each cited case, per channel, in
+    /// regions (see `crate::extent`). Citation alone would let a divergence
+    /// grow past what `old`/`new` describe; the runner compares the extent
+    /// observed on every cited case against this and fails when they
+    /// disagree. A cited case absent here declares zero regions — it is
+    /// expected to match.
+    pub observed: std::collections::BTreeMap<String, Extent>,
+}
+
+impl Entry {
+    /// The divergence extent this entry declares for `case_id`. A cited case
+    /// the `observed` table omits declares zero on every channel.
+    pub fn declared_extent(&self, case_id: &str) -> Extent {
+        self.observed.get(case_id).copied().unwrap_or_default()
+    }
+
+    /// The whole `observed` line as it would be written in the ledger, so a
+    /// run that finds a disagreement can print the line to record.
+    ///
+    /// `measured` covers the cases this run actually ran. A cited case that
+    /// did NOT run keeps its declared extent: the run has nothing to say
+    /// about a case a suite filter or a mode excluded, and dropping it would
+    /// make a partial run's paste line a silent deletion.
+    pub fn render_observed(&self, measured: &std::collections::BTreeMap<&str, Extent>) -> String {
+        let body: Vec<String> = self
+            .cases
+            .iter()
+            .map(|case| {
+                let extent = measured
+                    .get(case.as_str())
+                    .copied()
+                    .unwrap_or_else(|| self.declared_extent(case));
+                (case, extent)
+            })
+            .filter(|(_, extent)| !extent.is_zero())
+            .map(|(case, extent)| format!("\"{case}\" = {}", extent.render()))
+            .collect();
+        if body.is_empty() {
+            "observed = {}".to_string()
+        } else {
+            format!("observed = {{ {} }}", body.join(", "))
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +132,19 @@ pub enum LedgerError {
         entry: String,
         case: String,
     },
+    /// `observed` keys the divergence extent by case id, so a key the entry
+    /// does not cite measures nothing.
+    ObservedUncitedCase {
+        entry: String,
+        case: String,
+    },
+    /// An `observed` extent names a channel the runner does not measure, so
+    /// nothing would ever be compared against it.
+    ObservedUnknownChannel {
+        entry: String,
+        case: String,
+        channel: String,
+    },
     UnportedCaseId {
         entry: String,
         case: String,
@@ -126,6 +184,19 @@ impl std::fmt::Display for LedgerError {
             LedgerError::UnknownCaseId { entry, case } => {
                 write!(f, "entry {entry} cites unknown case id `{case}`")
             }
+            LedgerError::ObservedUncitedCase { entry, case } => write!(
+                f,
+                "entry {entry}: `observed` measures case `{case}`, which the entry does not cite"
+            ),
+            LedgerError::ObservedUnknownChannel {
+                entry,
+                case,
+                channel,
+            } => write!(
+                f,
+                "entry {entry}: `observed.{case}` names channel `{channel}`, which is not one of \
+                 stdout / stderr / exit / tree / mcp"
+            ),
             LedgerError::EmptyCases { entry } => write!(
                 f,
                 "entry {entry} cites no cases — every entry must cover at least one case"
@@ -148,7 +219,13 @@ impl std::fmt::Display for LedgerError {
             LedgerError::OracleVersionMismatch { expected, actual } => write!(
                 f,
                 "oracle --version reported `{actual}`, but the ledger's [meta] oracle_version is `{expected}` — \
-                 refusing to compare against an unpinned oracle"
+                 refusing to compare against an unpinned oracle. Install the pinned build beside \
+                 whatever `norn` is already on this PATH (updating that one moves it further from \
+                 the pin, not closer):\n\
+                 \x20 curl --proto '=https' --tlsv1.2 -LsSf \
+                 https://github.com/dbtlr/norn/releases/download/v{expected}/norn-run-installer.sh \
+                 | NORN_RUN_INSTALL_DIR=/tmp/oracle-{expected} sh\n\
+                 then pass --oracle /tmp/oracle-{expected}/bin/norn"
             ),
         }
     }
@@ -198,6 +275,66 @@ fn get_str_array(
             expected: "an array of strings",
         }),
     }
+}
+
+/// Read the `observed` table: case id -> per-channel divergence extent. The
+/// field is required (an entry that measures nothing would be back to
+/// covering by citation alone) but may be empty — an entry authored before
+/// its first run declares `observed = {}` and the run reports the extents to
+/// record.
+fn get_extent_table(
+    entry_id: &str,
+    table: &toml::Table,
+    context: &str,
+) -> Result<std::collections::BTreeMap<String, Extent>, LedgerError> {
+    const FIELD: &str = "observed";
+    const SHAPE: &str = "a table of case id -> { <channel> = <region count> }";
+    let raw = match table.get(FIELD) {
+        None => {
+            return Err(LedgerError::MissingField {
+                context: context.to_string(),
+                field: FIELD,
+            })
+        }
+        Some(toml::Value::Table(t)) => t,
+        Some(_) => {
+            return Err(LedgerError::WrongType {
+                context: context.to_string(),
+                field: FIELD,
+                expected: SHAPE,
+            })
+        }
+    };
+    let mut extents = std::collections::BTreeMap::new();
+    for (case, value) in raw {
+        let channels = value.as_table().ok_or_else(|| LedgerError::WrongType {
+            context: context.to_string(),
+            field: FIELD,
+            expected: SHAPE,
+        })?;
+        let mut extent = Extent::default();
+        for (channel, count) in channels {
+            let slot =
+                extent
+                    .channel_mut(channel)
+                    .ok_or_else(|| LedgerError::ObservedUnknownChannel {
+                        entry: entry_id.to_string(),
+                        case: case.clone(),
+                        channel: channel.clone(),
+                    })?;
+            *slot =
+                count
+                    .as_integer()
+                    .filter(|n| *n >= 0)
+                    .ok_or_else(|| LedgerError::WrongType {
+                        context: context.to_string(),
+                        field: FIELD,
+                        expected: SHAPE,
+                    })? as usize;
+        }
+        extents.insert(case.clone(), extent);
+    }
+    Ok(extents)
 }
 
 impl Ledger {
@@ -264,6 +401,15 @@ impl Ledger {
             let new = get_str(table, &context, "new")?;
             let reason_str = get_str(table, &context, "reason")?;
             let decision = get_str(table, &context, "decision")?;
+            let observed = get_extent_table(&id, table, &context)?;
+            for case in observed.keys() {
+                if !cases.contains(case) {
+                    return Err(LedgerError::ObservedUncitedCase {
+                        entry: id.clone(),
+                        case: case.clone(),
+                    });
+                }
+            }
 
             let reason = Reason::parse(&reason_str).ok_or_else(|| LedgerError::UnknownReason {
                 entry: id.clone(),
@@ -305,6 +451,7 @@ impl Ledger {
                 new,
                 reason,
                 decision,
+                observed,
             });
         }
 
@@ -353,12 +500,24 @@ impl Ledger {
         self.case_index.get(case_id).map(|&i| &self.entries[i])
     }
 
-    /// Entry ids that are stale after this run: cited by at least one case
-    /// that ran (`ran`), but none of those cases actually diverged
-    /// (`diverged`). ADR 0018: "entries cannot rot" — an entry whose cases
-    /// all currently match must fail the run just as loudly as an
-    /// uncovered drift.
-    pub fn stale_entries(&self, ran: &BTreeSet<&str>, diverged: &BTreeSet<&str>) -> Vec<&str> {
+    /// Entries whose divergence appears to be GONE after this run: cited by
+    /// at least one case that ran (`ran`), and none of the cases that ran
+    /// actually diverged (`diverged`). ADR 0018: "entries cannot rot" — an
+    /// entry whose cases all currently match must fail the run just as
+    /// loudly as an uncovered drift.
+    ///
+    /// The two are separated by whether the run could SEE the whole entry.
+    /// `every_cited_case_ran` means the entry is provably dead and deleting
+    /// it is the remedy. Otherwise the cases that ran matched but one that
+    /// did not run may still diverge, and telling an author to delete an
+    /// entry on that evidence is wrong.
+    ///
+    /// A `--suite` filter is the ONLY way a cited case goes un-run: an entry
+    /// citing an unported case fails to load, an unmet fixture requirement is
+    /// a hard error rather than a skip, `--all` is a superset of gated, and
+    /// self-check loads no ledger at all. That is what makes the remedy
+    /// always actionable — re-running unfiltered settles it.
+    pub fn stale_entries(&self, ran: &BTreeSet<&str>, diverged: &BTreeSet<&str>) -> Vec<Stale> {
         let mut stale = Vec::new();
         for entry in &self.entries {
             let cited_and_ran: Vec<&str> = entry
@@ -370,13 +529,27 @@ impl Ledger {
             if cited_and_ran.is_empty() {
                 continue;
             }
-            let any_diverged = cited_and_ran.iter().any(|c| diverged.contains(c));
-            if !any_diverged {
-                stale.push(entry.id.as_str());
+            if cited_and_ran.iter().any(|c| diverged.contains(c)) {
+                continue;
             }
+            stale.push(Stale {
+                entry_id: entry.id.clone(),
+                every_cited_case_ran: cited_and_ran.len() == entry.cases.len(),
+            });
         }
         stale
     }
+}
+
+/// A ledger entry none of whose ran cases diverged — see
+/// [`Ledger::stale_entries`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stale {
+    pub entry_id: String,
+    /// `false` when a `--suite` filter kept some cited case from running —
+    /// the only way that happens — so the entry cannot be judged dead on this
+    /// run's evidence.
+    pub every_cited_case_ran: bool,
 }
 
 fn entries_id_at(entries: &[Entry], index: usize) -> String {

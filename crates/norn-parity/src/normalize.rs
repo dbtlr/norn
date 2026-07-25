@@ -42,6 +42,20 @@ pub enum Normalization {
     /// (operations, cascade, outcome) byte-exactly. Only for `--format json`
     /// cascade cases; records omits `plan_hash`.
     PlanHash,
+    /// Drop the `self-update` row from a top-level `--help` COMMANDS block,
+    /// on both sides.
+    ///
+    /// The pinned oracle lists `self-update` only when it can find the
+    /// release-installer receipt it was installed with (under `$HOME`), and
+    /// accepts the command either way. The harness spawns into a cleared
+    /// environment where that receipt is unreachable, and the CI musl
+    /// artifact does not carry one — so whether the row renders is a
+    /// property of the environment and the build, while the rewrite lists it
+    /// unconditionally. A ledger extent is a platform-invariant number, so
+    /// the row is removed from both sides rather than counted differently on
+    /// each. The oracle's behavior is recorded in PD-101's text, which is
+    /// what a normalization step can never do.
+    SelfUpdateCommandRow,
 }
 
 /// The normalization steps applied to every case today.
@@ -89,7 +103,45 @@ pub fn normalize_text(text: &str, vault_roots: &[&Path], steps: &[Normalization]
                 // `"plan_hash": "<hex>"` (a space after the colon).
                 out = strip_hex_run_after(&out, "\"plan_hash\": \"");
             }
+            Normalization::SelfUpdateCommandRow => {
+                out = drop_command_row(&out, "self-update");
+            }
         }
+    }
+    out
+}
+
+/// Remove the COMMANDS row for `name` from a help page, and nothing else.
+///
+/// A help page delimits its sections with an unindented header (`COMMANDS`,
+/// `EXAMPLES`, `GLOBAL OPTIONS`) followed by indented rows, so the drop is
+/// bounded to lines between the `COMMANDS` header and the next unindented
+/// line. Matching a command name anywhere in the output would be wrong twice
+/// over: normalization runs on stderr as well as stdout, and a diagnostic or
+/// an example line that happens to START with a command's name is real output
+/// a parity run must still compare. Line terminators are preserved verbatim
+/// (`split_inclusive`), so this removes one row and changes nothing else
+/// about the text's bytes.
+fn drop_command_row(text: &str, name: &str) -> String {
+    const SECTION: &str = "COMMANDS";
+    let mut in_commands = false;
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\n', '\r']);
+        let unindented = !content.is_empty() && !content.starts_with(char::is_whitespace);
+        if in_commands {
+            // Any unindented line ends the row list — the next section header,
+            // or a footer.
+            if unindented {
+                in_commands = false;
+            } else if content.split_whitespace().next() == Some(name) {
+                continue;
+            }
+        }
+        if unindented && content == SECTION {
+            in_commands = true;
+        }
+        out.push_str(line);
     }
     out
 }
@@ -173,6 +225,71 @@ mod tests {
         assert_eq!(normalize_text(oracle, &[], TRACE), rewrite);
         // The rewrite's already-empty id is a no-op (idempotent).
         assert_eq!(normalize_text(rewrite, &[], TRACE), rewrite);
+    }
+
+    const SELF_UPDATE: &[Normalization] = &[Normalization::SelfUpdateCommandRow];
+
+    #[test]
+    fn self_update_row_is_dropped_from_a_commands_block() {
+        let listed = "COMMANDS\n    cache             Manage the cache\n    self-update       Update norn to the latest GitHub release\n    mcp               Run the MCP server\n";
+        let hidden = "COMMANDS\n    cache             Manage the cache\n    mcp               Run the MCP server\n";
+        assert_eq!(normalize_text(listed, &[], SELF_UPDATE), hidden);
+        // Idempotent: a side that never rendered the row is untouched.
+        assert_eq!(normalize_text(hidden, &[], SELF_UPDATE), hidden);
+    }
+
+    #[test]
+    fn self_update_normalization_leaves_other_mentions_alone() {
+        // Only a row whose FIRST token is the command name is a COMMANDS row;
+        // prose naming it in passing is real help text.
+        let text = "COMMANDS\n    update            Run self-update to fetch a release\nself-update-ish     Not the command\n";
+        assert_eq!(normalize_text(text, &[], SELF_UPDATE), text);
+    }
+
+    #[test]
+    fn a_line_outside_the_commands_block_starting_with_the_name_survives() {
+        // Normalization runs on stderr too, and a diagnostic or an example
+        // line may legitimately begin with a command's name. Only the
+        // COMMANDS row is noise.
+        let text = "COMMANDS\n    cache             Manage the cache\n    self-update       Update norn\n\nEXAMPLES\n    self-update --check\n        # look for a newer release\n";
+        assert_eq!(
+            normalize_text(text, &[], SELF_UPDATE),
+            "COMMANDS\n    cache             Manage the cache\n\nEXAMPLES\n    self-update --check\n        # look for a newer release\n",
+            "the EXAMPLES row survives; only the COMMANDS row goes"
+        );
+    }
+
+    #[test]
+    fn a_stderr_diagnostic_starting_with_the_name_is_untouched() {
+        // stderr carries no COMMANDS header at all, so nothing in it is ever
+        // a candidate for the drop.
+        let text = "self-update: refusing to replace a binary not installed from a release\nself-update failed\n";
+        assert_eq!(normalize_text(text, &[], SELF_UPDATE), text);
+    }
+
+    #[test]
+    fn the_drop_stops_at_the_next_section() {
+        // A second COMMANDS-shaped row after the block ended (a nested help
+        // page's own list, reached under a different header) is not touched
+        // until its own COMMANDS header opens the section again.
+        let text = "COMMANDS\n    self-update       Update norn\n\nGLOBAL OPTIONS\n    self-update       not a command row\n";
+        assert_eq!(
+            normalize_text(text, &[], SELF_UPDATE),
+            "COMMANDS\n\nGLOBAL OPTIONS\n    self-update       not a command row\n"
+        );
+    }
+
+    #[test]
+    fn self_update_normalization_preserves_a_missing_trailing_newline() {
+        // The fixture carries the COMMANDS header the drop is scoped to; the
+        // property under test is that the unterminated final line stays
+        // unterminated.
+        let text =
+            "COMMANDS\n    cache   Manage the cache\n    self-update  Update\n    mcp   Serve";
+        assert_eq!(
+            normalize_text(text, &[], SELF_UPDATE),
+            "COMMANDS\n    cache   Manage the cache\n    mcp   Serve"
+        );
     }
 
     #[test]

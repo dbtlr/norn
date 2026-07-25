@@ -12,15 +12,16 @@
 //!   and that a non-mutating case never triggers the tree comparison.
 //!
 //! Stubs are `/bin/sh` scripts (this crate's tests already assume a unixy
-//! environment — cf. `/bin/echo` in `tests/verdicts.rs`). Each answers
+//! environment). They go through `common::write_stub`, which holds the
+//! POSIX-only rule every stub body follows. Each answers
 //! `--version` with a pinned semver token so the harness's oracle-version pin
 //! is satisfiable, and otherwise writes into its cwd (the fixture vault).
 
 mod common;
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use common::write_stub;
 use norn_parity::cases::{Case, Fixture, Suite};
 use norn_parity::fixtures::{FixtureCache, Side};
 use norn_parity::report;
@@ -34,27 +35,17 @@ const CLEAN_1: Fixture = Fixture {
 
 const MUT_CASE_ID: &str = "fab-mutation-clean";
 
-/// Write `body` as an executable `/bin/sh` script at `dir/name`.
-fn write_stub(dir: &Path, name: &str, body: &str) -> PathBuf {
-    let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
-}
-
 /// A stub that answers `--version` with the pinned token and otherwise writes
 /// `content` verbatim into `mutation.md` in its cwd, exit 0.
 fn mutating_stub_body(content: &str) -> String {
     format!(
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"stub 9.9.9\"; exit 0; fi\nprintf '%s' '{content}' > mutation.md\nexit 0\n"
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' \"stub 9.9.9\"; exit 0; fi\nprintf '%s' '{content}' > mutation.md\nexit 0\n"
     )
 }
 
 /// The `--version` preamble every stub shares.
 const STUB_VERSION_PREAMBLE: &str =
-    "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"stub 9.9.9\"; exit 0; fi\n";
+    "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' \"stub 9.9.9\"; exit 0; fi\n";
 
 /// A stub that creates an empty directory `emptied/` in its cwd (no file
 /// writes, no stdout), exit 0 — for the directory-cleanup divergence case.
@@ -280,6 +271,7 @@ old = "oracle writes ORACLE"
 new = "candidate writes CANDIDATE"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {{ "{MUT_CASE_ID}" = {{ tree = 1 }} }}
 "#
         ),
     );

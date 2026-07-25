@@ -2,11 +2,99 @@
 //! stdout/stderr/exit code.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::cases::Case;
+
+/// The environment every binary this module spawns runs under.
+///
+/// The caller's environment is CLEARED and rebuilt from a fixed allowlist.
+/// Anything a host carries that reaches a case is measured as a difference:
+/// a `norn serve` daemon the client finds through `$HOME` adds a version-skew
+/// line to one side's stderr, and a leaked `NORN_ROOT` points a case at a
+/// vault that is not its fixture. Neither is a property of the two binaries,
+/// which is the only thing a parity run is entitled to measure.
+///
+/// "Both sides get the same value" is NOT enough to forward a variable. The
+/// two binaries do not read the environment the same way, so a variable one
+/// side branches on and the other ignores turns the host into an input:
+///
+/// - the LOCALE is pinned, not forwarded. The rewrite selects glyphs from
+///   `LC_ALL` -> `LC_CTYPE` -> `LANG` and falls back to ASCII off a
+///   non-UTF-8 locale (`norn-cli`'s `output::glyphs`); the pinned oracle
+///   emits unicode unconditionally. Forwarding the host's locale therefore
+///   makes several cases differ on a developer's machine and match on a CI
+///   image, and silently bakes whatever locale the tables were recorded
+///   under into the ledger. `LC_ALL=C.UTF-8` is set and `LANG`/`LC_CTYPE`
+///   are removed, so both sides always render the same glyph set. The
+///   rewrite's adaptive fallback is deliberately not exercised by parity —
+///   see the locale ruling in `docs/parity-ledger.toml`'s header;
+/// - `HOME` and the XDG bases point into a scratch tree the run owns, so a
+///   registry, cache, config, socket or log a binary creates for itself is
+///   created fresh and thrown away with the run. `XDG_RUNTIME_DIR` gets its
+///   own SHORT temp dir rather than a path under the fixture cache: it holds
+///   the `AF_UNIX` socket a summoned vault owner binds, and a fixture-cache
+///   path plus that socket's name overruns `sun_path` — see
+///   `norn_fixtures::testing::short_runtime_dir`, which picks the base and
+///   refuses a path that could not work;
+/// - `NORN_ROOT` and `NORN_CONFIG_DIR` are removed explicitly after the
+///   allowlist is applied. `env_clear` already drops them; the explicit
+///   removal keeps them dropped if the allowlist ever widens.
+pub struct SpawnEnv {
+    home: PathBuf,
+    cache: PathBuf,
+    config: PathBuf,
+    /// Owned so the sockets and logs a daemon-capable binary opens under it
+    /// are removed when the run ends.
+    runtime: tempfile::TempDir,
+}
+
+impl SpawnEnv {
+    /// Create the scratch `HOME` / XDG tree under `root` — a directory the
+    /// caller owns for the run (the fixture cache's temp root in a
+    /// comparison run).
+    pub fn create_in(root: &Path) -> std::io::Result<SpawnEnv> {
+        let home = root.join("scratch-home");
+        let cache = root.join("scratch-cache");
+        let config = root.join("scratch-config");
+        // Created, not just named: an XDG consumer may assume its base
+        // directory exists and not create parents, and a write that fails for
+        // that reason reads as the binary's behavior rather than as setup.
+        for dir in [&home, &cache, &config] {
+            std::fs::create_dir_all(dir)?;
+        }
+        let runtime = norn_fixtures::testing::short_runtime_dir("norn-parity-")?;
+        Ok(SpawnEnv {
+            home,
+            cache,
+            config,
+            runtime,
+        })
+    }
+
+    fn apply(&self, command: &mut Command) {
+        command.env_clear();
+        // PATH so a binary can find anything it shells out to, and TMPDIR
+        // because a process needs somewhere to write. Nothing else is
+        // forwarded — see the type doc.
+        for passthrough in ["PATH", "TMPDIR"] {
+            if let Some(value) = std::env::var_os(passthrough) {
+                command.env(passthrough, value);
+            }
+        }
+        command.env("LC_ALL", "C.UTF-8");
+        command.env_remove("LANG");
+        command.env_remove("LC_CTYPE");
+        command.env("HOME", &self.home);
+        command.env("XDG_CACHE_HOME", &self.cache);
+        command.env("XDG_CONFIG_HOME", &self.config);
+        command.env("XDG_RUNTIME_DIR", self.runtime.path());
+        command.env_remove("NORN_ROOT");
+        command.env_remove("NORN_CONFIG_DIR");
+    }
+}
 
 /// A captured process outcome, pre-normalization.
 pub struct RawOutput {
@@ -63,6 +151,37 @@ impl std::fmt::Display for ExecError {
 
 impl std::error::Error for ExecError {}
 
+/// Retry `attempt` while it fails with `ExecutableFileBusy` (ETXTBSY), up to
+/// 25 attempts spaced 20ms apart — a bound of roughly 480ms before the error
+/// is returned to the caller.
+///
+/// `execve` refuses to run an image that is open for writing anywhere on the
+/// system: it takes a write-deny reference on the inode, which fails while
+/// any file description still holds a write reference to it. A binary this
+/// process wrote moments ago can satisfy that even after its own descriptor
+/// is closed — another thread forking inside the write's window gives the
+/// child a copy of the parent's file descriptor table, and that inherited
+/// description keeps the inode's writer count above zero until the child
+/// execs. Close-on-exec does clear it, but the kernel takes the write-deny
+/// reference for the NEW image before flushing the old table, so the window
+/// is real. It is also transient, lifting as soon as that descriptor closes,
+/// so spawning waits it out rather than failing the run. A spawn that fails
+/// never started a process, so a retry repeats no side effect.
+fn retry_while_busy<T>(mut attempt: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    const MAX_ATTEMPTS: u32 = 25;
+    const BACKOFF: Duration = Duration::from_millis(20);
+
+    for _ in 1..MAX_ATTEMPTS {
+        match attempt() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(BACKOFF);
+            }
+            other => return other,
+        }
+    }
+    attempt()
+}
+
 /// A spawned child plus its (optional) stdin-writer thread — the setup
 /// [`run_argv`] and [`run_argv_bounded`] share; only how they WAIT for the
 /// child differs (unbounded `wait_with_output` vs. a polled, killable
@@ -83,19 +202,24 @@ fn spawn_with_stdin(
     argv: &[&str],
     stdin: Option<&str>,
     vault: &Path,
+    env: &SpawnEnv,
     binary_label: &str,
 ) -> Result<Spawned, ExecError> {
-    let mut child = Command::new(binary)
-        .args(argv)
-        .current_dir(vault)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| ExecError::Spawn {
-            binary: binary_label.to_string(),
-            source,
-        })?;
+    let mut child = retry_while_busy(|| {
+        let mut command = Command::new(binary);
+        env.apply(&mut command);
+        command
+            .args(argv)
+            .current_dir(vault)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    })
+    .map_err(|source| ExecError::Spawn {
+        binary: binary_label.to_string(),
+        source,
+    })?;
 
     let stdin_writer = if let Some(stdin_text) = stdin {
         // `.expect` on the piped handle is safe: we just requested it above.
@@ -125,12 +249,17 @@ fn spawn_with_stdin(
 /// bug could otherwise hang the runner reading stdin that never arrives) and
 /// its frame-by-frame JSON comparison, not this raw byte comparison — see
 /// `crate::run::run_suites`, which branches before reaching this function.
-pub fn run_case(binary: &Path, case: &Case, vault: &Path) -> Result<RawOutput, ExecError> {
+pub fn run_case(
+    binary: &Path,
+    case: &Case,
+    vault: &Path,
+    env: &SpawnEnv,
+) -> Result<RawOutput, ExecError> {
     debug_assert!(
         case.stdin.is_none(),
         "an MCP case (stdin: Some) must be driven by crate::mcp::run_case, not exec::run_case"
     );
-    run_argv(binary, case.argv, None, vault)
+    run_argv(binary, case.argv, None, vault, env)
 }
 
 /// Lower-level than [`run_case`]: run arbitrary `argv`/`stdin` against
@@ -142,12 +271,13 @@ pub fn run_argv(
     argv: &[&str],
     stdin: Option<&str>,
     vault: &Path,
+    env: &SpawnEnv,
 ) -> Result<RawOutput, ExecError> {
     let binary_label = binary.display().to_string();
     let Spawned {
         child,
         stdin_writer,
-    } = spawn_with_stdin(binary, argv, stdin, vault, &binary_label)?;
+    } = spawn_with_stdin(binary, argv, stdin, vault, env, &binary_label)?;
 
     // `wait_with_output` drains stdout/stderr concurrently with the stdin
     // writer thread (spawned above) — waiting AND draining together is
@@ -193,6 +323,7 @@ pub fn run_argv_bounded(
     argv: &[&str],
     stdin: Option<&str>,
     vault: &Path,
+    env: &SpawnEnv,
     timeout: Duration,
 ) -> Result<RawOutput, ExecError> {
     const POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -201,7 +332,7 @@ pub fn run_argv_bounded(
     let Spawned {
         mut child,
         stdin_writer,
-    } = spawn_with_stdin(binary, argv, stdin, vault, &binary_label)?;
+    } = spawn_with_stdin(binary, argv, stdin, vault, env, &binary_label)?;
 
     let mut child_stdout = child.stdout.take().expect("stdout was piped");
     let stdout_reader = std::thread::spawn(move || -> Vec<u8> {
@@ -290,19 +421,80 @@ pub fn run_argv_bounded(
 /// strict to be (the oracle's version must succeed and match the ledger's
 /// pinned version; the phase-0 rewrite skeleton's `--version` exits 2 with
 /// a notice, and only its existence is required).
-pub fn probe_version(binary: &Path) -> Result<RawOutput, ExecError> {
+pub fn probe_version(binary: &Path, env: &SpawnEnv) -> Result<RawOutput, ExecError> {
     let binary_label = binary.display().to_string();
-    let output = Command::new(binary)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|source| ExecError::Spawn {
-            binary: binary_label,
-            source,
-        })?;
+    let output = retry_while_busy(|| {
+        let mut command = Command::new(binary);
+        env.apply(&mut command);
+        command.arg("--version").stdin(Stdio::null()).output()
+    })
+    .map_err(|source| ExecError::Spawn {
+        binary: binary_label,
+        source,
+    })?;
     Ok(RawOutput {
         stdout: output.stdout,
         stderr: output.stderr,
         exit_code: output.status.code(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn busy() -> std::io::Error {
+        std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy)
+    }
+
+    #[test]
+    fn a_transient_busy_is_waited_out() {
+        let attempts = Cell::new(0);
+        let result = retry_while_busy(|| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() < 3 {
+                Err(busy())
+            } else {
+                Ok("spawned")
+            }
+        });
+        assert_eq!(result.unwrap(), "spawned");
+        assert_eq!(attempts.get(), 3, "retried exactly until it succeeded");
+    }
+
+    #[test]
+    fn a_permanent_busy_gives_up_after_the_attempt_budget() {
+        let attempts = Cell::new(0);
+        let result: std::io::Result<()> = retry_while_busy(|| {
+            attempts.set(attempts.get() + 1);
+            Err(busy())
+        });
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::ExecutableFileBusy,
+            "the last error reaches the caller rather than being swallowed"
+        );
+        assert_eq!(
+            attempts.get(),
+            25,
+            "the budget is 25 attempts, not unbounded"
+        );
+    }
+
+    #[test]
+    fn any_other_error_is_returned_on_the_first_attempt() {
+        let attempts = Cell::new(0);
+        let result: std::io::Result<()> = retry_while_busy(|| {
+            attempts.set(attempts.get() + 1);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such binary",
+            ))
+        });
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(err.to_string(), "no such binary", "propagated verbatim");
+        assert_eq!(attempts.get(), 1, "only ETXTBSY is worth waiting out");
+    }
 }

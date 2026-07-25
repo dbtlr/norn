@@ -3,6 +3,13 @@
 //! Only the glyphs the custom help renderer references are carried: the
 //! live-example marker and its separator dot. `use_ascii()` probes the
 //! environment for the caller's preferred mode.
+//!
+//! Selecting on the locale is deliberate and load-bearing, not a fallback
+//! that could be dropped: a terminal that did not declare a UTF-8 charset
+//! gets ASCII, which is what keeps output readable there. `use_ascii()` is
+//! the only switch — no caller hardcodes a glyph set — so anything that needs
+//! one fixed rendering pins `LC_ALL` (or `LC_CTYPE` / `LANG`) to a UTF-8
+//! value in the environment it runs under, rather than bypassing the probe.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Glyph {

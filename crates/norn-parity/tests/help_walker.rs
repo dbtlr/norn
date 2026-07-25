@@ -51,10 +51,10 @@ const HELP_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Run `<path...> --help` against `binary` with cwd `vault`, bounded so a
 /// hung/crashing help path fails loudly rather than wedging the run.
-fn run_help(binary: &Path, path: &[String], vault: &Path) -> RawOutput {
+fn run_help(binary: &Path, path: &[String], vault: &Path, env: &exec::SpawnEnv) -> RawOutput {
     let mut argv: Vec<&str> = path.iter().map(String::as_str).collect();
     argv.push("--help");
-    exec::run_argv_bounded(binary, &argv, None, vault, HELP_TIMEOUT).unwrap_or_else(|e| {
+    exec::run_argv_bounded(binary, &argv, None, vault, env, HELP_TIMEOUT).unwrap_or_else(|e| {
         panic!(
             "`{} {} --help` could not be driven to completion: {e}",
             binary.display(),
@@ -103,14 +103,14 @@ fn parse_commands(help: &str) -> Vec<String> {
 /// (the empty path == the top-level `--help`). Recurses through COMMANDS
 /// sections; the returned set is sorted (a `BTreeSet`) for deterministic
 /// iteration regardless of traversal order.
-fn enumerate(binary: &Path, vault: &Path) -> BTreeSet<Vec<String>> {
+fn enumerate(binary: &Path, vault: &Path, env: &exec::SpawnEnv) -> BTreeSet<Vec<String>> {
     let mut paths: BTreeSet<Vec<String>> = BTreeSet::new();
     let mut frontier: Vec<Vec<String>> = vec![Vec::new()];
     while let Some(path) = frontier.pop() {
         if !paths.insert(path.clone()) {
             continue;
         }
-        let out = run_help(binary, &path, vault);
+        let out = run_help(binary, &path, vault, env);
         let help = String::from_utf8_lossy(&out.stdout);
         for sub in parse_commands(&help) {
             let mut child = path.clone();
@@ -162,16 +162,18 @@ fn help_walker_every_verb_reshapes_global_options_uniformly() {
     // and side-effect-free (any oracle cache warming lands on stderr, which the
     // walker never inspects — it compares stdout help text only).
     let cwd = common::workspace_root();
+    let scratch = common::scratch_env();
+    let env = &scratch.env;
 
     // Canonical global-options blocks, derived from each binary's own top-level
     // `--help` in THIS run. Comparing every other path against these makes the
     // check robust to environment-specific rendering: the canonical and the
     // per-path block are produced by the same binary under the same conditions.
     let canonical_oracle = global_options(&String::from_utf8_lossy(
-        &run_help(&oracle, &[], &cwd).stdout,
+        &run_help(&oracle, &[], &cwd, env).stdout,
     ));
     let canonical_rewrite = global_options(&String::from_utf8_lossy(
-        &run_help(&rewrite, &[], &cwd).stdout,
+        &run_help(&rewrite, &[], &cwd, env).stdout,
     ));
     assert!(
         !canonical_oracle.is_empty() && !canonical_rewrite.is_empty(),
@@ -207,8 +209,8 @@ fn help_walker_every_verb_reshapes_global_options_uniformly() {
 
     // Enumerate the union of both clap trees (the rewrite adds the `vault`
     // registry namespace the oracle predates). Sorted set → deterministic.
-    let mut paths = enumerate(&rewrite, &cwd);
-    paths.extend(enumerate(&oracle, &cwd));
+    let mut paths = enumerate(&rewrite, &cwd, env);
+    paths.extend(enumerate(&oracle, &cwd, env));
 
     // Enumeration sanity: a broken parser that collapsed to just the root must
     // fail rather than vacuously pass. These sentinels are a floor on the
@@ -236,7 +238,7 @@ fn help_walker_every_verb_reshapes_global_options_uniformly() {
     let mut checked_paths = 0usize;
     for path in &paths {
         let rewrite_help =
-            String::from_utf8_lossy(&run_help(&rewrite, path, &cwd).stdout).to_string();
+            String::from_utf8_lossy(&run_help(&rewrite, path, &cwd, env).stdout).to_string();
         let rewrite_block = global_options(&rewrite_help);
 
         // The rewrite must render a GLOBAL OPTIONS block on every verb, and it
@@ -255,7 +257,7 @@ fn help_walker_every_verb_reshapes_global_options_uniformly() {
         );
 
         let oracle_help =
-            String::from_utf8_lossy(&run_help(&oracle, path, &cwd).stdout).to_string();
+            String::from_utf8_lossy(&run_help(&oracle, path, &cwd, env).stdout).to_string();
         let oracle_block = global_options(&oracle_help);
         if oracle_block.is_empty() {
             // The oracle does not know this command: the only such family is the
@@ -300,10 +302,14 @@ fn help_walker_service_local_vault_flag_is_deleted() {
     let oracle = common::oracle_path();
     let rewrite = common::rewrite_debug_binary();
     let cwd = common::workspace_root();
+    let scratch = common::scratch_env();
+    let env = &scratch.env;
     let path = vec!["service".to_string(), "status".to_string()];
 
-    let oracle_help = String::from_utf8_lossy(&run_help(&oracle, &path, &cwd).stdout).to_string();
-    let rewrite_help = String::from_utf8_lossy(&run_help(&rewrite, &path, &cwd).stdout).to_string();
+    let oracle_help =
+        String::from_utf8_lossy(&run_help(&oracle, &path, &cwd, env).stdout).to_string();
+    let rewrite_help =
+        String::from_utf8_lossy(&run_help(&rewrite, &path, &cwd, env).stdout).to_string();
 
     assert!(
         oracle_help.contains("--vault <PATH>"),

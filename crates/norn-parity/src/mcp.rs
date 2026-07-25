@@ -322,13 +322,21 @@ fn collect_responses(
     argv: &[&str],
     frames: &[&str],
     expected: &[RequestMeta],
+    env: &exec::SpawnEnv,
 ) -> Result<SideResult, McpError> {
     let payload: String = frames.iter().map(|f| format!("{f}\n")).collect();
-    let raw = exec::run_argv_bounded(target.binary, argv, Some(&payload), target.vault, TIMEOUT)
-        .map_err(|source| McpError::Exec {
-            label: target.label,
-            source,
-        })?;
+    let raw = exec::run_argv_bounded(
+        target.binary,
+        argv,
+        Some(&payload),
+        target.vault,
+        env,
+        TIMEOUT,
+    )
+    .map_err(|source| McpError::Exec {
+        label: target.label,
+        source,
+    })?;
 
     let stdout = String::from_utf8_lossy(&raw.stdout);
     let mut responses = BTreeMap::new();
@@ -722,11 +730,12 @@ pub fn run_case(
     frames: &[&str],
     oracle: DriveTarget,
     candidate: DriveTarget,
+    env: &exec::SpawnEnv,
 ) -> Result<McpCaseResult, McpError> {
     let requests = request_metas(frames)?;
 
-    let oracle_side = collect_responses(&oracle, argv, frames, &requests)?;
-    let candidate_side = collect_responses(&candidate, argv, frames, &requests)?;
+    let oracle_side = collect_responses(&oracle, argv, frames, &requests, env)?;
+    let candidate_side = collect_responses(&candidate, argv, frames, &requests, env)?;
 
     let mut diffs = Vec::new();
     for req in &requests {

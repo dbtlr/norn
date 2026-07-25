@@ -22,9 +22,15 @@ fn usage() -> String {
      \x20 --consistency  oracle-only cross-command invariants; --rewrite not required\n\n\
      --oracle default: `norn` resolved from PATH\n\
      --rewrite default: ./target/release/norn (ignored by --consistency)\n\
-     --ledger default: docs/parity-ledger.toml at the workspace root"
+     --ledger default: docs/parity-ledger.toml at the workspace root\n\
+     -h, --help     print this usage and exit 0"
         .to_string()
 }
+
+/// `--help` / `-h` is a request that SUCCEEDED, so it prints usage on stdout
+/// and exits 0. Every other exit from this bin is a result: 0 clean, 1 a
+/// parity failure, 2 a runner error.
+struct HelpRequested;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ModeFlag {
@@ -42,7 +48,7 @@ struct Args {
     suite_filter: Vec<String>,
 }
 
-fn parse_args(argv: &[String]) -> Result<Args, String> {
+fn parse_args(argv: &[String]) -> Result<Result<Args, HelpRequested>, String> {
     let mut mode: Option<ModeFlag> = None;
     let mut oracle: Option<String> = None;
     let mut rewrite: Option<String> = None;
@@ -64,6 +70,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut i = 0;
     while i < argv.len() {
         match argv[i].as_str() {
+            "--help" | "-h" => return Ok(Err(HelpRequested)),
             "--self-check" => set_mode(&mut mode, ModeFlag::SelfCheck)?,
             "--all" => set_mode(&mut mode, ModeFlag::All)?,
             "--consistency" => set_mode(&mut mode, ModeFlag::Consistency)?,
@@ -90,13 +97,13 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         i += 1;
     }
 
-    Ok(Args {
+    Ok(Ok(Args {
         mode: mode.unwrap_or(ModeFlag::Gated),
         oracle: oracle.unwrap_or_else(|| "norn".to_string()),
         rewrite: rewrite.unwrap_or_else(|| "./target/release/norn".to_string()),
         ledger,
         suite_filter,
-    })
+    }))
 }
 
 /// Resolve `raw` (a bare name or a path) to a stable absolute path.
@@ -157,7 +164,17 @@ fn resolve_ledger_or_exit(args: &Args) -> Result<PathBuf, ExitCode> {
 /// semver-shaped token — the pin the ledger's `meta.oracle_version` must
 /// match.
 fn oracle_version_or_exit(oracle: &Path) -> Result<String, ExitCode> {
-    let raw = exec::probe_version(oracle).map_err(|e| {
+    // Probed under the same cleared environment every case runs under, from a
+    // scratch tree that lives only as long as the probe.
+    let scratch = tempfile::TempDir::new().map_err(|e| {
+        eprintln!("norn-parity: could not create a scratch dir for the version probe: {e}");
+        ExitCode::from(2)
+    })?;
+    let env = exec::SpawnEnv::create_in(scratch.path()).map_err(|e| {
+        eprintln!("norn-parity: could not create the scratch HOME/XDG tree: {e}");
+        ExitCode::from(2)
+    })?;
+    let raw = exec::probe_version(oracle, &env).map_err(|e| {
         eprintln!("norn-parity: oracle --version failed: {e}");
         ExitCode::from(2)
     })?;
@@ -278,7 +295,11 @@ fn run_comparison(args: &Args, mode: Mode) -> ExitCode {
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse_args(&argv) {
-        Ok(a) => a,
+        Ok(Ok(a)) => a,
+        Ok(Err(HelpRequested)) => {
+            println!("{}", usage());
+            return ExitCode::SUCCESS;
+        }
         Err(e) => {
             eprintln!("norn-parity: {e}\n\n{}", usage());
             return ExitCode::from(2);

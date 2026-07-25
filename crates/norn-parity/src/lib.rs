@@ -14,6 +14,7 @@
 pub mod cases;
 pub mod consistency;
 pub mod exec;
+pub mod extent;
 pub mod fixtures;
 pub mod ledger;
 pub mod mcp;
