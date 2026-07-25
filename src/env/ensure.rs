@@ -220,6 +220,11 @@ fn open_generation(
     // between its bounded sub-steps (NRN-465). The cold FIRST-touch WHOLE-vault
     // build is NOT here — it runs in the freshness-refresh op via
     // `index_incremental` → `rebuild`, which ticks per batch of parsed files.
+    //
+    // Accepted residual: the O(db-size) `PRAGMA integrity_check` inside
+    // `Cache::open_with_index` runs BEFORE this first tick and is a single
+    // uninstrumentable SQLite call — a typical cache completes it far under the
+    // stall budget, so it does not threaten a false stall in practice.
     progress.tick();
 
     let db_identity = device_inode(&sentinel.metadata()?);

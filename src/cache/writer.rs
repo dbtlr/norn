@@ -380,6 +380,9 @@ impl crate::cache::Cache {
         overlay_files.sort_by(|a, b| a.path.cmp(&b.path));
         fresh_index.files = overlay_files;
         crate::links::resolve_links(&fresh_index.files, &mut fresh_index.documents);
+        // Global link resolution is an O(vault) pass with no natural inner loop to
+        // batch; tick once on completion so the sequence advances across it.
+        progress.tick();
 
         let fresh_docs: std::collections::HashMap<_, _> = fresh_index
             .documents
@@ -409,7 +412,7 @@ impl crate::cache::Cache {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         #[cfg(test)]
         run_after_increment_publication_authority_hook();
-        let authoritative_metadata = source_authority.verify(vault_root)?;
+        let authoritative_metadata = source_authority.verify(vault_root, progress)?;
         let mut report = IndexReport::default();
         let mut batch = crate::progress::BatchProgress::new(progress);
 
@@ -588,12 +591,21 @@ impl PublicationAuthority {
 
     /// Re-prove every affected source and return metadata captured by that same
     /// observation. Callers use this map for both `files` and `documents` rows.
+    ///
+    /// `progress` ticks per batch of proved paths (NRN-465): on a whole-vault
+    /// change this stat sweep spans every affected path, so the warm refresh op
+    /// passes a live reporter to keep the writer-progress sequence advancing. The
+    /// bulk increment path (which advances at its own chunk boundaries) and direct
+    /// paths pass [`ProgressReporter::none`](crate::progress::ProgressReporter::none).
     fn verify(
         &self,
         vault_root: &Utf8Path,
+        progress: crate::progress::ProgressReporter,
     ) -> Result<HashMap<Utf8PathBuf, (i64, i64)>, CacheError> {
         let mut metadata = HashMap::new();
+        let mut batch = crate::progress::BatchProgress::new(progress);
         for (path, expected) in &self.sources {
+            batch.record();
             let observed = match expected {
                 PublishedSourceState::ParsedDocument { hash } => {
                     verify_parsed_document(vault_root, path, hash)
@@ -803,7 +815,10 @@ impl crate::cache::Cache {
         // This early proof supplies coherent metadata for TEMP staging. The
         // same authority is always re-proved after terminal publication
         // authority, and those terminal values replace the staged metadata.
-        let staged_metadata = source_authority.verify(vault_root)?;
+        // Off the writer thread (this parse runs on the request thread), so no
+        // reporter is threaded here.
+        let staged_metadata =
+            source_authority.verify(vault_root, crate::progress::ProgressReporter::none())?;
         let pending_links = fresh_index
             .documents
             .iter()
@@ -1065,7 +1080,12 @@ impl crate::cache::Cache {
         // Re-prove the exact graph state only after publication authority. An
         // intervening cache publication supersedes this job cleanly; otherwise
         // this is the last filesystem observation before atomic row replacement.
-        let authoritative_metadata = match commit.source_authority.verify(&self.vault_root) {
+        // Runs inside a bulk chunk, which advances at its own boundary — no
+        // reporter threaded here.
+        let authoritative_metadata = match commit
+            .source_authority
+            .verify(&self.vault_root, crate::progress::ProgressReporter::none())
+        {
             Ok(metadata) => metadata,
             Err(error) => {
                 tx.rollback()?;

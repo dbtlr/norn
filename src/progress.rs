@@ -58,28 +58,85 @@ impl<'a> ProgressReporter<'a> {
 
 /// Batches [`ProgressReporter`] ticks over a hot per-file loop: advances the
 /// sequence once per [`PROGRESS_TICK_FILES`] units of work rather than on every
-/// iteration.
+/// iteration. The FIRST recorded unit ticks immediately, so a short stage (fewer
+/// than [`PROGRESS_TICK_FILES`] files) still emits early evidence that the op has
+/// begun real work rather than staying silent until a full batch accrues.
 pub(crate) struct BatchProgress<'a> {
     reporter: ProgressReporter<'a>,
-    since_tick: usize,
+    seen: usize,
 }
 
 impl<'a> BatchProgress<'a> {
     pub(crate) fn new(reporter: ProgressReporter<'a>) -> Self {
-        Self {
-            reporter,
-            since_tick: 0,
-        }
+        Self { reporter, seen: 0 }
     }
 
-    /// Record one unit of completed work; emit a real tick every
-    /// [`PROGRESS_TICK_FILES`] units.
+    /// Record one unit of completed work. Ticks on the first unit and then once
+    /// per [`PROGRESS_TICK_FILES`] units thereafter.
     #[inline]
     pub(crate) fn record(&mut self) {
-        self.since_tick += 1;
-        if self.since_tick >= PROGRESS_TICK_FILES {
-            self.since_tick = 0;
+        // Tick when `seen` is 0, PROGRESS_TICK_FILES, 2*…, etc. — i.e. the first
+        // record and every Nth after it.
+        if self.seen.is_multiple_of(PROGRESS_TICK_FILES) {
             self.reporter.tick();
         }
+        self.seen += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn count_ticks(records: usize) -> usize {
+        let ticks = Cell::new(0usize);
+        let tick = || ticks.set(ticks.get() + 1);
+        let reporter = ProgressReporter::new(&tick);
+        let mut batch = BatchProgress::new(reporter);
+        for _ in 0..records {
+            batch.record();
+        }
+        ticks.get()
+    }
+
+    /// A short stage (fewer than one batch) still emits ONE tick — the first
+    /// record — so a small op is not silent until a full batch accrues (NRN-465
+    /// review F2).
+    #[test]
+    fn first_record_ticks_immediately_for_a_short_stage() {
+        assert_eq!(count_ticks(1), 1);
+        assert_eq!(count_ticks(PROGRESS_TICK_FILES - 1), 1);
+    }
+
+    /// Zero recorded work emits zero ticks.
+    #[test]
+    fn no_records_no_ticks() {
+        assert_eq!(count_ticks(0), 0);
+    }
+
+    /// Ticks fire on the first record and then every `PROGRESS_TICK_FILES` after:
+    /// records at index 0, N, 2N, … With `K` records that is `1 + (K-1)/N` ticks.
+    #[test]
+    fn ticks_on_first_then_every_batch() {
+        let n = PROGRESS_TICK_FILES;
+        assert_eq!(count_ticks(n), 1, "records 0..N-1 tick only at index 0");
+        assert_eq!(
+            count_ticks(n + 1),
+            2,
+            "the N-th record (index N) ticks again"
+        );
+        assert_eq!(count_ticks(2 * n), 2, "indices 0 and N tick");
+        assert_eq!(count_ticks(2 * n + 1), 3, "indices 0, N, 2N tick");
+    }
+
+    /// The no-op reporter never panics and never counts.
+    #[test]
+    fn none_reporter_is_inert() {
+        let mut batch = BatchProgress::new(ProgressReporter::none());
+        for _ in 0..(PROGRESS_TICK_FILES * 2) {
+            batch.record();
+        }
+        // Nothing to assert beyond "did not panic"; the no-op path is a no-op.
     }
 }
