@@ -1,5 +1,6 @@
-//! `norn describe` — the vault at a glance: structure (folders + declared rules
-//! + inbox + schema) and, with `--data`/`--stats`, a contents-summary.
+//! `norn describe` — the vault at a glance: structure counts (folders, declared
+//! rules, inbox), the declared config in full with `--schema`, and a
+//! contents-summary with `--data`/`--stats`/`--by`.
 //!
 //! The command maps its clap `Args` into [`DescribeParams`], summons the owner
 //! (which serves the structure from its retained config and the data summary
@@ -48,6 +49,7 @@ pub fn run(args: &DescribeArgs, global: &GlobalArgs) -> Result<Output, Diagnosti
         report,
         by: args.by.clone(),
         schema: args.schema,
+        no_pager: args.no_pager,
         format: FormatChoice {
             explicit: Some(Format::from(args.format.unwrap_or(DescribeFormat::Records))),
             spec: FormatSpec {

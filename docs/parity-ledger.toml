@@ -171,7 +171,7 @@ id = "PD-101"
 surface = "--help (top-level command list + GLOBAL OPTIONS)"
 cases = ["help-bare"]
 old = "the 22-command list ends at `audit` with no registered-vault namespace; GLOBAL OPTIONS lists `--config` and has no `--vault`; the `-C/--cwd` description is truncated at 70 chars with an ellipsis in `--help`"
-new = "a `vault` namespace (register/unregister/list/set) is listed after `audit`, exposing the ADR 0017 registry; GLOBAL OPTIONS drops `--config` and adds `--vault NAME`; the `-C/--cwd` description is shown in FULL (unclamped) in `--help`, only the concise line in `-h` (NRN-335). A FOURTH difference is normalized away rather than gated here: the rewrite always lists a `self-update` COMMANDS row, while the pinned oracle lists it only where it finds the release-installer receipt it was installed with (present beside a `$HOME` install, absent under the harness's cleared environment and absent from the CI musl artifact) — and accepts the command either way. That row's presence tracks the environment and the build rather than either binary, and an extent is a platform-invariant number, so `Normalization::SelfUpdateCommandRow` removes the row from BOTH sides for this case"
+new = "a `vault` namespace (register/unregister/list/set) is listed after `audit`, exposing the ADR 0017 registry; GLOBAL OPTIONS drops `--config` and adds `--vault NAME`; the `-C/--cwd` description is shown in FULL (unclamped) in `--help`, only the concise line in `-h` (NRN-335); the `describe` row's one-line summary names the `--schema` surface the config dump moved behind (NRN-470), so that COMMANDS row's text differs too. A FURTHER difference is normalized away rather than gated here: the rewrite always lists a `self-update` COMMANDS row, while the pinned oracle lists it only where it finds the release-installer receipt it was installed with (present beside a `$HOME` install, absent under the harness's cleared environment and absent from the CI musl artifact) — and accepts the command either way. That row's presence tracks the environment and the build rather than either binary, and an extent is a platform-invariant number, so `Normalization::SelfUpdateCommandRow` removes the row from BOTH sides for this case"
 reason = "decided-better"
 decision = "docs/decisions/0017-registered-vaults-summoned-owners.md"
 observed = { "help-bare" = { stdout = 3 } }
@@ -1227,11 +1227,37 @@ observed = { "read-find-all-cols-json-zoo" = { stdout = 8 } }
 # until the config-data verb `config show` is ported. See
 # `crates/norn-cli/src/display/render/describe.rs`.
 [[entry]]
-id = "PD-152"
+id = "PD-470"
 surface = "describe --format json (records-summary projection vs whole-config dump)"
 cases = ["describe-json-zoo"]
 old = "`describe --format json` serializes the whole describe report regardless of what a bare `describe` prints: `folders` as the full directory array, `path_rules` / `creatable_rules` as full objects carrying their `frontmatter_defaults`, `inbox`, and `schema` as the entire validate config"
 new = "`describe --format json` is the JSON projection of the records block — `folders` / `path_rules` / `creatable_rules` as integer COUNTS, `inbox` (`null` when unconfigured), and `data` only when a contents-summary was requested (`--data`/`--stats`/`--by`). The full declared config is reachable as `describe --schema`, whose `--format json` emits exactly the payload the oracle's bare `--format json` emitted, and whose records rendering prints the same sections human-legibly"
+reason = "decided-better"
+decision = "docs/decisions/0021-verbs-return-one-layer-renders.md"
+observed = {}
+
+# NRN-470, records side. `describe`'s counts block prints all four lines —
+# folders / path rules / creatable / inbox — whatever their value, where the
+# comparator drops a line whose count is zero and drops `inbox` when the vault
+# configures none. A dropped line is indistinguishable from a zero count when
+# reading the block, and the omission also forked records from json (which
+# always carried all four keys). Printing every line makes the counts block a
+# line-for-line mirror of `--format json` under PD-470: one derivation, two
+# renderings. An unconfigured inbox reads `(none)`, the records spelling of the
+# json `null`. This changes every records-format describe case, `--data` ones
+# included, since the structure block precedes the contents-summary.
+[[entry]]
+id = "PD-470b"
+surface = "describe (records — the structure counts block prints zeros and an absent inbox)"
+cases = [
+  "describe-zoo",
+  "describe-data-zoo",
+  "describe-stats-zoo",
+  "describe-by-clean",
+  "describe-data-clean",
+]
+old = "a zero count drops its line entirely (the zoo prints `folders`/`path rules` only — no `creatable` line, since the fixture declares no creatable rule) and an unconfigured `inbox.path` prints no `inbox` line at all, so a reader cannot tell a zero from an omission"
+new = "all four count lines print on every invocation — `folders`, `path rules`, `creatable`, `inbox` — with `0` where the count is zero and `(none)` where no `inbox.path` is configured. The contents-summary block that follows under `--data`/`--stats`/`--by` is unchanged; only the structure block ahead of it gains lines"
 reason = "decided-better"
 decision = "docs/decisions/0021-verbs-return-one-layer-renders.md"
 observed = {}

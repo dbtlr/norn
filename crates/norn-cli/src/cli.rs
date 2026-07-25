@@ -166,7 +166,7 @@ pub enum Command {
     Count(CountArgs),
     #[command(
         disable_help_flag = true,
-        about = "Describe the vault: structure (placement) and, with --data, a contents-summary"
+        about = "Describe the vault: structure counts, the declared config with --schema, a contents-summary with --data"
     )]
     Describe(DescribeArgs),
     #[command(
@@ -314,7 +314,7 @@ pub enum CountFormat {
 pub struct DescribeArgs {
     /// Expand the structure section from counts to the full declared config:
     /// every folder, every path/creatable rule with its defaults, and the whole
-    /// frontmatter schema.
+    /// frontmatter schema. Holds the config dump until `config show` carries it.
     #[arg(long, help_heading = "Describe options")]
     pub schema: bool,
 
@@ -346,6 +346,10 @@ pub struct DescribeArgs {
     /// Output format. Default records.
     #[arg(long, value_enum, help_heading = "Output")]
     pub format: Option<DescribeFormat>,
+
+    /// Skip the pager even when stdout is a TTY.
+    #[arg(long = "no-pager", help_heading = "Output")]
+    pub no_pager: bool,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]

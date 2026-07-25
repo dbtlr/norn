@@ -102,6 +102,8 @@ pub struct DescribeView {
     /// config (every folder, every rule with its defaults, the whole frontmatter
     /// schema). Applies to both the records and the json rendering.
     pub schema: bool,
+    /// `--no-pager`: stream `records` straight to stdout even on a TTY.
+    pub no_pager: bool,
     pub format: FormatChoice,
 }
 

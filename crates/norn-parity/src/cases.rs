@@ -1288,9 +1288,10 @@ const READ_CASES: &[Case] = &[
 /// describe ports for real (NRN-347): the structure view (folders + declared
 /// rules + inbox) and the contents summary (`--data`/`--stats`/`--by`). All
 /// `ported: true`. The `describe-json-zoo` case pins the `--format json`
-/// payload, which now Diverges under PD-152 (the json slot projects the records
-/// counts summary; the full declared config moved behind `describe --schema`);
-/// every other case must Match.
+/// payload, which now Diverges under PD-470 (the json slot projects the records
+/// counts summary; the full declared config moved behind `describe --schema`).
+/// The records cases Diverge under PD-470b (the counts block prints zero counts
+/// and an absent inbox instead of dropping their lines).
 const DESCRIBE_CASES: &[Case] = &[
     Case {
         id: "describe-zoo",
@@ -1334,7 +1335,7 @@ const DESCRIBE_CASES: &[Case] = &[
     },
     Case {
         // The `--format json` payload: the counts-summary projection of the
-        // records block (PD-152), against the whole-config serialization the
+        // records block (PD-470), against the whole-config serialization the
         // pinned comparator emits.
         id: "describe-json-zoo",
         argv: &["describe", "--format", "json"],

@@ -9,6 +9,7 @@
 use std::fmt::Write as _;
 use std::io;
 
+use norn_core::standards::ValidateConfig;
 use norn_wire::{DataSummary, DescribeReport};
 use serde::Serialize;
 use serde_json::Value;
@@ -77,9 +78,14 @@ fn warn_unknown_by_describe(
     Ok(())
 }
 
-/// The JSON projection of the default records block: the same structure COUNTS,
-/// inbox target, and contents-summary, machine-readable. `--schema` is the
-/// surface that carries the declared config itself.
+/// The records rendering of an unconfigured `inbox.path`, mirroring the `null`
+/// the json slot carries.
+const NO_INBOX: &str = "(none)";
+
+/// The default payload: the structure COUNTS, the inbox target, and the optional
+/// contents-summary. Both slots derive from this one struct — [`summary_json`]
+/// serializes it and [`summary_text`] destructures it — so a field added here
+/// fails to compile until the records formatter accounts for it.
 #[derive(Serialize)]
 struct DescribeSummary<'a> {
     folders: usize,
@@ -90,32 +96,39 @@ struct DescribeSummary<'a> {
     data: Option<&'a DataSummary>,
 }
 
-fn summary_json(report: &DescribeReport) -> String {
-    let summary = DescribeSummary {
+fn summary(report: &DescribeReport) -> DescribeSummary<'_> {
+    DescribeSummary {
         folders: report.folders.len(),
         path_rules: report.path_rules.len(),
         creatable_rules: report.creatable_rules.len(),
         inbox: report.inbox.as_deref(),
         data: report.data.as_ref(),
-    };
-    serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_string())
+    }
 }
 
+fn summary_json(report: &DescribeReport) -> String {
+    serde_json::to_string(&summary(report)).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Every count line is printed, zeros included: in a counts block `0` is the
+/// answer, and printing all four keeps the records block a line-for-line mirror
+/// of the json object.
 fn summary_text(report: &DescribeReport) -> String {
+    let DescribeSummary {
+        folders,
+        path_rules,
+        creatable_rules,
+        inbox,
+        data,
+    } = summary(report);
     let mut s = String::new();
-    if !report.folders.is_empty() {
-        let _ = writeln!(s, "folders    {}", report.folders.len());
+    let _ = writeln!(s, "folders    {folders}");
+    let _ = writeln!(s, "path rules {path_rules}");
+    let _ = writeln!(s, "creatable  {creatable_rules}");
+    let _ = writeln!(s, "inbox      {}", inbox.unwrap_or(NO_INBOX));
+    if let Some(data) = data {
+        append_data_block(&mut s, data);
     }
-    if !report.path_rules.is_empty() {
-        let _ = writeln!(s, "path rules {}", report.path_rules.len());
-    }
-    if !report.creatable_rules.is_empty() {
-        let _ = writeln!(s, "creatable  {}", report.creatable_rules.len());
-    }
-    if let Some(inbox) = &report.inbox {
-        let _ = writeln!(s, "inbox      {inbox}");
-    }
-    append_data_block(&mut s, report);
     s
 }
 
@@ -125,8 +138,9 @@ fn schema_json(report: &DescribeReport) -> String {
 
 /// The declared config in full, section per report field: the folder list, each
 /// path/creatable rule with its frontmatter defaults, the inbox target, and the
-/// frontmatter schema — the same content [`schema_json`] serializes. An empty
-/// section is omitted, matching [`summary_text`]'s omit-when-empty rule.
+/// frontmatter schema — the same content [`schema_json`] serializes. A section
+/// the vault declares nothing for is omitted: unlike the counts block, where `0`
+/// is an answer, an empty enumeration has nothing to show.
 fn schema_text(report: &DescribeReport) -> String {
     let mut s = String::new();
     if !report.folders.is_empty() {
@@ -170,22 +184,31 @@ fn schema_text(report: &DescribeReport) -> String {
         let _ = writeln!(s, "inbox");
         let _ = writeln!(s, "  {inbox}");
     }
-    if !is_empty_value(&report.schema) {
+    if let Some(schema) = declared_schema(report) {
         section_break(&mut s);
         let _ = writeln!(s, "schema");
-        let _ = writeln!(s, "{}", yaml_block(&report.schema, 2));
+        let _ = writeln!(s, "{}", yaml_block(schema, 2));
     }
-    append_data_block(&mut s, report);
+    if let Some(data) = &report.data {
+        append_data_block(&mut s, data);
+    }
     s
+}
+
+/// The frontmatter schema when the vault declares one. `describe` serializes a
+/// default [`ValidateConfig`] for a vault running under no config file, and a
+/// config declaring no `validate` section serializes to the same value, so an
+/// all-empty schema means "nothing declared" and its section is dropped rather
+/// than printed as three empty keys.
+fn declared_schema(report: &DescribeReport) -> Option<&Value> {
+    let undeclared = serde_json::to_value(ValidateConfig::default()).unwrap_or(Value::Null);
+    (!is_empty_value(&report.schema) && report.schema != undeclared).then_some(&report.schema)
 }
 
 /// The contents-summary block (`--data`/`--stats`/`--by`), shared by both
 /// records payloads: totals + date bounds, one line per distributed field, and
 /// the identity-skipped tail.
-fn append_data_block(s: &mut String, report: &DescribeReport) {
-    let Some(data) = &report.data else {
-        return;
-    };
+fn append_data_block(s: &mut String, data: &DataSummary) {
     section_break(s);
     let dates = data
         .dates
@@ -295,13 +318,34 @@ mod tests {
         render_describe(view, format, &mut sink, &mut conv)
     }
 
+    /// The frontmatter schema a config-less vault reports: `describe::execute`
+    /// serializes a default `ValidateConfig` when no config file is in play.
+    fn undeclared_schema() -> Value {
+        serde_json::to_value(ValidateConfig::default()).unwrap()
+    }
+
+    /// A frontmatter schema a configured vault reports, round-tripped through
+    /// `ValidateConfig` so the fixture carries the same key set `execute`
+    /// serializes (every rule field defaulted and present).
+    fn declared_schema_value() -> Value {
+        let config: ValidateConfig = serde_json::from_value(json!({
+            "required_frontmatter": ["type"],
+            "rules": [{ "name": "note", "required_frontmatter": ["type"] }],
+        }))
+        .expect("the fixture parses as a validate config");
+        serde_json::to_value(&config).expect("a validate config serializes")
+    }
+
+    /// A config-less vault with documents: folders only, no rules, no inbox, and
+    /// the default (undeclared) schema — the shape `execute` builds for a vault
+    /// running under no config file.
     fn describe_sample() -> DescribeReport {
         DescribeReport {
             folders: vec!["".into(), "notes".into()],
             path_rules: vec![],
             creatable_rules: vec![],
             inbox: None,
-            schema: json!({}),
+            schema: undeclared_schema(),
             data: Some(DataSummary {
                 total: 1164,
                 fields: vec![FieldDistribution {
@@ -358,7 +402,7 @@ mod tests {
                 body: Some("# {{var.slug}}\n\n".into()),
             }],
             inbox: Some("inbox".into()),
-            schema: json!({ "rules": [{ "name": "note", "required_frontmatter": ["type"] }] }),
+            schema: declared_schema_value(),
             data: None,
         }
     }
@@ -366,7 +410,7 @@ mod tests {
     #[test]
     fn summary_text_renders_structure_counts_then_data() {
         let s = summary_text(&describe_sample());
-        assert!(s.contains("folders    2"), "{s}");
+        assert!(s.starts_with("folders    2\n"), "{s}");
         assert!(
             s.contains("1164 documents · created 2026-05-10 → 2026-07-03"),
             "{s}"
@@ -375,11 +419,59 @@ mod tests {
         assert!(s.contains("(skipped: title 1164/1164)"), "{s}");
     }
 
+    /// Every count line prints, zero or not, and an unconfigured inbox prints
+    /// `(none)` rather than dropping its line — a dropped line is indistinguish-
+    /// able from a zero count when reading the block.
     #[test]
-    fn summary_structure_only_text_has_no_data_block() {
+    fn summary_text_prints_zero_counts_and_an_absent_inbox() {
         let mut report = describe_sample();
         report.data = None;
-        assert_eq!(summary_text(&report), "folders    2\n");
+        assert_eq!(
+            summary_text(&report),
+            "folders    2\npath rules 0\ncreatable  0\ninbox      (none)\n"
+        );
+    }
+
+    /// The two slots cannot fork: every records count line names a key of the
+    /// json object and carries that key's value.
+    #[test]
+    fn summary_text_lines_mirror_the_summary_json_object() {
+        let report = schema_sample();
+        let text = summary_text(&report);
+        let json: serde_json::Value = serde_json::from_str(&summary_json(&report)).unwrap();
+
+        let rendered: Vec<(&str, String)> = text
+            .lines()
+            .take_while(|line| !line.is_empty())
+            .map(|line| {
+                let (label, value) = line.split_at(11);
+                (label.trim_end(), value.trim().to_string())
+            })
+            .collect();
+        assert_eq!(
+            rendered
+                .iter()
+                .map(|(label, _)| *label)
+                .collect::<Vec<&str>>(),
+            vec!["folders", "path rules", "creatable", "inbox"]
+        );
+
+        // Each records label maps to the json key it projects; `(none)` is the
+        // records spelling of a `null` inbox.
+        let keys = ["folders", "path_rules", "creatable_rules", "inbox"];
+        for ((_, value), key) in rendered.iter().zip(keys) {
+            let expected = match &json[key] {
+                serde_json::Value::Null => NO_INBOX.to_string(),
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            assert_eq!(*value, expected, "records/json fork on `{key}`");
+        }
+        assert_eq!(
+            json.as_object().unwrap().len(),
+            keys.len(),
+            "a json key with no records line: {json}"
+        );
     }
 
     /// The default `--format json` is the projection of the default records
@@ -433,6 +525,18 @@ mod tests {
         assert!(text.starts_with(r#"{"folders":"#), "{text}");
     }
 
+    /// `--schema --format json` is the whole report verbatim — no projection,
+    /// no re-ordering, no dropped key — over both report shapes.
+    #[test]
+    fn schema_json_is_the_report_serialized_verbatim() {
+        for report in [schema_sample(), describe_sample()] {
+            assert_eq!(
+                schema_json(&report),
+                serde_json::to_string(&report).unwrap()
+            );
+        }
+    }
+
     /// The `--schema` records block carries the same content `schema_json`
     /// serializes: every folder, every rule with its defaults, inbox, schema.
     #[test]
@@ -450,8 +554,9 @@ mod tests {
         assert!(s.contains("    required vars: slug\n"), "{s}");
         assert!(s.contains("    body: 2 lines\n"), "{s}");
         assert!(s.contains("inbox\n  inbox\n"), "{s}");
-        assert!(s.contains("schema\n  rules:\n"), "{s}");
-        assert!(s.contains("required_frontmatter:\n"), "{s}");
+        assert!(s.contains("schema\n  ignore: []\n"), "{s}");
+        assert!(s.contains("  required_frontmatter:\n  - type\n"), "{s}");
+        assert!(s.contains("  rules:\n"), "{s}");
     }
 
     #[test]
@@ -463,13 +568,27 @@ mod tests {
         assert!(s.contains("1164 documents · created"), "{s}");
     }
 
+    /// A config-less vault declares nothing: only the folder listing prints. The
+    /// schema section in particular stays out — `describe` reports a default
+    /// `ValidateConfig` there, and rendering its three empty keys would read as
+    /// a declared schema.
     #[test]
-    fn schema_text_omits_empty_sections() {
-        let report = describe_sample(); // folders only; empty rules, null-ish schema
+    fn schema_text_on_a_config_less_vault_lists_only_folders() {
+        let mut report = describe_sample();
+        report.data = None;
+        assert_eq!(schema_text(&report), "folders\n  (root)\n  notes\n");
+    }
+
+    /// The same omission rule with a config in play: a vault whose config
+    /// declares rules but no `validate` section prints its rules and no schema.
+    #[test]
+    fn schema_text_omits_the_schema_section_of_a_validate_less_config() {
+        let mut report = schema_sample();
+        report.schema = undeclared_schema();
         let s = schema_text(&report);
-        assert!(s.starts_with("folders\n"), "{s}");
-        assert!(!s.contains("path rules"), "{s}");
-        assert!(!s.contains("creatable rules"), "{s}");
+        assert!(s.contains("path rules\n"), "{s}");
+        assert!(s.contains("creatable rules\n"), "{s}");
+        assert!(s.contains("inbox\n  inbox\n"), "{s}");
         assert!(!s.contains("schema"), "{s}");
     }
 
@@ -478,6 +597,7 @@ mod tests {
             report: describe_sample(),
             by: vec![],
             schema: false,
+            no_pager: false,
             format: FormatChoice {
                 explicit: Some(Format::Json),
                 spec: FormatSpec {
@@ -512,7 +632,8 @@ mod tests {
             assert_eq!(drive(view, &mut presenter), EXIT_OK);
         }
         let dump = String::from_utf8(out).unwrap();
-        assert!(dump.contains(r#""schema":{"rules""#), "{dump}");
+        assert!(dump.contains(r#""schema":{"ignore":[]"#), "{dump}");
+        assert!(dump.contains(r#""rules":[{"#), "{dump}");
         assert!(dump.contains(r#""folders":["","notes"]"#), "{dump}");
     }
 

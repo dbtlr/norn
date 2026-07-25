@@ -208,9 +208,19 @@ pub fn emit<O: Write, E: Write>(
         }
         Output::Describe(view) => {
             let format = view.format.resolve(is_tty);
-            render_with(presenter, &plain, width, |sink, conv| {
+            let no_pager = view.no_pager;
+            // `describe`'s pageable shape is `records` — both the counts block
+            // and the long `--schema` config dump; `json` is pipeline output
+            // and never pages.
+            let pageable = format == Format::Records;
+            let render = |sink: &mut Sink<'_>, conv: &mut Conversation<'_>| {
                 render::describe::render_describe(view, format, sink, conv)
-            })
+            };
+            if pageable && is_tty && !no_pager {
+                render_paged(presenter, &plain, width, render)
+            } else {
+                render_with(presenter, &plain, width, render)
+            }
         }
         Output::Audit(view) => {
             let format = view.format.resolve(is_tty);

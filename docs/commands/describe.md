@@ -1,6 +1,6 @@
 ---
 title: describe
-description: Describe the vault's structure and configured rules — and, with --data, a contents-summary.
+description: Describe the vault — structure counts, the declared config with --schema, a contents-summary with --data.
 ---
 
 # norn describe
@@ -37,7 +37,16 @@ norn describe --data --eq type:note --format json
 
 ## Structure — counts by default, the declared config under `--schema`
 
-Bare `describe` reports the structure as counts: how many `folders` hold documents, how many `path_rules` and `creatable_rules` are declared, and the `inbox` target. `--schema` expands that same structure into the config itself:
+Bare `describe` reports the structure as counts — how many `folders` hold documents, how many `path_rules` and `creatable_rules` are declared, and the `inbox` target:
+
+```
+folders    124
+path rules 21
+creatable  0
+inbox      (none)
+```
+
+All four lines always print: in a counts block `0` is the answer, and an unconfigured inbox reads `(none)` rather than dropping its line. `--schema` expands that same structure into the config itself:
 
 | Field | Meaning under `--schema` |
 |---|---|
@@ -47,7 +56,14 @@ Bare `describe` reports the structure as counts: how many `folders` hold documen
 | `inbox` | The configured `inbox.path`, if set — where `norn new --title "…"` (no path, no `--as`) routes an unrouted create. `null` when unconfigured. |
 | `schema` | The full `validate` config, serialized verbatim — every rule's `required_frontmatter`, `forbidden_frontmatter`, `field_types`, `allowed_values`, and path/frontmatter selectors. Nothing is summarized or dropped, so this is the authoritative source for "what does this vault require." |
 
-`records` only prints a section when it's non-empty (a vault with no `inbox.path` omits the `inbox` section) and renders rule defaults and the schema as YAML — the syntax `.norn/config.yaml` declares them in. `--format json` always includes every key (`inbox` as `null`, empty arrays as `[]`).
+`--schema` is where the declared-config dump lives today; it moves to [`config show`](config.md) — the verb that owns config data — when that command lands, and this flag retires with it.
+
+Under `--schema`, `records` prints only the sections the vault declares something for (no rules, no `path rules` section; no `validate` config, no `schema` section) and renders rule defaults and the schema as YAML — the syntax `.norn/config.yaml` declares them in.
+
+The two payloads fill `--format json` differently:
+
+- **Default** — exactly four scalar keys (`folders`, `path_rules`, `creatable_rules`, `inbox`), always present, one per records count line; `inbox` is `null` when unconfigured (`(none)` in `records`). `data` is the only optional key: present when `--data`/`--stats`/`--by` was passed, absent otherwise.
+- **`--schema`** — every report key, always present: the `folders` array, the `path_rules` / `creatable_rules` arrays (`[]` when the vault declares none), `inbox` (`null` when unconfigured), `schema`, and the same optional `data`. A section `records` omits still appears here as an empty array or object.
 
 ## Contents-summary — `--data`, `--stats`, `--by`, `--limit`
 
@@ -77,9 +93,11 @@ Each returned field distribution carries a `more` count — the number of additi
 
 `--format json` returns the JSON of whatever the invocation prints without it, so the flag never changes *which* payload you get — only its encoding. `describe` has no `paths`/`jsonl` format — it describes the vault as a whole, not a per-document row set.
 
+`records` pages through `$PAGER` (default `less -FRX`) when stdout is a TTY and the output is longer than the terminal — `--schema` on a large vault is the common case. `--no-pager` streams it straight out; `json` never pages.
+
 ## See also
 
-- [`vault.describe`](../mcp-server.md) — the MCP equivalent, capability-isomorphic with this command.
+- [`vault.describe`](../mcp-server.md) — the MCP equivalent. It always returns the full declared-config report (the `--schema` payload); the counts projection is a CLI display choice and has no MCP parameter.
 - [`new`](new.md) — `--as <rule>` consumes `creatable_rules`; the inbox fallback mode consumes `inbox`.
 - [`config`](config.md) — `config show` for effective paths/counts; `describe --schema` for the declared rules as the engine resolves them; `describe --data` for document-content distributions.
 - [`find`](find.md) / [`count`](count.md) — the same filter surface, returning matching documents or a grouped count instead of a vault-wide summary.
