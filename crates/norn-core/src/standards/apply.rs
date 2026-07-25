@@ -1304,13 +1304,18 @@ pub(crate) fn rewrite_one_backlink(
 /// backlinker's CURRENT content and whether the new target is representable — the
 /// shared decision both the apply path ([`rewrite_one_backlink`]) and the dry-run
 /// forecast ([`forecast_link_rewrites`]) route through, so a same-content apply
-/// and forecast reach the identical verdict. Pure: no IO, no write. It owns every
-/// content-intrinsic skip: an
-/// `unrepresentable` new target (`WouldCorruptWikilink`, decided from the flag
-/// before any content is inspected), a link that no longer matches the content
-/// (`Drifted`), and a rewrite that would break the backlinker's frontmatter
+/// and forecast reach the identical verdict. Pure: no IO, no write.
+///
+/// It owns every content-intrinsic skip: an `unrepresentable` new target
+/// (`WouldCorruptWikilink`, decided from the flag before any content is
+/// inspected), a link that no longer matches the content (`Drifted`), and a
+/// rewrite that would break the backlinker's frontmatter
 /// (`WouldCorruptFrontmatter`). The filesystem-only outcomes (`SourceMissing`,
 /// `Failed`) belong to the caller that owns the IO.
+///
+/// A rewrite lands on the FIRST occurrence of `raw` in `content`, so a caller
+/// classifying several links against one document must feed each call the content
+/// its predecessors produced.
 pub(crate) enum BacklinkPlan {
     /// The rewrite is safe; carries the new full content to write.
     Rewrite(String),
@@ -1377,6 +1382,11 @@ pub(crate) fn plan_backlink_rewrite(
 /// snapshot's file byte for byte. The forecast therefore classifies against the
 /// same bytes apply splices: on an unchanged vault the two agree for every
 /// on-disk frontmatter form, not just norn's canonical serialization.
+///
+/// One carve-out: a document the index could not READ carries an empty head and
+/// body, so this returns the empty string rather than the file's real bytes. That
+/// document classifies as `Drifted` and forecasts optimistically, which is the
+/// same treatment every other filesystem-only outcome gets.
 fn reconstruct_backlinker_content(doc: &crate::domain::Document) -> String {
     let mut content = String::with_capacity(doc.head_text.len() + doc.body_text.len());
     content.push_str(&doc.head_text);
@@ -1392,6 +1402,17 @@ fn reconstruct_backlinker_content(doc: &crate::domain::Document) -> String {
 /// [`reconstruct_backlinker_content`] rebuilds, so the forecast's skip
 /// classification cannot drift from apply's on an unchanged vault — whatever
 /// form the on-disk frontmatter takes.
+///
+/// Classification is STATEFUL per backlinker, mirroring apply: [`rewrite_one_backlink`]
+/// re-reads the source before every link, so link n+1 sees link n's write. The
+/// forecast carries one content buffer per source path and splices each planned
+/// rewrite back into it before classifying the next link against that path. This
+/// matters wherever one file carries the same raw link more than once — since
+/// [`plan_backlink_rewrite`] selects the FIRST matching occurrence, rewriting it
+/// makes the next classification land on the next occurrence, exactly as apply's
+/// re-read does. Classifying every occurrence against pristine bytes instead would
+/// re-pick the first site each time and mis-count a file whose occurrences differ
+/// in safety.
 ///
 /// Boundary: only the two skip reasons a snapshot can KNOW are forecast
 /// here — `WouldCorruptWikilink` (the target is not a representable wikilink, a
@@ -1418,30 +1439,38 @@ pub fn forecast_link_rewrites(
         .iter()
         .chain(risk.path_qualified_wikilinks.iter())
         .chain(risk.markdown_links.iter());
+    // One content buffer per backlinker, standing in for the file apply re-reads
+    // before each link. Seeded from the snapshot on first use, then advanced by
+    // every planned rewrite. The flag records whether this cascade has already
+    // rewritten into the buffer, which decides how a later `Drifted` reads.
+    let mut contents: BTreeMap<Utf8PathBuf, (String, bool)> = BTreeMap::new();
     for affected in all {
         // Reconstruct the backlinker from the index; a source the snapshot does
         // not know (e.g. a self-referential link translated to a not-yet-created
         // post-move path) reconstructs as empty, which the classifier reads as
-        // `Drifted` — forecast optimistically as a rewrite, its real classification
-        // a filesystem fact apply owns. An unrepresentable target overrides this:
-        // the classifier decides it before touching content.
-        let content = documents
-            .iter()
-            .find(|d| d.path == affected.source_path)
-            .map(reconstruct_backlinker_content)
-            .unwrap_or_default();
-        match plan_backlink_rewrite(
+        // `Drifted`. An unrepresentable target overrides this: the classifier
+        // decides it before touching content.
+        let (content, rewritten_here) = contents
+            .entry(affected.source_path.clone())
+            .or_insert_with(|| {
+                let seed = documents
+                    .iter()
+                    .find(|d| d.path == affected.source_path)
+                    .map(reconstruct_backlinker_content)
+                    .unwrap_or_default();
+                (seed, false)
+            });
+        let plan = plan_backlink_rewrite(
             &affected.source_path,
-            &content,
+            content.as_str(),
             &affected.raw,
             &affected.rewritten,
             &affected.kind,
             affected.unrepresentable,
-        ) {
+        );
+        match plan {
             // The two content-intrinsic skips a snapshot can know are forecast as
-            // skips; `Drifted` (snapshot content lacks the planned raw) and
-            // `Rewrite` both forecast as a would-rewrite — drift is a
-            // filesystem-only fact, and a snapshot-consistent link would land.
+            // skips. Apply writes nothing on a skip, so the buffer stands.
             BacklinkPlan::Skip(
                 reason @ (LinkSkipReason::WouldCorruptFrontmatter
                 | LinkSkipReason::WouldCorruptWikilink),
@@ -1453,11 +1482,47 @@ pub fn forecast_link_rewrites(
                     reason,
                 });
             }
-            _ => outcome.rewritten.push(LinkRewriteResult {
-                file: affected.source_path.clone(),
-                from: affected.raw.clone(),
-                to: affected.rewritten.clone(),
-            }),
+            // Apply writes this content before the next link re-reads the file, so
+            // the buffer advances with it.
+            BacklinkPlan::Rewrite(updated) => {
+                *content = updated;
+                *rewritten_here = true;
+                outcome.rewritten.push(LinkRewriteResult {
+                    file: affected.source_path.clone(),
+                    from: affected.raw.clone(),
+                    to: affected.rewritten.clone(),
+                });
+            }
+            // `Drifted` reads two ways, split by whether this cascade has already
+            // rewritten into the buffer.
+            //
+            // Against a buffer THIS CASCADE ALREADY REWROTE, the drift is one the
+            // cascade caused: an earlier link consumed the only occurrence of this
+            // raw text (two frontmatter keys sharing one scalar through a YAML
+            // anchor and alias reach here). Apply's re-read finds the same absence
+            // and skips, so the forecast skips too — a same-snapshot certainty, not
+            // a guess about the filesystem.
+            //
+            // Against an UNTOUCHED buffer the drift means the indexed link text is
+            // not in the snapshot bytes, which on a live vault points at an index
+            // gone stale. That stays the optimistic verdict: forecast a rewrite and
+            // let apply reconcile against the real bytes.
+            BacklinkPlan::Skip(reason) => {
+                if *rewritten_here {
+                    outcome.skipped.push(LinkSkipResult {
+                        file: affected.source_path.clone(),
+                        from: affected.raw.clone(),
+                        to: affected.rewritten.clone(),
+                        reason,
+                    });
+                } else {
+                    outcome.rewritten.push(LinkRewriteResult {
+                        file: affected.source_path.clone(),
+                        from: affected.raw.clone(),
+                        to: affected.rewritten.clone(),
+                    });
+                }
+            }
         }
     }
     outcome

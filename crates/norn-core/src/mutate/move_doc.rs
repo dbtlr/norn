@@ -665,6 +665,114 @@ mod tests {
         );
     }
 
+    // ── Multi-occurrence backlinkers: the forecast is stateful per file ──
+    //
+    // Apply re-reads a backlinker before every link, so a rewrite of occurrence 1
+    // is visible when occurrence 2 is classified — and since the classifier picks
+    // the FIRST matching raw, occurrence 2 is then what gets classified. Every
+    // case below puts a SAFE occurrence ahead of an UNSAFE one in the same file,
+    // the ordering under which a stateless forecast re-picks the safe first site
+    // for every link and over-counts `applied`.
+
+    /// Two frontmatter keys, safe occurrence first (alphabetical order, so the
+    /// parsed and on-disk orders agree — this isolates statefulness from key
+    /// order). `about` is double-quoted and holds the apostrophe; `up` is
+    /// single-quoted and cannot.
+    #[test]
+    fn forecast_matches_apply_on_two_keys_safe_occurrence_first() {
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            (
+                "b.md",
+                "---\nabout: \"[[Parent]]\"\nup: '[[Parent]]'\n---\nbody\n",
+            ),
+        ];
+
+        let (f, a) = forecast_and_apply(docs, "Parent", "Parent's.md");
+        assert_cascade_counts_match(&f, &a);
+        assert_eq!(
+            (a.applied, a.skipped),
+            (1, 1),
+            "the double-quoted occurrence rewrites, the single-quoted one skips: {a:?}"
+        );
+    }
+
+    /// Three keys, safe / safe / unsafe: two rewrites must land before the third
+    /// classification reaches the single-quoted occupant.
+    #[test]
+    fn forecast_matches_apply_on_three_keys_safe_safe_unsafe() {
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            (
+                "b.md",
+                "---\na: \"[[Parent]]\"\nb: \"[[Parent]]\"\nc: '[[Parent]]'\n---\nbody\n",
+            ),
+        ];
+
+        let (f, a) = forecast_and_apply(docs, "Parent", "Parent's.md");
+        assert_cascade_counts_match(&f, &a);
+        assert_eq!(
+            (a.applied, a.skipped),
+            (2, 1),
+            "two double-quoted occurrences rewrite, the single-quoted one skips: {a:?}"
+        );
+    }
+
+    /// A FLOW sequence holding both quote styles, safe item first.
+    #[test]
+    fn forecast_matches_apply_on_flow_seq_safe_item_first() {
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            (
+                "b.md",
+                "---\nrelated: [\"[[Parent]]\", '[[Parent]]']\n---\nbody\n",
+            ),
+        ];
+
+        let (f, a) = forecast_and_apply(docs, "Parent", "Parent's.md");
+        assert_cascade_counts_match(&f, &a);
+    }
+
+    /// A BLOCK sequence holding both quote styles, safe item first.
+    #[test]
+    fn forecast_matches_apply_on_block_seq_safe_item_first() {
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            (
+                "b.md",
+                "---\nrelated:\n  - \"[[Parent]]\"\n  - '[[Parent]]'\n---\nbody\n",
+            ),
+        ];
+
+        let (f, a) = forecast_and_apply(docs, "Parent", "Parent's.md");
+        assert_cascade_counts_match(&f, &a);
+    }
+
+    /// A YAML anchor plus its alias: TWO affected links over ONE raw occurrence in
+    /// the bytes (the alias `*ref` carries no `[[…]]` text of its own, but parses
+    /// to the same scalar). The first link rewrites that sole occurrence, so the
+    /// second finds nothing left to match and apply skips it as drifted. The
+    /// forecast reaches the same verdict because the drift is against a buffer it
+    /// already rewrote — a cascade-caused absence, not a stale-index guess.
+    #[test]
+    fn forecast_matches_apply_on_yaml_anchor_and_alias() {
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            (
+                "b.md",
+                "---\nup: &ref \"[[Parent]]\"\nalso: *ref\n---\nbody\n",
+            ),
+        ];
+
+        let (f, a) = forecast_and_apply(docs, "Parent", "Parent's.md");
+        assert_cascade_counts_match(&f, &a);
+        assert_eq!(
+            (a.applied, a.skipped),
+            (1, 1),
+            "one raw occurrence rewrites; the aliased second link drifts: {a:?}"
+        );
+    }
+
     /// NRN-161: a recursive folder move whose destination lands INSIDE the source's
     /// own subtree (`move a a/z`) is a move-into-self — it must refuse at plan
     /// expansion, identically on the dry-run forecast and the confirmed apply,

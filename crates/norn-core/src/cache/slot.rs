@@ -699,10 +699,11 @@ mod tests {
 
     /// The cache-side guard on the invariant the dry-run cascade forecast relies
     /// on: `head_text + body_text` for a cached document reproduces its file byte
-    /// for byte. Asserted after each of the three paths that publish documents —
-    /// the summon full build, a freshness-triggered incremental refresh, and an
-    /// apply-increment publish — so a write path that forgets `head_text` fails
-    /// here rather than silently under-serving the forecast.
+    /// for byte. Asserted after each of the three lifecycle paths that publish
+    /// documents (two row-write functions between them) — the summon full build, a
+    /// freshness-triggered incremental refresh, and an apply-increment publish — so
+    /// a write path that forgets `head_text` fails here rather than silently
+    /// under-serving the forecast.
     #[test]
     fn cached_head_and_body_reproduce_every_file_byte_for_byte() {
         fn assert_round_trip(index: &GraphIndex, root: &Utf8Path, stage: &str) {
