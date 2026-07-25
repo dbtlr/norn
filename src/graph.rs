@@ -60,8 +60,8 @@ impl Default for IndexOptions {
 
 pub(crate) use aliases::parse_aliases;
 pub(crate) use build::{
-    build_index_with_options, concise_diagnostics, graph_visible_markdown_under, has_errors,
-    is_ignored, is_markdown,
+    build_index_with_options, build_index_with_progress, concise_diagnostics,
+    graph_visible_markdown_under, has_errors, is_ignored, is_markdown,
 };
 // Test-only re-export: build_index is a default-options convenience used solely
 // in #[cfg(test)] callers across norn (r#move, delete, set/validate,

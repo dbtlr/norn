@@ -7,6 +7,19 @@ use camino::{Utf8Path, Utf8PathBuf};
 use super::anchor::slugify;
 
 pub fn resolve_links(files: &[VaultFile], documents: &mut [Document]) {
+    resolve_links_reported(files, documents, crate::progress::ProgressReporter::none());
+}
+
+/// [`resolve_links`] plus a work-evidenced progress hook (NRN-465). Global link
+/// resolution walks every document resolving its links — a whole-vault loop on a
+/// large vault — so the warm refresh / rebuild path passes a live reporter to tick
+/// the per-document loop (batched at the same cadence as the parse). Direct paths
+/// pass [`ProgressReporter::none`](crate::progress::ProgressReporter::none).
+pub(crate) fn resolve_links_reported(
+    files: &[VaultFile],
+    documents: &mut [Document],
+    progress: crate::progress::ProgressReporter,
+) {
     let mut by_path: HashMap<String, Utf8PathBuf> = HashMap::new();
     let mut by_path_lower: HashMap<String, Utf8PathBuf> = HashMap::new();
     let mut by_stem: HashMap<String, Vec<Utf8PathBuf>> = HashMap::new();
@@ -43,7 +56,11 @@ pub fn resolve_links(files: &[VaultFile], documents: &mut [Document]) {
         );
     }
 
+    let mut batch = crate::progress::BatchProgress::new(progress);
     for document in documents.iter_mut() {
+        // One resolved document per record — the whole-vault link pass's evidence
+        // of progress on a large vault.
+        batch.record();
         for link in &mut document.links {
             let candidates = match link.kind {
                 LinkKind::Markdown => {

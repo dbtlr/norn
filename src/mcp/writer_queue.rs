@@ -426,10 +426,34 @@ impl WriterQueue {
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
+        // A liveness op that has no long internal loop ignores the reporter; the
+        // ticked form is the single implementation so both share the exact busy /
+        // terminal transition semantics.
+        self.submit_liveness_ticked(move |_progress| op())
+    }
+
+    /// Submit a liveness op that reparses or otherwise loops over a large vault —
+    /// a freshness refresh or a generation open — handing it a
+    /// [`ProgressReporter`](crate::progress::ProgressReporter) it calls from its
+    /// real work loops (NRN-465). Each tick advances the queue's opaque progress
+    /// sequence exactly as a bulk-chunk boundary does, so the client stall watchdog
+    /// sees a busy writer making progress instead of a frozen sequence during a
+    /// multi-second reparse. The reporter is only ever valid for the op's execution
+    /// (it borrows this queue's progress state), so the op must not move it off the
+    /// writer thread.
+    pub(crate) fn submit_liveness_ticked<R, F>(&self, op: F) -> Handle<R>
+    where
+        F: FnOnce(&crate::progress::ProgressReporter) -> R + Send + 'static,
+        R: Send + 'static,
+    {
         let (tx, rx) = mpsc::channel();
         let progress = Arc::clone(&self.inner.progress);
         let job: LivenessJob = Box::new(move |owns_busy| {
-            let outcome = match catch_unwind(AssertUnwindSafe(op)) {
+            // The tick closure advances the SAME per-vault progress the control
+            // plane snapshots; it is evidence of real work, never timer-driven.
+            let tick = || progress.advance_progress();
+            let reporter = crate::progress::ProgressReporter::new(&tick);
+            let outcome = match catch_unwind(AssertUnwindSafe(|| op(&reporter))) {
                 Ok(result) => Outcome::Done(result),
                 Err(_) => Outcome::Panicked,
             };
@@ -900,6 +924,29 @@ mod tests {
         assert!(
             idle.sequence > busy.sequence,
             "terminal completion must advance progress"
+        );
+    }
+
+    /// A ticked liveness op advances the opaque progress sequence once per work
+    /// tick (NRN-465), on top of the begin/terminal transitions — so a client
+    /// watchdog sees a busy writer progressing during a long op instead of a
+    /// frozen sequence.
+    #[test]
+    fn ticked_liveness_op_advances_sequence_per_tick() {
+        let queue = WriterQueue::spawn("ticked");
+        let before = queue.progress().sequence;
+        const TICKS: u64 = 10;
+        let handle = queue.submit_liveness_ticked(|progress| {
+            for _ in 0..TICKS {
+                progress.tick();
+            }
+            7u8
+        });
+        assert_eq!(handle.wait(), Outcome::Done(7));
+        let after = queue.progress().sequence;
+        assert!(
+            after >= before + TICKS,
+            "each of {TICKS} work ticks must advance the sequence (before={before}, after={after})"
         );
     }
 

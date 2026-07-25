@@ -93,6 +93,7 @@ fn open_or_adopt(
     shared: &SharedSlot,
     vault_root: &Utf8Path,
     config: &LoadedConfig,
+    progress: &crate::progress::ProgressReporter,
 ) -> Result<Arc<Generation>> {
     // Late-arrival adoption: now that we are serialized behind the queue, a
     // generation an earlier op opened may already satisfy us.
@@ -116,7 +117,7 @@ fn open_or_adopt(
         *next += 1;
         number
     };
-    let generation = Arc::new(open_generation(vault_root, config, number)?);
+    let generation = Arc::new(open_generation(vault_root, config, number, progress)?);
     shared.open_count.fetch_add(1, Ordering::Relaxed);
     *shared.current.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&generation));
     Ok(generation)
@@ -179,6 +180,7 @@ fn open_generation(
     vault_root: &Utf8Path,
     config: &LoadedConfig,
     number: u64,
+    progress: &crate::progress::ProgressReporter,
 ) -> Result<Generation> {
     let (_canonical, cache_dir) = cache_dir_for(vault_root)?;
     ensure_cache_dir(&cache_dir)?;
@@ -212,6 +214,19 @@ fn open_generation(
         (cache, sentinel)
     };
 
+    // The primary open (verifying `integrity_check`, any schema/identity rebuild,
+    // and `document_fields` reshred) just completed — advance the writer-progress
+    // sequence once so a client waiting on this open sees evidence of progress
+    // between its bounded sub-steps (NRN-465). The cold FIRST-touch WHOLE-vault
+    // build is NOT here — it runs in the freshness-refresh op via
+    // `index_incremental` → `rebuild`, which ticks per batch of parsed files.
+    //
+    // Accepted residual: the O(db-size) `PRAGMA integrity_check` inside
+    // `Cache::open_with_index` runs BEFORE this first tick and is a single
+    // uninstrumentable SQLite call — a typical cache completes it far under the
+    // stall budget, so it does not threaten a false stall in practice.
+    progress.tick();
+
     let db_identity = device_inode(&sentinel.metadata()?);
 
     // The inode the primary READ connection actually ended on — the LIVE path
@@ -238,6 +253,8 @@ fn open_generation(
         &opts.resolved_index_set_hash,
         read_identity,
     )?;
+    // The write companion opened — another completed sub-step of this open.
+    progress.tick();
 
     // Seed the read pool with the primary READ connection this call already opened
     // and verified (do NOT open it twice). `ReadPool::seed` stamps `query_only` on
@@ -357,8 +374,13 @@ impl VaultEnv {
     ) -> Handle<Result<Arc<Generation>>> {
         let shared = Arc::clone(&slot.shared);
         let vault_root = self.vault_root.clone();
-        slot.queue
-            .submit_liveness(move || open_or_adopt(&shared, &vault_root, &config))
+        // Ticked: a generation open runs bounded sub-steps (connection opens, an
+        // integrity check, an optional reshred) that each advance the
+        // writer-progress sequence, so a client waiting on a first open is not
+        // starved of progress evidence (NRN-465).
+        slot.queue.submit_liveness_ticked(move |progress| {
+            open_or_adopt(&shared, &vault_root, &config, progress)
+        })
     }
 
     /// Test-only accessor for the identity of the current warm generation's cache

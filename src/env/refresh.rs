@@ -396,7 +396,12 @@ fn clear_pending_if(generation: &Generation, ticket: &Arc<RefreshTicket>) {
 /// way a requester is only ever served by a refresh whose scan starts at or
 /// after its arrival. It then runs `index_incremental` and resolves the ticket
 /// with the concrete result.
-fn run_refresh_op(generation: &Generation, vault_root: &Utf8Path, ticket: &Arc<RefreshTicket>) {
+fn run_refresh_op(
+    generation: &Generation,
+    vault_root: &Utf8Path,
+    ticket: &Arc<RefreshTicket>,
+    progress: &crate::progress::ProgressReporter,
+) {
     // Start transition: mark started and clear the pending slot atomically under
     // the pending lock (lock order: pending → ticket state, matching the arrival
     // path, so the join decision cannot straddle it).
@@ -450,7 +455,11 @@ fn run_refresh_op(generation: &Generation, vault_root: &Utf8Path, ticket: &Arc<R
             .write_cache
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let report = write_cache.index_incremental(vault_root, &ChangeDetectOptions::default());
+        let report = write_cache.index_incremental_reported(
+            vault_root,
+            &ChangeDetectOptions::default(),
+            *progress,
+        );
         if report.is_ok() {
             write_cache.supersede_staged_increments_after_refresh();
         }
@@ -741,9 +750,11 @@ impl VaultEnv {
         let gen_op = Arc::clone(generation);
         let ticket_op = Arc::clone(&ticket);
         let vault_root = self.vault_root.clone();
-        let handle = slot
-            .queue
-            .submit_liveness(move || run_refresh_op(&gen_op, &vault_root, &ticket_op));
+        // Ticked: the refresh reparses the whole vault on a changed vault, so it
+        // advances the writer-progress sequence from its work loops (NRN-465).
+        let handle = slot.queue.submit_liveness_ticked(move |progress| {
+            run_refresh_op(&gen_op, &vault_root, &ticket_op, progress)
+        });
         RefreshArrival::Submitted { ticket, handle }
     }
 

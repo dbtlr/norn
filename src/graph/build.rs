@@ -4,7 +4,8 @@ use std::path::Path;
 use crate::core::{Diagnostic, Document, GraphIndex, Severity, VaultFile};
 use crate::frontmatter::extract_frontmatter;
 use crate::links::{
-    parse_block_ids, parse_commonmark, parse_frontmatter_wikilinks, parse_wikilinks, resolve_links,
+    parse_block_ids, parse_commonmark, parse_frontmatter_wikilinks, parse_wikilinks,
+    resolve_links_reported,
 };
 use camino::{Utf8Path, Utf8PathBuf};
 use walkdir::WalkDir;
@@ -21,6 +22,24 @@ pub fn build_index_with_options(
     root: impl AsRef<Utf8Path>,
     options: &IndexOptions,
 ) -> Result<GraphIndex, IndexError> {
+    build_index_with_progress(root, options, crate::progress::ProgressReporter::none())
+}
+
+/// [`build_index_with_options`] plus a work-evidenced progress hook (NRN-465).
+///
+/// The whole-vault parse is the multi-second liveness-op cost that froze the warm
+/// daemon's writer-progress sequence and tripped the client's false stall. Ticking
+/// per batch of parsed files keeps the sequence advancing so the routed CLI waits
+/// through the reparse instead of giving up. `progress` is
+/// [`ProgressReporter::none`](crate::progress::ProgressReporter::none) on every
+/// direct path, so their behavior is unchanged; only the warm refresh / rebuild
+/// path wires a live reporter. The tick sits in the file-visit loop rather than
+/// reshaping the walk itself.
+pub(crate) fn build_index_with_progress(
+    root: impl AsRef<Utf8Path>,
+    options: &IndexOptions,
+    progress: crate::progress::ProgressReporter,
+) -> Result<GraphIndex, IndexError> {
     let root = root.as_ref().to_path_buf();
     if !root.exists() {
         return Err(IndexError::MissingRoot(root));
@@ -32,8 +51,12 @@ pub fn build_index_with_options(
     let mut files = Vec::new();
     let mut ignored_files = Vec::new();
     let mut documents = Vec::new();
+    let mut batch = crate::progress::BatchProgress::new(progress);
 
     visit_graph_files(&root, &root, |path, relative_path| {
+        // One unit of real parse work per visited file — the evidence the client
+        // watchdog needs that the writer thread is progressing, not wedged.
+        batch.record();
         if is_ignored(relative_path, &options.ignore) {
             ignored_files.push(relative_path.to_owned());
             return;
@@ -47,7 +70,9 @@ pub fn build_index_with_options(
     files.sort_by(|a, b| a.path.cmp(&b.path));
     ignored_files.sort();
     documents.sort_by(|a, b| a.path.cmp(&b.path));
-    resolve_links(&files, &mut documents);
+    // Tick the per-document link resolution too — it is the O(vault) tail of the
+    // builder that would otherwise run unticked after the parse loop (NRN-465).
+    resolve_links_reported(&files, &mut documents, progress);
 
     Ok(GraphIndex {
         root,
@@ -405,6 +430,51 @@ mod tests {
             .unwrap();
         assert_eq!(other.aliases, vec!["42".to_string()]);
         assert_eq!(other.alias_malformed.len(), 1);
+    }
+
+    #[test]
+    fn build_index_with_progress_ticks_per_batch_of_files() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().join("vault")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        // Enough files that a per-batch tick fires several times.
+        const FILES: usize = crate::progress::PROGRESS_TICK_FILES * 3;
+        for i in 0..FILES {
+            std::fs::write(
+                root.join(format!("note-{i}.md")).as_std_path(),
+                "---\ntitle: N\n---\nbody\n",
+            )
+            .unwrap();
+        }
+
+        let ticks = AtomicUsize::new(0);
+        let tick = || {
+            ticks.fetch_add(1, Ordering::Relaxed);
+        };
+        let reporter = crate::progress::ProgressReporter::new(&tick);
+        let index = build_index_with_progress(&root, &IndexOptions::default(), reporter).unwrap();
+
+        assert_eq!(index.documents.len(), FILES);
+        // The parse loop must have advanced the sequence at least once per batch —
+        // evidence a client watchdog would see during a real whole-vault reparse.
+        assert!(
+            ticks.load(Ordering::Relaxed) >= FILES / crate::progress::PROGRESS_TICK_FILES,
+            "expected >= {} ticks, got {}",
+            FILES / crate::progress::PROGRESS_TICK_FILES,
+            ticks.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn build_index_with_options_default_does_not_tick() {
+        // The default (no-progress) path is a no-op reporter: direct CLI behavior
+        // is unchanged. This just proves the delegation compiles and runs.
+        let index =
+            build_index_with_options(Utf8Path::new("fixtures/basic"), &IndexOptions::default())
+                .unwrap();
+        assert!(!index.documents.is_empty());
     }
 
     #[test]

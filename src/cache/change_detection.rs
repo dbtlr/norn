@@ -28,20 +28,48 @@ impl FileChange {
     }
 }
 
-pub fn detect(
+/// The no-progress convenience over [`detect_reported`], used by in-crate tests
+/// and the `detect_change_count` test helper. Production refresh goes through
+/// [`detect_reported`] so the warm writer path can tick the stall watchdog.
+#[cfg(test)]
+pub(crate) fn detect(
     vault_root: &Utf8Path,
     cache: &crate::cache::Cache,
     options: &ChangeDetectOptions,
+) -> Result<Vec<FileChange>, CacheError> {
+    detect_reported(
+        vault_root,
+        cache,
+        options,
+        crate::progress::ProgressReporter::none(),
+    )
+}
+
+/// [`detect`] plus a work-evidenced progress hook (NRN-465). The warm refresh op
+/// passes a live reporter so the filesystem stat sweep and any content-hash reads
+/// tick the writer-progress sequence per batch of files — keeping it advancing on
+/// a large vault instead of freezing while the client stall watchdog watches.
+/// Direct paths pass
+/// [`ProgressReporter::none`](crate::progress::ProgressReporter::none).
+pub(crate) fn detect_reported(
+    vault_root: &Utf8Path,
+    cache: &crate::cache::Cache,
+    options: &ChangeDetectOptions,
+    progress: crate::progress::ProgressReporter,
 ) -> Result<Vec<FileChange>, CacheError> {
     let cached = load_cached_metadata(&cache.conn)?;
     // Honor files.ignore in the live scan so a path newly added to files.ignore
     // is seen as absent → detected as Deleted → purged from the cache, keeping
     // the incremental path in agreement with a full rebuild (NRN-117).
-    let live = scan_filesystem(vault_root, &cache.files_ignore)?;
+    let live = scan_filesystem(vault_root, &cache.files_ignore, progress)?;
 
     let mut changes = Vec::new();
+    let mut batch = crate::progress::BatchProgress::new(progress);
 
     for (path, live_meta) in &live {
+        // Each compared file is a unit of real work (a cheap-check, and on a miss
+        // a content hash) — evidence the sweep is progressing, not wedged.
+        batch.record();
         match cached.get(path) {
             Some(cached_meta) => {
                 let unchanged_cheap = !options.force_hash
@@ -65,6 +93,9 @@ pub fn detect(
     }
 
     for path in cached.keys() {
+        // Classifying cached-only deletions — pure in-memory hashmap probing, but
+        // it spans every cached path, so batch-tick it too (NRN-465 review).
+        batch.record();
         if !live.contains_key(path) {
             changes.push(FileChange::Deleted(path.clone()));
         }
@@ -123,9 +154,13 @@ struct LiveMeta {
 fn scan_filesystem(
     root: &Utf8Path,
     ignore: &[String],
+    progress: crate::progress::ProgressReporter,
 ) -> Result<HashMap<Utf8PathBuf, LiveMeta>, CacheError> {
     let mut out = HashMap::new();
+    let mut batch = crate::progress::BatchProgress::new(progress);
     let _ = walk_markdown_files(root, ignore, &mut |rel: &Utf8Path, mtime_ns, size_bytes| {
+        // One statted file per record: the stat sweep's evidence of progress.
+        batch.record();
         out.insert(
             rel.to_owned(),
             LiveMeta {
