@@ -3,15 +3,31 @@
 //! its `to_params` mapping into the [`norn_wire`] vocabulary — the CLI's whole
 //! job on the request side is turning these flags into Params (ADR 0016).
 //!
-//! Help text is declared via the doc comments below. clap derives the flag help
-//! from the doc comment and strips its single trailing period, so the periods
-//! here are load-bearing: they produce the intended `-h` text.
+//! Per-FIELD help text is declared via the doc comments below. clap derives the
+//! flag help from the doc comment and strips its single trailing period, so the
+//! periods here are load-bearing: they produce the intended `-h` text.
+//!
+//! The STRUCTS themselves carry plain comments, never doc comments. clap adopts
+//! a flattened struct's doc comment as the hosting command's `about` /
+//! `long_about`, so a doc comment here becomes description prose on every verb
+//! that flattens the group — `find`, `count`, `describe`, `get`. An explicit
+//! `about = "…"` on the host shields only `about`: once the doc comment runs
+//! past one paragraph, clap adopts the WHOLE comment as the host's
+//! `long_about`, which no `about` overrides. Description prose is earned per
+//! verb at the authoring site (`crate::help`), not inherited from a shared arg
+//! group, so the groups give clap nothing to adopt. The other three flattened
+//! groups — `GlobalArgs`, `MutationModeArgs`, and `ValidateTriageArgs` in
+//! `cli.rs` — carry the same constraint.
 
 use clap::Args;
 use norn_wire::{FilterParams, SortPaginateParams};
 
-/// The filter predicates shared by the read commands, one flag per
-/// [`FilterParams`] field.
+// The filter predicates shared by the read commands, one flag per
+// `FilterParams` field.
+//
+// A plain comment, NOT a doc comment: `find` / `count` / `describe` flatten this
+// group, and clap adopts a flattened struct's doc comment as the hosting
+// command's description prose (see the module docs).
 #[derive(Args, Debug, Default, Clone, PartialEq, Eq)]
 pub struct FilterArgs {
     /// Full-text body substring. Case-insensitive. Empty string is a no-op.
@@ -154,8 +170,12 @@ impl FilterArgs {
     }
 }
 
-/// The sort / limit / paging knobs shared by the read commands, one flag per
-/// [`SortPaginateParams`] field.
+// The sort / limit / paging knobs shared by the read commands, one flag per
+// `SortPaginateParams` field.
+//
+// A plain comment, NOT a doc comment: `find` / `get` flatten this group, and
+// clap adopts a flattened struct's doc comment as the hosting command's
+// description prose (see the module docs).
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct SortPaginateArgs {
     /// Sort by field (frontmatter key, `path`, or `stem`). Ascending by default.

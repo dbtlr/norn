@@ -180,9 +180,13 @@ pub enum Command {
         about = "Update one document — schema-aware frontmatter mutation + wholesale body replacement"
     )]
     Set(SetArgs),
+    // Two ways in (`--edits-json` or the six sugar flags) share one
+    // transactional contract that no single flag can state, so it earns
+    // `long_about` (rendered on `--help`, not `-h`).
     #[command(
         disable_help_flag = true,
-        about = "Edit one document's body — atomic content-anchored partial edits"
+        about = "Edit one document's body — atomic content-anchored partial edits",
+        long_about = "Edit one document's body with atomic, content-anchored partial edits.\n\nThe ops are an ordered array applied all-or-nothing, each against the result of the prior. Any anchor that fails to match refuses the whole batch (exit 2) and writes nothing — a `str_replace` whose `old` is missing, or matches more than once without `--replace-all`; a heading that names two sections, which refuses as ambiguous rather than guessing. Replace a whole body, or change frontmatter, with `norn set` instead."
     )]
     Edit(EditArgs),
     #[command(
@@ -240,9 +244,13 @@ pub enum Command {
         about = "Manage the per-vault `.norn/config.yaml`"
     )]
     Config(ConfigCommand),
+    // The install-method restriction is the one fact a reader needs BEFORE
+    // running this verb and it is reachable from no flag description, so it
+    // earns `long_about` (rendered on `--help`, not `-h`).
     #[command(
         disable_help_flag = true,
-        about = "Update norn to the latest GitHub release"
+        about = "Update norn to the latest GitHub release",
+        long_about = "Update norn to the latest GitHub release.\n\nWorks only when norn was installed via the official GitHub install script. A `cargo install`, a Homebrew formula, or a source build updates through that tool instead."
     )]
     SelfUpdate(SelfUpdateArgs),
     #[command(
@@ -360,6 +368,14 @@ pub enum DescribeFormat {
     Json,
 }
 
+// The finding-triage filters shared by `validate` and `repair`, which both
+// flatten this group.
+//
+// A plain comment, NOT a doc comment: clap adopts a flattened struct's doc
+// comment as the hosting command's description prose, and `repair` declares
+// only `about`, so a doc comment here would surface as `repair --help`'s
+// description (the same constraint `GlobalArgs`, `MutationModeArgs`, and the
+// read groups in `commands/args.rs` carry).
 #[derive(Debug, Clone, Args)]
 pub struct ValidateTriageArgs {
     #[arg(

@@ -1020,9 +1020,12 @@ observed = { "mcp-initialize-tools-list-zoo" = { mcp = 1 } }
 # exactly one entry), so this describes all seven regions it differs in, not
 # just the one that motivated it:
 #
-# 1. the long-about body — `edit`'s multi-paragraph op reference, headings /
-#    safety / exit-code prose — is absent from the rewrite's page, which
-#    prints the short about line and goes straight to USAGE;
+# 1. the description prose is replaced in place (one region): the oracle's
+#    multi-paragraph op reference plus its heading-addressing / safety /
+#    exit-code paragraphs give way to the single paragraph stating the
+#    transactional contract both entry paths share — PD-461's earned-prose
+#    disposition, which keeps prose on `edit` because no sugar flag can state
+#    that contract and the page carries no EXAMPLES section to state it;
 # 2. `--ops-file <PATH>` is gone from OPTIONS: it is declared `hide = true`
 #    on both binaries (a stdin-redirection alias, not part of the documented
 #    surface), but the oracle's help renderer honors `hide()` only for
@@ -1040,7 +1043,7 @@ id = "PD-142"
 surface = "edit --help (whole page: long-about, OPTIONS, GLOBAL OPTIONS)"
 cases = ["help-edit"]
 old = "the page opens with the long-about body (op reference, heading-addressing / safety / exit-code paragraphs) before USAGE; OPTIONS lists `--ops-file <PATH>` despite the flag being declared `hide = true`; `--yes` reads 'Apply the edits without an interactive confirm prompt', `--dry-run` reads 'Preview the edits without writing', and `--format` reads 'Output format'; GLOBAL OPTIONS lists `--config <YAML config file>`, truncates `-C/--cwd` at 70 chars, and has no `--vault`"
-new = "the page prints the short about line and goes straight to USAGE (no long-about body); OPTIONS omits `--ops-file` entirely — a command-local hidden arg is filtered the same way a hidden global already was; `--yes` and `--dry-run` use the verb-neutral 'the change' wording every mutation verb shares and `--format` reads 'Output format; `json` emits the mutation-report envelope' (NRN-416); GLOBAL OPTIONS drops `--config`, shows `-C/--cwd` in full, and adds `--vault NAME` (the PD-102 reshape)"
+new = "the page's description prose is one paragraph stating the transactional contract the two entry paths (`--edits-json` or the sugar flags) share — an ordered op array applied all-or-nothing, each op against the result of the prior, any anchor failure refusing the whole batch — in place of the oracle's op reference and its heading-addressing / safety / exit-code paragraphs (the earned-prose disposition in PD-461); OPTIONS omits `--ops-file` entirely — a command-local hidden arg is filtered the same way a hidden global already was; `--yes` and `--dry-run` use the verb-neutral 'the change' wording every mutation verb shares and `--format` reads 'Output format; `json` emits the mutation-report envelope' (NRN-416); GLOBAL OPTIONS drops `--config`, shows `-C/--cwd` in full, and adds `--vault NAME` (the PD-102 reshape)"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 observed = { "help-edit" = { stdout = 7 } }
@@ -1261,3 +1264,103 @@ new = "all four count lines print on every invocation — `folders`, `path rules
 reason = "decided-better"
 decision = "docs/decisions/0021-verbs-return-one-layer-renders.md"
 observed = { "describe-zoo" = { stdout = 1 }, "describe-data-zoo" = { stdout = 1 }, "describe-stats-zoo" = { stdout = 1 }, "describe-by-clean" = { stdout = 1 }, "describe-data-clean" = { stdout = 1 } }
+
+# NRN-461: the multi-paragraph description prose (`long_about`) a help page
+# prints between its one-line summary and USAGE is now EARNED, not inherited.
+# The bar: a reader would make a materially better decision with the paragraph
+# than without it. Prose that the page's own flag descriptions, EXAMPLES block,
+# or conceptual section already states does not clear it, and neither does prose
+# describing a model this tree replaced.
+#
+# The oracle prints such prose on 21 of the 45 enumerated help paths. The
+# rewrite prints it on four — `get`, `validate`, `edit`, `self-update` — and
+# drops it on the other 17: `apply`, `cache`, `cache clear`, `cache index`,
+# `cache prune`, `completions init`, `completions install`, `count`, `delete`,
+# `describe`, `move`, `new`, `repair`, `rewrite-wikilink`, `serve`, `service`,
+# `set`. The drops fall in five groups:
+#
+#   - LEAKED SOURCE COMMENTS (`count`, `describe`). Both verbs flatten the
+#     shared `FilterArgs` struct, and the oracle adopts that struct's internal
+#     doc comment as the verb's description — a reader gets "Kept in `cli.rs` so
+#     the build script can include this file without intra-crate deps" where the
+#     verb's own prose belongs. The rewrite spells all five of its flattened arg
+#     groups (`GlobalArgs`, `MutationModeArgs`, `ValidateTriageArgs`,
+#     `FilterArgs`, `SortPaginateArgs`) with plain comments, so clap has nothing
+#     to adopt at any of those sites — an explicit `about` on the host shields
+#     only `about`, and once a doc comment runs past one paragraph clap adopts
+#     the whole comment as the host's `long_about`, which no `about` overrides.
+#     `ValidateTriageArgs` matters as much as the rest: `repair` flattens it and
+#     declares only `about`, so a doc comment there would land as
+#     `repair --help`'s description exactly as `FilterArgs` did on `count`.
+#     Never restored.
+#   - RESTATED BY THE PAGE ITSELF (`set`, `move`, `delete`, `new`,
+#     `cache index`, `completions install`, `rewrite-wikilink`). The oracle
+#     re-lists `--yes` / `--dry-run` / `--force` / `--format` and the shared exit
+#     codes in prose above the OPTIONS block that already carries them; under
+#     the uniform mutation-mode block (NRN-410) and the converged `--format`
+#     vocabulary (NRN-416) those recitations would also drift out of date
+#     against the flags they duplicate. Two need naming individually.
+#     `rewrite-wikilink`'s prose is internal mechanism (a one-op MigrationPlan
+#     through the unified applier) plus those exit codes; its one user-facing
+#     fact — frontmatter wikilink values are rewritten too — is in the summary.
+#     It also states a pre-flight refusal (exit 2) when OLD resolves to no
+#     document, which no rewrite surface carries today; weighed and still
+#     dropped, because a refusal a reader meets only by running the command
+#     announces itself with its own coded error, and pinning it in prose here
+#     would restate one instance of the shared exit-code convention.
+#     `new`'s prose ends on a behavior note that IS still true here (a
+#     post-create validate pass runs against the created document, NRN-390, and
+#     its findings surface as report warnings) — it is dropped because the
+#     report announces itself, so the sentence decides nothing before the run,
+#     not because the behavior went away.
+#   - COVERED BY A RICHER SECTION (`apply`, `repair`). `apply` renders HOW APPLY
+#     WRITES and `repair` renders EXAMPLES plus THE PLAN/APPLY BOUNDARY, each
+#     stating the same contract in more detail and closer to the flags.
+#   - A ROUTING HINT THE SUMMARIES ALREADY GIVE (`completions init`). The prose
+#     exists to point a reader at the sibling verb ("prefer
+#     `norn completions install`"); the two summaries in the `completions`
+#     COMMANDS block — emit a script to stdout vs. install into the shell config
+#     — already route that choice. It also says the script is meant to be
+#     sourced or eval'd at shell startup, which no rewrite surface carries;
+#     weighed and still dropped, because it describes what a reader does with
+#     stdout after the command exits rather than how to invoke the command, and
+#     the sibling verb this page routes to does that wiring for them.
+#   - NO LONGER TRUE OF THIS TREE (`serve`, `service`, `cache`, `cache clear`,
+#     `cache prune`). The prose describes one host-wide daemon on a single
+#     well-known socket, and a retained global cache tree swept by a 90-day
+#     window and a 1 GiB cap. Under ADR 0017 the socket is keyed per vault root
+#     and build fingerprint, and the cache db is pure derivation — created at
+#     summon, deleted at owner exit — so there is no retained tree to sweep.
+#     `cache clear`'s "never the state tree" reassurance and the `cache` group's
+#     "disposable read-acceleration store" framing describe that same replaced
+#     lifecycle. All five verbs are `not_yet_ported` stubs in this build
+#     (`crates/norn-cli/src/lib.rs`), so their pages get written fresh by the
+#     porting task that lands the behavior, against the model it actually ships.
+#
+# Two restorations clear the bar. `self-update`: its install-method restriction
+# is reachable from no flag description and decides whether the verb is the
+# right tool at all. `edit`: two ways in (`--edits-json` or the six sugar flags)
+# share one transactional contract — ordered, all-or-nothing, each op against
+# the result of the prior, any anchor failure refusing the whole batch — that no
+# single flag description can state, and the page carries no EXAMPLES or
+# conceptual section to state it instead.
+#
+# `help-count` is the gated witness (the leak group, the largest defect). The
+# help walker (crates/norn-parity/tests/help_walker.rs) enforces the whole
+# disposition across every enumerated path, so a verb that gains or loses prose
+# without a decision fails there.
+#
+# `reason` deviates from the ruling that authorized this entry, deliberately:
+# the ruling reads decided-better (the disposition as a whole is a judgment
+# call), but the cited case witnesses the oracle printing its own source
+# comment, which is a defect on the oracle's side — so the entry ships
+# discovered-inconsistency, matching what `help-count` actually shows.
+[[entry]]
+id = "PD-461"
+surface = "count --help (whole page: description prose / long_about, OUTPUT --format, GLOBAL OPTIONS)"
+cases = ["help-count"]
+old = "the page prints the internal doc comment of the shared `FilterArgs` struct as `count`'s description — two paragraphs about `cli.rs`, `build.rs`, intra-crate deps, and where `build_document_query` lives — between the one-line summary and USAGE; `--format` reads 'Output format. Default text (records-block)' over 'Possible values: text, json'; GLOBAL OPTIONS lists `--config <YAML config file>`, truncates `-C/--cwd` at 70 chars, and has no `--vault`"
+new = "the page prints the one-line summary and goes straight to USAGE: all five flattened arg groups (`GlobalArgs`, `MutationModeArgs`, `ValidateTriageArgs`, `FilterArgs`, `SortPaginateArgs`) carry plain comments clap cannot adopt, so no source-tree text can reach a help page, and description prose is kept only where it decides something the flags, EXAMPLES, and conceptual sections do not — `get`, `validate`, `edit`, and `self-update` — dropped on the other 17 paths that carry it on the oracle; `--format` reads 'Output format. Default records (records-block)' over 'Possible values: records, json' (the converged format vocabulary, NRN-416); GLOBAL OPTIONS drops `--config`, shows `-C/--cwd` in full, and adds `--vault NAME` (the PD-102 reshape)"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = { "help-count" = { stdout = 4 } }
