@@ -266,7 +266,7 @@ observed = {{ "{FAB_CASE_ID}" = {{ stdout = 2 }} }}
 }
 
 #[test]
-fn a_matching_case_declared_as_diverging_is_both_stale_and_a_gap() {
+fn a_matching_case_declared_as_diverging_is_stale_and_suppresses_the_gap_row() {
     if common::oracle_missing("verdicts") {
         return;
     }

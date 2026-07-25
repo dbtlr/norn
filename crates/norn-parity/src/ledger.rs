@@ -506,13 +506,17 @@ impl Ledger {
     /// entry whose cases all currently match must fail the run just as
     /// loudly as an uncovered drift.
     ///
-    /// The two verdicts are separated by whether the run could SEE the whole
-    /// entry. `Stale::Confirmed` means every cited case ran and every one of
-    /// them matched, so the entry is provably dead and deleting it is the
-    /// remedy. `Stale::Unverified` means some cited case never ran (a
-    /// `--suite` filter, a mode that skipped it): the cases that did run
-    /// matched, but a case that did not run may still diverge, and telling
-    /// an author to delete an entry on that evidence is wrong.
+    /// The two are separated by whether the run could SEE the whole entry.
+    /// `every_cited_case_ran` means the entry is provably dead and deleting
+    /// it is the remedy. Otherwise the cases that ran matched but one that
+    /// did not run may still diverge, and telling an author to delete an
+    /// entry on that evidence is wrong.
+    ///
+    /// A `--suite` filter is the ONLY way a cited case goes un-run: an entry
+    /// citing an unported case fails to load, an unmet fixture requirement is
+    /// a hard error rather than a skip, `--all` is a superset of gated, and
+    /// self-check loads no ledger at all. That is what makes the remedy
+    /// always actionable — re-running unfiltered settles it.
     pub fn stale_entries(&self, ran: &BTreeSet<&str>, diverged: &BTreeSet<&str>) -> Vec<Stale> {
         let mut stale = Vec::new();
         for entry in &self.entries {
@@ -542,8 +546,9 @@ impl Ledger {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stale {
     pub entry_id: String,
-    /// `false` when a `--suite` filter (or a mode) kept some cited case from
-    /// running, so the entry cannot be judged dead on this run's evidence.
+    /// `false` when a `--suite` filter kept some cited case from running —
+    /// the only way that happens — so the entry cannot be judged dead on this
+    /// run's evidence.
     pub every_cited_case_ran: bool,
 }
 
