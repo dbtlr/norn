@@ -79,13 +79,23 @@ pub enum ApplyOutcome {
     Applied,
     /// A dry-run preview that writes nothing: the report describes what a
     /// confirmed apply WOULD do, with the same applied/skipped/failed
-    /// classification a same-snapshot apply produces — for any on-disk
-    /// frontmatter form — exit 0. The only classifications a preview cannot
-    /// reach are the filesystem-only outcomes: a backlinker deleted out from
-    /// under the cascade (`source-missing`), a read/write IO error (`failed`),
-    /// and on-disk link text that drifted since the index was built (`drifted`,
-    /// which includes a document unreadable when the index was built). Those
-    /// forecast optimistically as rewrites and reconcile at apply.
+    /// classification a same-snapshot apply produces whenever the frontmatter
+    /// writes its link text LITERALLY — any quoting style, key order, or
+    /// collection shape — exit 0.
+    ///
+    /// Two classes of divergence remain. A preview cannot see the
+    /// filesystem-only outcomes: a backlinker deleted out from under the cascade
+    /// (`source-missing`), a read/write IO error (`failed`), or on-disk link text
+    /// that drifted since the index was built (`drifted`). Those forecast
+    /// optimistically as rewrites and reconcile at apply. Separately, a
+    /// frontmatter scalar whose YAML DECODING yields the wikilink — a `\x50`-style
+    /// escape, or a double-quoted scalar broken across lines — is indexed under
+    /// text absent from the file's bytes, so the preview counts a rewrite that
+    /// apply skips (NRN-499).
+    ///
+    /// A preview DOES report `drifted` in one case: when an earlier rewrite in the
+    /// same cascade consumed the link text, which apply's re-read reaches too.
+    ///
     /// Distinct from `Applied` so a consumer keying on `outcome` alone tells a
     /// preview from a real write; the report's `dry_run: true` flag stays
     /// alongside as a direct convenience. A dry-run whose plan WOULD refuse still

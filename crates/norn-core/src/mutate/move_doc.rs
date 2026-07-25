@@ -731,6 +731,11 @@ mod tests {
 
         let (f, a) = forecast_and_apply(docs, "Parent", "Parent's.md");
         assert_cascade_counts_match(&f, &a);
+        assert_eq!(
+            (a.applied, a.skipped),
+            (1, 1),
+            "the double-quoted item rewrites, the single-quoted one skips: {a:?}"
+        );
     }
 
     /// A BLOCK sequence holding both quote styles, safe item first.
@@ -746,6 +751,11 @@ mod tests {
 
         let (f, a) = forecast_and_apply(docs, "Parent", "Parent's.md");
         assert_cascade_counts_match(&f, &a);
+        assert_eq!(
+            (a.applied, a.skipped),
+            (1, 1),
+            "the double-quoted item rewrites, the single-quoted one skips: {a:?}"
+        );
     }
 
     /// A YAML anchor plus its alias: TWO affected links over ONE raw occurrence in
@@ -770,6 +780,44 @@ mod tests {
             (a.applied, a.skipped),
             (1, 1),
             "one raw occurrence rewrites; the aliased second link drifts: {a:?}"
+        );
+    }
+
+    /// BOUNDARY (NRN-499) — the one shape where byte-exact snapshot content still
+    /// does not buy a matching verdict, pinned in its over-optimistic direction.
+    ///
+    /// `"[[\x50arent]]"` is a YAML escape: it DECODES to `[[Parent]]`, so the index
+    /// records a wikilink whose raw text appears nowhere in the file's bytes. The
+    /// rewrite matches raw text, so apply finds no site and skips as drifted, while
+    /// the forecast's untouched-buffer drift hedge promises the rewrite. Retaining
+    /// the raw frontmatter head cannot close this: the snapshot bytes ARE exact
+    /// here, and the gap is between YAML's decoded value and its source text.
+    ///
+    /// If this ever matches, the decoded-scalar residual is closed and this test
+    /// becomes an equality pin.
+    #[test]
+    fn forecast_diverges_over_optimistic_on_yaml_escaped_scalar() {
+        let docs: &[(&str, &str)] = &[
+            ("Parent.md", "---\ntype: note\n---\n# Parent\n"),
+            ("b.md", "---\nup: \"[[\\x50arent]]\"\n---\nbody\n"),
+        ];
+
+        let (f, a) = forecast_and_apply(docs, "Parent", "Renamed.md");
+        assert_eq!(
+            (f.applied, f.skipped),
+            (1, 0),
+            "forecast promises the rewrite: {f:?}"
+        );
+        assert_eq!(
+            (a.applied, a.skipped),
+            (0, 1),
+            "apply finds no literal site and skips as drifted: {a:?}"
+        );
+        assert_ne!(
+            (f.applied, f.skipped),
+            (a.applied, a.skipped),
+            "pins the KNOWN decoded-scalar divergence (NRN-499); if it now matches, \
+             the residual is closed — make this an equality pin"
         );
     }
 

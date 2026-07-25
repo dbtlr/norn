@@ -1380,13 +1380,19 @@ pub(crate) fn plan_backlink_rewrite(
 /// fences, and the frontmatter block with its on-disk quoting, key order, and
 /// comments intact) alongside its body, so the concatenation reproduces the
 /// snapshot's file byte for byte. The forecast therefore classifies against the
-/// same bytes apply splices: on an unchanged vault the two agree for every
-/// on-disk frontmatter form, not just norn's canonical serialization.
+/// same bytes apply splices, for every quoting style, key order, and collection
+/// shape a frontmatter block can be written in — not just norn's canonical
+/// serialization.
 ///
-/// One carve-out: a document the index could not READ carries an empty head and
-/// body, so this returns the empty string rather than the file's real bytes. That
-/// document classifies as `Drifted` and forecasts optimistically, which is the
-/// same treatment every other filesystem-only outcome gets.
+/// Byte-exact reconstruction is not the same as a matching verdict, and one shape
+/// separates them: a scalar whose YAML DECODING produces the wikilink (an escape,
+/// or a double-quoted scalar broken across lines) is indexed under text that never
+/// appears literally in these bytes, so the rewrite finds no site. See
+/// [`forecast_link_rewrites`] for what that costs (NRN-499).
+///
+/// One carve-out on the reconstruction itself: a document the index could not READ
+/// carries an empty head and body, so this returns the empty string rather than the
+/// file's real bytes.
 fn reconstruct_backlinker_content(doc: &crate::domain::Document) -> String {
     let mut content = String::with_capacity(doc.head_text.len() + doc.body_text.len());
     content.push_str(&doc.head_text);
@@ -1399,9 +1405,10 @@ fn reconstruct_backlinker_content(doc: &crate::domain::Document) -> String {
 /// filesystem), producing the `rewritten` / `skipped` buckets a same-snapshot
 /// apply would. It shares the exact per-link decision via
 /// [`plan_backlink_rewrite`], run over the byte-exact snapshot content
-/// [`reconstruct_backlinker_content`] rebuilds, so the forecast's skip
-/// classification cannot drift from apply's on an unchanged vault — whatever
-/// form the on-disk frontmatter takes.
+/// [`reconstruct_backlinker_content`] rebuilds, so on an unchanged vault the
+/// forecast's skip classification matches apply's for frontmatter whose link text
+/// is written LITERALLY — any quoting style, key order, or collection shape. The
+/// YAML-decoded exception is in the Boundary section below.
 ///
 /// Classification is STATEFUL per backlinker, mirroring apply: [`rewrite_one_backlink`]
 /// re-reads the source before every link, so link n+1 sees link n's write. The
@@ -1414,17 +1421,29 @@ fn reconstruct_backlinker_content(doc: &crate::domain::Document) -> String {
 /// re-pick the first site each time and mis-count a file whose occurrences differ
 /// in safety.
 ///
-/// Boundary: only the two skip reasons a snapshot can KNOW are forecast
-/// here — `WouldCorruptWikilink` (the target is not a representable wikilink, a
-/// pre-decided flag on the affected link) and `WouldCorruptFrontmatter` (the
-/// rewrite would break the backlinker's frontmatter, decided from the
-/// reconstructed snapshot content). The filesystem-only outcomes a plan cannot
-/// foresee — a backlinker deleted out from under the move (`SourceMissing`), a
-/// read/write IO error (`Failed`), or on-disk link text that drifted since the
-/// index was built (`Drifted`) — are NOT forecast: they are conditions only the
-/// live bytes reveal, and a forecast that guessed them would be inventing
-/// filesystem state. Such a link forecasts as `rewritten` (the optimistic,
-/// snapshot-consistent verdict); apply reconciles it against the real bytes.
+/// Boundary — which skips a forecast can reach:
+///
+/// - `WouldCorruptWikilink` (the target is not a representable wikilink, a
+///   pre-decided flag on the affected link) and `WouldCorruptFrontmatter` (the
+///   rewrite would break the backlinker's frontmatter, decided from the
+///   reconstructed snapshot content) are always forecast. Both are content-intrinsic
+///   and the snapshot content is the file's bytes.
+/// - `Drifted` splits on the buffer. Drift the CASCADE ITSELF caused — an earlier
+///   rewrite in this same run consumed the raw text — is forecast as a skip: apply's
+///   re-read reaches the same absence, so it is deterministic, not a guess. Drift
+///   against a buffer this cascade has not touched is NOT forecast; that link
+///   forecasts as `rewritten`, the optimistic verdict, and apply reconciles it
+///   against the real bytes.
+/// - `SourceMissing` and a read/write IO `Failed` are never forecast. Only the live
+///   bytes reveal them, and guessing would be inventing filesystem state.
+///
+/// One known over-optimistic residual sits in the untouched-buffer drift hedge
+/// (NRN-499). A frontmatter scalar whose YAML DECODING produces the wikilink —
+/// an escape like `"[[\x50arent]]"`, or a double-quoted scalar broken across lines —
+/// is indexed under the decoded raw text, which never appears literally in the
+/// bytes. Apply skips it as drifted; the forecast promises the rewrite. The
+/// snapshot content is exact here, so retaining the raw head does not close it:
+/// the gap is between YAML's decoded value and its source text.
 pub fn forecast_link_rewrites(
     documents: &[crate::domain::Document],
     change: &ApplyOp,
@@ -1450,16 +1469,17 @@ pub fn forecast_link_rewrites(
         // post-move path) reconstructs as empty, which the classifier reads as
         // `Drifted`. An unrepresentable target overrides this: the classifier
         // decides it before touching content.
+        if !contents.contains_key(&affected.source_path) {
+            let seed = documents
+                .iter()
+                .find(|d| d.path == affected.source_path)
+                .map(reconstruct_backlinker_content)
+                .unwrap_or_default();
+            contents.insert(affected.source_path.clone(), (seed, false));
+        }
         let (content, rewritten_here) = contents
-            .entry(affected.source_path.clone())
-            .or_insert_with(|| {
-                let seed = documents
-                    .iter()
-                    .find(|d| d.path == affected.source_path)
-                    .map(reconstruct_backlinker_content)
-                    .unwrap_or_default();
-                (seed, false)
-            });
+            .get_mut(&affected.source_path)
+            .expect("seeded on the preceding miss");
         let plan = plan_backlink_rewrite(
             &affected.source_path,
             content.as_str(),
@@ -1503,11 +1523,16 @@ pub fn forecast_link_rewrites(
             // and skips, so the forecast skips too — a same-snapshot certainty, not
             // a guess about the filesystem.
             //
-            // Against an UNTOUCHED buffer the drift means the indexed link text is
-            // not in the snapshot bytes, which on a live vault points at an index
-            // gone stale. That stays the optimistic verdict: forecast a rewrite and
-            // let apply reconcile against the real bytes.
-            BacklinkPlan::Skip(reason) => {
+            // Against an UNTOUCHED buffer the drift says only that the indexed link
+            // text is absent from the snapshot bytes. Two different situations
+            // produce that, and this arm cannot tell them apart: a stale index
+            // (whose live bytes may well carry the link, so apply lands it), or an
+            // indexed link whose raw text never appears literally in the bytes at
+            // all — a YAML-decoded scalar, where apply will skip. The optimistic
+            // rewrite verdict is kept because it is right for the first situation
+            // and the second is the narrower one; it is over-optimistic there, and
+            // that residual is pinned by test and named in the rustdoc (NRN-499).
+            BacklinkPlan::Skip(reason @ LinkSkipReason::Drifted) => {
                 if *rewritten_here {
                     outcome.skipped.push(LinkSkipResult {
                         file: affected.source_path.clone(),
@@ -1522,6 +1547,19 @@ pub fn forecast_link_rewrites(
                         to: affected.rewritten.clone(),
                     });
                 }
+            }
+            // `plan_backlink_rewrite` returns no other skip reason: the
+            // filesystem-only ones (`SourceMissing`, `Failed`) belong to the IO
+            // caller. A future reason must make its own forecast decision rather
+            // than inherit drift's optimistic hedge, so it forecasts as a skip —
+            // the conservative default for an unclassified refusal.
+            BacklinkPlan::Skip(reason) => {
+                outcome.skipped.push(LinkSkipResult {
+                    file: affected.source_path.clone(),
+                    from: affected.raw.clone(),
+                    to: affected.rewritten.clone(),
+                    reason,
+                });
             }
         }
     }
@@ -4022,5 +4060,79 @@ mod tests {
             result,
             "---\nfoo: [ # \"x\n  a, b ]\ntitle: bye\n---\nbody\n"
         );
+    }
+
+    /// The forecast and apply must agree on the skip REASON, not merely on counts —
+    /// the reason is what a `--verbose` cascade report shows an operator.
+    ///
+    /// Shape: a YAML anchor and its alias put TWO affected links over ONE raw
+    /// occurrence. The first link rewrites it; the second finds nothing left, which
+    /// apply's re-read reports as `Drifted` and the forecast reproduces from its
+    /// own already-rewritten buffer. Driven directly against
+    /// `forecast_link_rewrites` / `apply_link_rewrites` so the verdicts are read
+    /// off the outcome rather than inferred from summary counts.
+    #[test]
+    fn forecast_and_apply_agree_on_skip_reason_for_cascade_caused_drift() {
+        let tmp = tempfile::Builder::new()
+            .prefix("norn-forecast-reason-")
+            .tempdir()
+            .unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        let backlinker = "---\nup: &ref \"[[Parent]]\"\nalso: *ref\n---\nbody\n";
+        std::fs::write(root.join("b.md"), backlinker).unwrap();
+
+        // Two affected links, same raw text, same source — what the indexer emits
+        // for an anchor plus its alias.
+        let affected = |_i: usize| crate::standards::AffectedLink {
+            source_path: "b.md".into(),
+            raw: "[[Parent]]".to_string(),
+            kind: crate::domain::LinkKind::Wikilink,
+            source_span: None,
+            rewritten: "[[Parent's]]".to_string(),
+            unrepresentable: false,
+        };
+        let mut change = make_change("Parent.md", "unused", "hash", "move", None);
+        change.link_risk = Some(crate::standards::repair::link_risk::LinkRisk {
+            stem_changed: true,
+            directory_changed: false,
+            stem_links: vec![affected(0), affected(1)],
+            path_qualified_wikilinks: vec![],
+            markdown_links: vec![],
+        });
+
+        // The snapshot the forecast reads carries the file's exact bytes.
+        let (head, body) = backlinker.split_at(backlinker.find("body").unwrap());
+        let doc = crate::domain::Document {
+            path: "b.md".into(),
+            stem: "b".into(),
+            hash: "h".into(),
+            frontmatter: None,
+            head_text: head.to_string(),
+            body_text: body.to_string(),
+            headings: vec![],
+            block_ids: vec![],
+            links: vec![],
+            diagnostics: vec![],
+            aliases: vec![],
+            alias_malformed: vec![],
+        };
+
+        let forecast = forecast_link_rewrites(std::slice::from_ref(&doc), &change);
+        let applied = apply_link_rewrites(root, &change).expect("apply must not error");
+
+        assert_eq!(forecast.rewritten.len(), 1, "forecast: {forecast:?}");
+        assert_eq!(applied.rewritten.len(), 1, "apply: {applied:?}");
+        assert_eq!(forecast.skipped.len(), 1, "forecast: {forecast:?}");
+        assert_eq!(applied.skipped.len(), 1, "apply: {applied:?}");
+        assert!(applied.failed.is_empty(), "apply: {applied:?}");
+
+        // The reason itself, on both sides.
+        assert_eq!(forecast.skipped[0].reason, LinkSkipReason::Drifted);
+        assert_eq!(
+            forecast.skipped[0].reason, applied.skipped[0].reason,
+            "forecast and apply must report the same skip reason"
+        );
+        assert_eq!(forecast.skipped[0].file, applied.skipped[0].file);
+        assert_eq!(forecast.skipped[0].from, applied.skipped[0].from);
     }
 }
