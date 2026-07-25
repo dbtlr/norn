@@ -36,6 +36,35 @@ pub struct Entry {
     pub new: String,
     pub reason: Reason,
     pub decision: String,
+    /// How large the divergence is on each cited case, in regions (see
+    /// `crate::extent`). Citation alone would let a divergence grow past
+    /// what `old`/`new` describe; the runner compares the count observed on
+    /// every cited case against this and fails when they disagree. A cited
+    /// case absent here declares zero regions — it is expected to match.
+    pub observed: std::collections::BTreeMap<String, usize>,
+}
+
+impl Entry {
+    /// The divergence extent this entry declares for `case_id`, in regions.
+    /// A cited case the `observed` table omits declares zero.
+    pub fn declared_extent(&self, case_id: &str) -> usize {
+        self.observed.get(case_id).copied().unwrap_or(0)
+    }
+
+    /// The `observed` table as it would be written in the ledger, so a run
+    /// that finds a disagreement can print the line to record.
+    pub fn render_observed(extents: &[(&str, usize)]) -> String {
+        let body: Vec<String> = extents
+            .iter()
+            .filter(|(_, count)| *count > 0)
+            .map(|(case, count)| format!("\"{case}\" = {count}"))
+            .collect();
+        if body.is_empty() {
+            "observed = {}".to_string()
+        } else {
+            format!("observed = {{ {} }}", body.join(", "))
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +116,12 @@ pub enum LedgerError {
         entry: String,
         case: String,
     },
+    /// `observed` keys the divergence extent by case id, so a key the entry
+    /// does not cite measures nothing.
+    ObservedUncitedCase {
+        entry: String,
+        case: String,
+    },
     UnportedCaseId {
         entry: String,
         case: String,
@@ -126,6 +161,10 @@ impl std::fmt::Display for LedgerError {
             LedgerError::UnknownCaseId { entry, case } => {
                 write!(f, "entry {entry} cites unknown case id `{case}`")
             }
+            LedgerError::ObservedUncitedCase { entry, case } => write!(
+                f,
+                "entry {entry}: `observed` measures case `{case}`, which the entry does not cite"
+            ),
             LedgerError::EmptyCases { entry } => write!(
                 f,
                 "entry {entry} cites no cases — every entry must cover at least one case"
@@ -200,6 +239,48 @@ fn get_str_array(
     }
 }
 
+/// Read the `observed` table: case id -> divergence extent in regions. The
+/// field is required (an entry that measures nothing would be back to
+/// covering by citation alone) but may be empty — an entry authored before
+/// its first run declares `observed = {}` and the run reports the counts to
+/// record.
+fn get_extent_table(
+    table: &toml::Table,
+    context: &str,
+) -> Result<std::collections::BTreeMap<String, usize>, LedgerError> {
+    const FIELD: &str = "observed";
+    let raw = match table.get(FIELD) {
+        None => {
+            return Err(LedgerError::MissingField {
+                context: context.to_string(),
+                field: FIELD,
+            })
+        }
+        Some(toml::Value::Table(t)) => t,
+        Some(_) => {
+            return Err(LedgerError::WrongType {
+                context: context.to_string(),
+                field: FIELD,
+                expected: "a table of case id -> region count",
+            })
+        }
+    };
+    let mut extents = std::collections::BTreeMap::new();
+    for (case, value) in raw {
+        let count =
+            value
+                .as_integer()
+                .filter(|n| *n >= 0)
+                .ok_or_else(|| LedgerError::WrongType {
+                    context: context.to_string(),
+                    field: FIELD,
+                    expected: "a table of case id -> region count (a non-negative integer)",
+                })?;
+        extents.insert(case.clone(), count as usize);
+    }
+    Ok(extents)
+}
+
 impl Ledger {
     /// Parse and structurally validate ledger TOML text: missing required
     /// fields, an unknown `reason`, a duplicate entry id, a case id cited by
@@ -264,6 +345,15 @@ impl Ledger {
             let new = get_str(table, &context, "new")?;
             let reason_str = get_str(table, &context, "reason")?;
             let decision = get_str(table, &context, "decision")?;
+            let observed = get_extent_table(table, &context)?;
+            for case in observed.keys() {
+                if !cases.contains(case) {
+                    return Err(LedgerError::ObservedUncitedCase {
+                        entry: id.clone(),
+                        case: case.clone(),
+                    });
+                }
+            }
 
             let reason = Reason::parse(&reason_str).ok_or_else(|| LedgerError::UnknownReason {
                 entry: id.clone(),
@@ -305,6 +395,7 @@ impl Ledger {
                 new,
                 reason,
                 decision,
+                observed,
             });
         }
 

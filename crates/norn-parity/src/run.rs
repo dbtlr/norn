@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cases::{self, Case, Suite};
 use crate::exec::{self, ExecError};
+use crate::extent;
 use crate::fixtures::{self, FixtureCache, FixtureError, Side};
 use crate::ledger::{Ledger, LedgerError};
 use crate::mcp;
@@ -64,6 +65,11 @@ pub struct CaseOutcome {
     /// like `post_state`: the verdict already folded this into match/
     /// diverged/drift.
     pub mcp_divergence: Option<mcp::McpDivergence>,
+    /// How large the observed divergence is, in regions (`crate::extent`):
+    /// 0 for a Match, and for anything else the count the covering ledger
+    /// entry must declare. Reported for an uncovered case so the entry that
+    /// covers it can be authored from the run rather than by hand.
+    pub extent: usize,
     /// Set only in `Mode::All` when an MCP case could not be driven to a
     /// comparable result at all (a timeout, a premature EOF, a malformed
     /// frame — see `mcp::McpError`) — rendered as a runner-error row instead
@@ -72,23 +78,38 @@ pub struct CaseOutcome {
     pub runner_error: Option<String>,
 }
 
+/// A ledger entry whose declared divergence extent disagrees with what the
+/// run observed on one of its cited cases: the entry covers a divergence of
+/// a different size than the one described in its `old`/`new` text.
+pub struct ExtentGap {
+    pub entry_id: String,
+    pub case_id: &'static str,
+    pub declared: usize,
+    pub observed: usize,
+    /// The entry's whole `observed` table as this run measured it — the line
+    /// to record once the diff has been re-read.
+    pub replacement: String,
+}
+
 pub struct RunReport {
     pub outcomes: Vec<CaseOutcome>,
     pub stale_entries: Vec<String>,
+    /// Entries whose declared extent no longer matches the observed one.
+    pub extent_gaps: Vec<ExtentGap>,
     pub oracle_version: String,
 }
 
 impl RunReport {
-    /// 0 when every case matched or diverged-with-citation and no ledger
-    /// entry went stale; 1 when any case drifted or any entry is stale.
-    /// (Runner errors that keep a report from ever being built exit 2 —
-    /// see [`RunError`].)
+    /// 0 when every case matched or diverged-with-citation, no ledger entry
+    /// went stale, and every entry's declared extent matches the observed
+    /// one; 1 otherwise. (Runner errors that keep a report from ever being
+    /// built exit 2 — see [`RunError`].)
     pub fn exit_code(&self) -> u8 {
         let any_drift = self
             .outcomes
             .iter()
             .any(|o| matches!(o.verdict, Verdict::Drift));
-        if any_drift || !self.stale_entries.is_empty() {
+        if any_drift || !self.stale_entries.is_empty() || !self.extent_gaps.is_empty() {
             1
         } else {
             0
@@ -389,6 +410,47 @@ fn substitute_plan_argv(argv: &[&str], plan_path: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Compare every ledger entry's declared divergence extent against the one
+/// this run observed, for the entry's cases that actually ran. An entry
+/// covers a case by citation, which says nothing about WHAT differs — so a
+/// disagreement here means the divergence changed size since the entry's
+/// `old`/`new` text was written, and the text has to be re-derived from the
+/// current diff. Cases that did not run (mode or suite filter) are skipped:
+/// their extent is unmeasured, not zero.
+fn extent_gaps(
+    ledger: &Ledger,
+    observed: &std::collections::BTreeMap<&'static str, usize>,
+) -> Vec<ExtentGap> {
+    let mut gaps = Vec::new();
+    for entry in &ledger.entries {
+        let ran: Vec<(&'static str, usize)> = entry
+            .cases
+            .iter()
+            .filter_map(|c| observed.get_key_value(c.as_str()))
+            .map(|(id, count)| (*id, *count))
+            .collect();
+        if ran.is_empty() {
+            continue;
+        }
+        // One replacement line per entry, carrying every case that ran —
+        // recording it is a single edit however many cases disagree.
+        let replacement = crate::ledger::Entry::render_observed(&ran);
+        for (case_id, observed_extent) in ran {
+            let declared = entry.declared_extent(case_id);
+            if declared != observed_extent {
+                gaps.push(ExtentGap {
+                    entry_id: entry.id.clone(),
+                    case_id,
+                    declared,
+                    observed: observed_extent,
+                    replacement: replacement.clone(),
+                });
+            }
+        }
+    }
+    gaps
+}
+
 pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunReport, RunError> {
     if let Some(dup) = cases::duplicate_case_id(suites) {
         return Err(RunError::DuplicateCaseId(dup));
@@ -433,6 +495,8 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
     let mut outcomes = Vec::new();
     let mut ran_ids: BTreeSet<&str> = BTreeSet::new();
     let mut diverged_ids: BTreeSet<&str> = BTreeSet::new();
+    let mut observed_extents: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
 
     let candidate_binary: &Path = if self_check {
         config.oracle
@@ -482,7 +546,9 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
             .map(PathBuf::as_path)
             .collect();
 
-        let (verdict, post_state, mcp_divergence, runner_error) = if let Some(frames) = case.stdin {
+        let (verdict, post_state, mcp_divergence, runner_error, extent) = if let Some(frames) =
+            case.stdin
+        {
             // An MCP case: driven and compared frame-by-frame by `crate::mcp`,
             // never through the ordinary argv/stdout/stderr path below (see
             // that module's doc for the framing + timeout/EOF-early
@@ -520,12 +586,13 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                         .and_then(|l| l.entry_for_case(case.id))
                         .map(|e| e.id.as_str());
                     let verdict = verdict::classify(matched, self_check, entry_id);
+                    let extent = extent::mcp_extent(&result.divergence);
                     let divergence = if result.divergence.is_empty() {
                         None
                     } else {
                         Some(result.divergence)
                     };
-                    (verdict, None, divergence, None)
+                    (verdict, None, divergence, None, extent)
                 }
                 // `Mode::All` only: an MCP surface that cannot complete a
                 // session (e.g. the rewrite's `mcp` subcommand is still
@@ -538,7 +605,7 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                 // never fail to drive), so this arm is unreachable in
                 // practice for those modes today.
                 Err(source) if matches!(config.mode, Mode::All) => {
-                    (Verdict::Drift, None, None, Some(source.to_string()))
+                    (Verdict::Drift, None, None, Some(source.to_string()), 0)
                 }
                 Err(source) => {
                     return Err(RunError::Mcp {
@@ -649,13 +716,15 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                 .and_then(|l| l.entry_for_case(case.id))
                 .map(|e| e.id.as_str());
             let verdict = verdict::classify(matched, self_check, entry_id);
-            (verdict, post_state, None, None)
+            let extent = extent::output_extent(&oracle_norm, &candidate_norm, post_state.as_ref());
+            (verdict, post_state, None, None, extent)
         };
 
         ran_ids.insert(case.id);
         if let Verdict::Diverged { .. } = &verdict {
             diverged_ids.insert(case.id);
         }
+        observed_extents.insert(case.id, extent);
         outcomes.push(CaseOutcome {
             case_id: case.id,
             suite_name,
@@ -663,6 +732,7 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
             post_state,
             mcp_divergence,
             runner_error,
+            extent,
         });
     }
 
@@ -674,10 +744,15 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
             .map(|s| s.to_string())
             .collect(),
     };
+    let extent_gaps = match &ledger {
+        None => Vec::new(),
+        Some(l) => extent_gaps(l, &observed_extents),
+    };
 
     Ok(RunReport {
         outcomes,
         stale_entries,
+        extent_gaps,
         oracle_version,
     })
 }

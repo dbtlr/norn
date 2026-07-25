@@ -40,6 +40,18 @@ fn parses_the_real_ledger_with_the_help_divergence_entries() {
         );
     }
 
+    // Every committed entry has been measured: `observed = {}` is the
+    // authoring placeholder, legal to parse but never legal to ship — an
+    // unmeasured entry is back to covering its case by citation alone.
+    for entry in &ledger.entries {
+        assert!(
+            entry.observed.values().any(|regions| *regions > 0),
+            "entry {} declares no divergence extent — run the gated comparison and record the \
+             `observed` line it reports",
+            entry.id
+        );
+    }
+
     // The MCP schema-surface divergence (PD-141): the tools/list case is gated
     // by the zero-indexed `get.starts_at` extension of PD-105.
     assert_eq!(
@@ -396,6 +408,7 @@ old = "old behavior"
 new = "new behavior"
 reason = "vibes"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
@@ -418,6 +431,7 @@ old = "old behavior"
 new = "new behavior"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
@@ -440,6 +454,7 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 
 [[entry]]
 id = "PD-001"
@@ -449,6 +464,7 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
@@ -471,6 +487,7 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
@@ -492,6 +509,7 @@ cases = ["help-bare"]
 old = "old"
 new = "new"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
@@ -529,6 +547,7 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 
 [[entry]]
 id = "PD-002"
@@ -538,6 +557,7 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
     assert!(
@@ -563,6 +583,7 @@ old = "old"
 new = "new"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let empty_ported: BTreeSet<&str> = BTreeSet::new();
     let err = Ledger::parse(toml, &known_ids(), &empty_ported).unwrap_err();
@@ -586,6 +607,7 @@ old = "old behavior"
 new = "new behavior"
 reason = "discovered-inconsistency"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let ledger =
         Ledger::parse(toml, &known_ids(), &ported_ids()).expect("well-formed ledger should parse");
@@ -610,6 +632,7 @@ old = "old behavior"
 new = "new behavior"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let ledger = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap();
 
@@ -632,6 +655,7 @@ old = "old behavior"
 new = "new behavior"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let ledger = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap();
 
@@ -654,6 +678,7 @@ old = "old behavior"
 new = "new behavior"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {}
 "#;
     let ledger = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap();
 
@@ -676,5 +701,113 @@ fn load_reports_the_file_path_on_a_missing_ledger() {
     assert!(
         message.contains("/nonexistent/parity-ledger.toml"),
         "diagnostic should name the ledger path, got: {message}"
+    );
+}
+
+#[test]
+fn rejects_an_entry_with_no_observed_table() {
+    // Without `observed` an entry covers its case by citation alone, which
+    // says nothing about what differs — the field is required.
+    let toml = r#"
+[meta]
+oracle_version = "0.48.0"
+
+[[entry]]
+id = "PD-001"
+surface = "a"
+cases = ["help-bare"]
+old = "old"
+new = "new"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+"#;
+    let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            LedgerError::MissingField {
+                field: "observed",
+                ..
+            }
+        ),
+        "expected MissingField {{ field: \"observed\" }}, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_an_observed_entry_for_a_case_the_entry_does_not_cite() {
+    let toml = r#"
+[meta]
+oracle_version = "0.48.0"
+
+[[entry]]
+id = "PD-001"
+surface = "a"
+cases = ["help-bare"]
+old = "old"
+new = "new"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = { "help-validate" = 2 }
+"#;
+    let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
+    assert!(
+        matches!(err, LedgerError::ObservedUncitedCase { ref case, .. } if case == "help-validate"),
+        "expected ObservedUncitedCase, got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_a_non_integer_observed_extent() {
+    let toml = r#"
+[meta]
+oracle_version = "0.48.0"
+
+[[entry]]
+id = "PD-001"
+surface = "a"
+cases = ["help-bare"]
+old = "old"
+new = "new"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = { "help-bare" = "two" }
+"#;
+    let err = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            LedgerError::WrongType {
+                field: "observed",
+                ..
+            }
+        ),
+        "expected WrongType {{ field: \"observed\" }}, got {err:?}"
+    );
+}
+
+#[test]
+fn an_omitted_case_declares_zero_regions() {
+    let toml = r#"
+[meta]
+oracle_version = "0.48.0"
+
+[[entry]]
+id = "PD-001"
+surface = "a"
+cases = ["help-bare", "help-validate"]
+old = "old"
+new = "new"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = { "help-bare" = 4 }
+"#;
+    let ledger = Ledger::parse(toml, &known_ids(), &ported_ids()).unwrap();
+    let entry = ledger.entry_for_case("help-bare").unwrap();
+    assert_eq!(entry.declared_extent("help-bare"), 4);
+    assert_eq!(
+        entry.declared_extent("help-validate"),
+        0,
+        "a cited case the table omits is expected to match"
     );
 }

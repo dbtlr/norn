@@ -123,6 +123,7 @@ old = "help text"
 new = "echo of argv"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {{ "{FAB_CASE_ID}" = 1 }}
 "#
         ),
     );
@@ -170,6 +171,7 @@ old = "help text"
 new = "help text"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {{}}
 "#
         ),
     );
@@ -197,4 +199,115 @@ decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
         1,
         "a stale entry fails the run even though its one case matched"
     );
+}
+
+#[test]
+fn an_entry_declaring_the_wrong_divergence_extent_is_a_gap_and_exits_1() {
+    if common::oracle_missing("verdicts") {
+        return;
+    }
+    let ledger_dir = tempfile::TempDir::new().unwrap();
+    let ledger_path = ledger_dir.path().join("ledger.toml");
+    // The entry covers the case and its case really does diverge — but it
+    // declares two regions where the run observes one. Citation alone would
+    // wave this through; the extent disagreement is what catches an entry
+    // whose `old`/`new` no longer describes the whole divergence.
+    common::write_ledger(
+        &ledger_path,
+        &format!(
+            r#"
+[meta]
+oracle_version = "0.48.1"
+
+[[entry]]
+id = "TEST-UNDERDESCRIBED"
+surface = "help (fabricated)"
+cases = ["{FAB_CASE_ID}"]
+old = "help text"
+new = "echo of argv"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {{ "{FAB_CASE_ID}" = 2 }}
+"#
+        ),
+    );
+
+    let config = RunConfig {
+        mode: Mode::Gated,
+        oracle: Path::new("norn"),
+        rewrite: Path::new(ECHO),
+        ledger_path: &ledger_path,
+        suite_filter: &[],
+    };
+    let report = run::run_suites(&config, FAB_SUITES).expect("run should succeed");
+
+    assert_eq!(
+        diverged_verdicts(&report),
+        vec!["TEST-UNDERDESCRIBED".to_string()],
+        "the case still resolves to its entry — the extent gap is reported separately"
+    );
+    assert_eq!(report.extent_gaps.len(), 1, "one entry, one case, one gap");
+    let gap = &report.extent_gaps[0];
+    assert_eq!(gap.entry_id, "TEST-UNDERDESCRIBED");
+    assert_eq!(gap.case_id, FAB_CASE_ID);
+    assert_eq!(gap.declared, 2);
+    assert_eq!(gap.observed, 1);
+    assert_eq!(
+        gap.replacement,
+        format!("observed = {{ \"{FAB_CASE_ID}\" = 1 }}"),
+        "the gap carries the line to record once the diff has been re-read"
+    );
+    assert_eq!(
+        report.exit_code(),
+        1,
+        "an entry that no longer describes its divergence fails the run"
+    );
+}
+
+#[test]
+fn a_matching_case_declared_as_diverging_is_both_stale_and_a_gap() {
+    if common::oracle_missing("verdicts") {
+        return;
+    }
+    let ledger_dir = tempfile::TempDir::new().unwrap();
+    let ledger_path = ledger_dir.path().join("ledger.toml");
+    common::write_ledger(
+        &ledger_path,
+        &format!(
+            r#"
+[meta]
+oracle_version = "0.48.1"
+
+[[entry]]
+id = "TEST-STALE-EXTENT"
+surface = "help (fabricated)"
+cases = ["{FAB_CASE_ID}"]
+old = "help text"
+new = "help text"
+reason = "decided-better"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
+observed = {{ "{FAB_CASE_ID}" = 3 }}
+"#
+        ),
+    );
+
+    // rewrite := the oracle itself, so the case matches: zero regions.
+    let config = RunConfig {
+        mode: Mode::Gated,
+        oracle: Path::new("norn"),
+        rewrite: Path::new("norn"),
+        ledger_path: &ledger_path,
+        suite_filter: &[],
+    };
+    let report = run::run_suites(&config, FAB_SUITES).expect("run should succeed");
+
+    assert_eq!(report.stale_entries, vec!["TEST-STALE-EXTENT".to_string()]);
+    assert_eq!(report.extent_gaps.len(), 1);
+    assert_eq!(report.extent_gaps[0].declared, 3);
+    assert_eq!(report.extent_gaps[0].observed, 0);
+    assert_eq!(
+        report.extent_gaps[0].replacement, "observed = {}",
+        "nothing diverges, so the line to record is the empty table"
+    );
+    assert_eq!(report.exit_code(), 1);
 }
