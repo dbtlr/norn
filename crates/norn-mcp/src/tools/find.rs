@@ -7,103 +7,54 @@
 //! envelope. Paging is ZERO-indexed via `starts_at` (NRN-332): an omitted value
 //! is the first record.
 
-use norn_wire::{
-    FilterParams, FindDoc, FindParams as WireFindParams, FindReport, SortPaginateParams,
-};
+use norn_wire::{FindDoc, FindParams as WireFindParams, FindReport, SortPaginateParams};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-/// Parameters for `vault.find` — mirrors `norn find`'s daily surface: the full
-/// find-filter predicate set, the shared sort/paging knobs, and the column
-/// request. `--format` / `--no-pager` are CLI-only (the MCP tool always returns
-/// the structured envelope).
-///
-/// Paging convention: `starts_at` is ZERO-indexed — an omitted value is the
-/// first record. `limit` defaults to the wire/verb default when omitted; pass
-/// `no_limit: true` for the full match set.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
-#[serde(deny_unknown_fields)]
-pub struct FindParams {
-    // ── Filter predicates (mirrors FilterArgs) ──────────────────────────────
-    /// Full-text body substring. Case-insensitive.
-    #[serde(default)]
-    pub text: Option<String>,
-    /// Frontmatter equality predicates `field:value`. Repeatable; all must match.
-    #[serde(default)]
-    pub eq: Vec<String>,
-    /// Frontmatter inequality predicates `field:value`. Repeatable.
-    #[serde(default)]
-    pub not_eq: Vec<String>,
-    /// Frontmatter ANY-of predicates `field:V1,V2,...`. Repeatable.
-    #[serde(default)]
-    #[serde(rename = "in")]
-    pub r#in: Vec<String>,
-    /// Frontmatter NOT-in predicates `field:V1,V2,...`. Repeatable.
-    #[serde(default)]
-    pub not_in: Vec<String>,
-    /// Frontmatter prefix predicates `field:VALUE`. Case-sensitive. Repeatable.
-    #[serde(default)]
-    pub starts_with: Vec<String>,
-    /// Frontmatter suffix predicates `field:VALUE`. Case-sensitive. Repeatable.
-    #[serde(default)]
-    pub ends_with: Vec<String>,
-    /// Frontmatter substring predicates `field:VALUE`. Case-sensitive. Repeatable.
-    #[serde(default)]
-    pub contains: Vec<String>,
-    /// Frontmatter fields that must be present (non-null). Repeatable.
-    #[serde(default)]
-    pub has: Vec<String>,
-    /// Frontmatter fields that must be absent or null. Repeatable.
-    #[serde(default)]
-    pub missing: Vec<String>,
-    /// Date-before predicates `field:DATE`. ISO 8601. Repeatable.
-    #[serde(default)]
-    pub before: Vec<String>,
-    /// Date-after predicates `field:DATE`. ISO 8601. Repeatable.
-    #[serde(default)]
-    pub after: Vec<String>,
-    /// Date-on predicates `field:DATE`. Accepts `today`. Repeatable.
-    #[serde(default)]
-    pub on: Vec<String>,
-    /// Path glob patterns. Repeatable.
-    #[serde(default)]
-    pub path: Vec<String>,
-    /// Documents whose outgoing links resolve to TARGET. Repeatable; AND'd.
-    #[serde(default)]
-    pub links_to: Vec<String>,
-    /// Include only documents with at least one unresolved link.
-    #[serde(default)]
-    pub unresolved_links: bool,
+use crate::tools::filters::filter_params;
 
-    // ── Sort / limit / paging (mirrors SortPaginateArgs) ─────────────────────
-    /// Sort by field (frontmatter key, `path`, or `stem`); ascending by default.
-    #[serde(default)]
-    pub sort: Option<String>,
-    /// Sort descending (only meaningful with `sort`).
-    #[serde(default)]
-    pub desc: bool,
-    /// Maximum documents to return. Absent → the verb default; use `no_limit`
-    /// for every match.
-    #[serde(default)]
-    pub limit: Option<usize>,
-    /// Return every matching document, overriding `limit`.
-    #[serde(default)]
-    pub no_limit: bool,
-    /// Zero-indexed starting offset for paging. Defaults to 0 (the first record).
-    #[serde(default)]
-    pub starts_at: usize,
+filter_params! {
+    /// Parameters for `vault.find` — mirrors `norn find`'s daily surface: the full
+    /// find-filter predicate set, the shared sort/paging knobs, and the column
+    /// request. `--format` / `--no-pager` are CLI-only (the MCP tool always returns
+    /// the structured envelope).
+    ///
+    /// Paging convention: `starts_at` is ZERO-indexed — an omitted value is the
+    /// first record. `limit` defaults to the wire/verb default when omitted; pass
+    /// `no_limit: true` for the full match set.
+    #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+    #[serde(deny_unknown_fields)]
+    pub struct FindParams {
+        // ── Sort / limit / paging (mirrors SortPaginateArgs) ─────────────────
+        /// Sort by field (frontmatter key, `path`, or `stem`); ascending by default.
+        #[serde(default)]
+        pub sort: Option<String>,
+        /// Sort descending (only meaningful with `sort`).
+        #[serde(default)]
+        pub desc: bool,
+        /// Maximum documents to return. Absent → the verb default; use `no_limit`
+        /// for every match.
+        #[serde(default)]
+        pub limit: Option<usize>,
+        /// Return every matching document, overriding `limit`.
+        #[serde(default)]
+        pub no_limit: bool,
+        /// Zero-indexed starting offset for paging. Defaults to 0 (the first record).
+        #[serde(default)]
+        pub starts_at: usize,
 
-    // ── Column projection (mirrors --col / --all-cols) ───────────────────────
-    /// Optional column request, comma-separated, in `norn find --col` syntax.
-    /// On the MCP surface this only controls whether the on-request facets
-    /// (`.headings`, the three link sets, `.body`, `.document_hash`) are
-    /// INCLUDED — it does not narrow the always-full record dump.
-    #[serde(default)]
-    pub col: Option<String>,
-    /// Emit the full structured dump per match, including `.body` and the deep
-    /// connection facets.
-    #[serde(default)]
-    pub all_cols: bool,
+        // ── Column projection (mirrors --col / --all-cols) ───────────────────
+        /// Optional column request, comma-separated, in `norn find --col` syntax.
+        /// On the MCP surface this only controls whether the on-request facets
+        /// (`.headings`, the three link sets, `.body`, `.document_hash`) are
+        /// INCLUDED — it does not narrow the always-full record dump.
+        #[serde(default)]
+        pub col: Option<String>,
+        /// Emit the full structured dump per match, including `.body` and the deep
+        /// connection facets.
+        #[serde(default)]
+        pub all_cols: bool,
+    }
 }
 
 /// Structured output for `vault.find`. rmcp requires a root `type: object`; the
@@ -152,24 +103,7 @@ fn wants_connections(col: &Option<String>, all_cols: bool) -> bool {
 /// Build the wire request from the MCP params.
 pub(crate) fn to_wire(p: &FindParams) -> WireFindParams {
     WireFindParams {
-        filter: FilterParams {
-            text: p.text.clone(),
-            eq: p.eq.clone(),
-            not_eq: p.not_eq.clone(),
-            r#in: p.r#in.clone(),
-            not_in: p.not_in.clone(),
-            starts_with: p.starts_with.clone(),
-            ends_with: p.ends_with.clone(),
-            contains: p.contains.clone(),
-            has: p.has.clone(),
-            missing: p.missing.clone(),
-            before: p.before.clone(),
-            after: p.after.clone(),
-            on: p.on.clone(),
-            path: p.path.clone(),
-            links_to: p.links_to.clone(),
-            unresolved_links: p.unresolved_links,
-        },
+        filter: p.to_filter(),
         paging: SortPaginateParams {
             sort: p.sort.clone(),
             desc: p.desc,

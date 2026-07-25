@@ -13,80 +13,32 @@
 //! display-layer rendering of this same report, not a second owner response
 //! shape. A params-level selector for it is tracked as NRN-492.
 
-use norn_wire::{DescribeParams as WireDescribeParams, DescribeReport, FilterParams};
+use norn_wire::{DescribeParams as WireDescribeParams, DescribeReport};
 use serde::Deserialize;
 
 use crate::mutation_result::FlatReport;
+use crate::tools::filters::filter_params;
 
-/// Parameters for `vault.describe` — the structure view always, plus a
-/// contents-summary when `data` is set or a `by` grouping is given. The
-/// find-filter surface narrows the summary population.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
-#[serde(deny_unknown_fields)]
-pub struct DescribeParams {
-    /// Include the contents summary (per-field value distributions, date bounds).
-    /// Implied when `by` is non-empty.
-    #[serde(default)]
-    pub data: bool,
-    /// Group the contents summary by frontmatter field(s) — comma-separated,
-    /// exactly the CLI's `--by` token. Implies `data`.
-    #[serde(default)]
-    pub by: Option<String>,
-    /// Cap the value buckets shown per field. Absent → the verb default (20);
-    /// `0` → uncapped.
-    #[serde(default)]
-    pub limit: Option<usize>,
-
-    // ── Filter predicates (narrow the summary population) ────────────────────
-    /// Full-text body substring. Case-insensitive.
-    #[serde(default)]
-    pub text: Option<String>,
-    /// Frontmatter equality predicates `field:value`. Repeatable.
-    #[serde(default)]
-    pub eq: Vec<String>,
-    /// Frontmatter inequality predicates `field:value`. Repeatable.
-    #[serde(default)]
-    pub not_eq: Vec<String>,
-    /// Frontmatter ANY-of predicates `field:V1,V2,...`. Repeatable.
-    #[serde(default)]
-    #[serde(rename = "in")]
-    pub r#in: Vec<String>,
-    /// Frontmatter NOT-in predicates `field:V1,V2,...`. Repeatable.
-    #[serde(default)]
-    pub not_in: Vec<String>,
-    /// Frontmatter prefix predicates `field:VALUE`. Repeatable.
-    #[serde(default)]
-    pub starts_with: Vec<String>,
-    /// Frontmatter suffix predicates `field:VALUE`. Repeatable.
-    #[serde(default)]
-    pub ends_with: Vec<String>,
-    /// Frontmatter substring predicates `field:VALUE`. Repeatable.
-    #[serde(default)]
-    pub contains: Vec<String>,
-    /// Frontmatter fields that must be present (non-null). Repeatable.
-    #[serde(default)]
-    pub has: Vec<String>,
-    /// Frontmatter fields that must be absent or null. Repeatable.
-    #[serde(default)]
-    pub missing: Vec<String>,
-    /// Date-before predicates `field:DATE`. Repeatable.
-    #[serde(default)]
-    pub before: Vec<String>,
-    /// Date-after predicates `field:DATE`. Repeatable.
-    #[serde(default)]
-    pub after: Vec<String>,
-    /// Date-on predicates `field:DATE`. Repeatable.
-    #[serde(default)]
-    pub on: Vec<String>,
-    /// Path glob patterns. Repeatable.
-    #[serde(default)]
-    pub path: Vec<String>,
-    /// Documents whose outgoing links resolve to TARGET. Repeatable; AND'd.
-    #[serde(default)]
-    pub links_to: Vec<String>,
-    /// Include only documents with at least one unresolved link.
-    #[serde(default)]
-    pub unresolved_links: bool,
+filter_params! {
+    /// Parameters for `vault.describe` — the structure view always, plus a
+    /// contents-summary when `data` is set or a `by` grouping is given. The
+    /// find-filter surface narrows the summary population.
+    #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+    #[serde(deny_unknown_fields)]
+    pub struct DescribeParams {
+        /// Include the contents summary (per-field value distributions, date bounds).
+        /// Implied when `by` is non-empty.
+        #[serde(default)]
+        pub data: bool,
+        /// Group the contents summary by frontmatter field(s) — comma-separated,
+        /// exactly the CLI's `--by` token. Implies `data`.
+        #[serde(default)]
+        pub by: Option<String>,
+        /// Cap the value buckets shown per field. Absent → the verb default (20);
+        /// `0` → uncapped.
+        #[serde(default)]
+        pub limit: Option<usize>,
+    }
 }
 
 /// Structured output for `vault.describe` — the flat report (`folders`,
@@ -106,24 +58,7 @@ pub(crate) fn to_wire(p: DescribeParams) -> WireDescribeParams {
         data: p.data || !by.is_empty(),
         by,
         limit: p.limit,
-        filter: FilterParams {
-            text: p.text,
-            eq: p.eq,
-            not_eq: p.not_eq,
-            r#in: p.r#in,
-            not_in: p.not_in,
-            starts_with: p.starts_with,
-            ends_with: p.ends_with,
-            contains: p.contains,
-            has: p.has,
-            missing: p.missing,
-            before: p.before,
-            after: p.after,
-            on: p.on,
-            path: p.path,
-            links_to: p.links_to,
-            unresolved_links: p.unresolved_links,
-        },
+        filter: p.to_filter(),
         dynamic_keys: Vec::new(),
     }
 }

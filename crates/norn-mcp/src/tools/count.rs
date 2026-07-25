@@ -7,91 +7,26 @@
 //! requires an `outputSchema` with a `type: object` root, which an untagged enum
 //! cannot produce).
 
-use norn_wire::{CountParams as WireCountParams, CountReport, FilterParams};
+use norn_wire::{CountParams as WireCountParams, CountReport};
 use serde::{Deserialize, Serialize};
 
-/// Parameters for `vault.count` — mirrors `norn count`'s agent-useful flags: the
-/// full find-filter surface plus `by` for grouping. `--format` is omitted (the
-/// MCP tool always returns the structured envelope).
-#[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
-#[serde(deny_unknown_fields)]
-pub struct CountParams {
-    /// Frontmatter field(s) to group counts by — comma-separated, exactly the
-    /// CLI's `--by` token (e.g. `"project,lifecycle"`). Without `by`, only
-    /// the total is returned. One field returns a string `by` and a flat
-    /// value→count `groups` map; several fields return an array `by` and
-    /// nested `groups` (one map level per field, counts at the leaves).
-    #[serde(default)]
-    pub by: Option<String>,
+use crate::tools::filters::filter_params;
 
-    // ── Filter predicates (mirrors FilterArgs) ──────────────────────────────
-    /// Full-text body substring. Case-insensitive.
-    #[serde(default)]
-    pub text: Option<String>,
-
-    /// Frontmatter equality predicates `field:value`. Repeatable; all must match.
-    #[serde(default)]
-    pub eq: Vec<String>,
-
-    /// Frontmatter inequality predicates `field:value`. Repeatable.
-    #[serde(default)]
-    pub not_eq: Vec<String>,
-
-    /// Frontmatter ANY-of predicates `field:V1,V2,...`. Repeatable.
-    #[serde(default)]
-    #[serde(rename = "in")]
-    pub r#in: Vec<String>,
-
-    /// Frontmatter NOT-in predicates `field:V1,V2,...`. Repeatable.
-    #[serde(default)]
-    pub not_in: Vec<String>,
-
-    /// Frontmatter prefix predicates `field:VALUE` — the field (or any array
-    /// element) starts with VALUE. Case-sensitive. Repeatable; all must match.
-    #[serde(default)]
-    pub starts_with: Vec<String>,
-
-    /// Frontmatter suffix predicates `field:VALUE` — the field (or any array
-    /// element) ends with VALUE. Case-sensitive. Repeatable.
-    #[serde(default)]
-    pub ends_with: Vec<String>,
-
-    /// Frontmatter substring predicates `field:VALUE` — the field (or any
-    /// array element) contains VALUE. Case-sensitive. Repeatable.
-    #[serde(default)]
-    pub contains: Vec<String>,
-
-    /// Frontmatter fields that must be present (non-null). Repeatable.
-    #[serde(default)]
-    pub has: Vec<String>,
-
-    /// Frontmatter fields that must be absent or null. Repeatable.
-    #[serde(default)]
-    pub missing: Vec<String>,
-
-    /// Date-before predicates `field:DATE`. ISO 8601. Repeatable.
-    #[serde(default)]
-    pub before: Vec<String>,
-
-    /// Date-after predicates `field:DATE`. ISO 8601. Repeatable.
-    #[serde(default)]
-    pub after: Vec<String>,
-
-    /// Date-on predicates `field:DATE`. Accepts `today`. Repeatable.
-    #[serde(default)]
-    pub on: Vec<String>,
-
-    /// Path glob patterns. Repeatable.
-    #[serde(default)]
-    pub path: Vec<String>,
-
-    /// Documents whose outgoing links resolve to TARGET. Repeatable; AND'd.
-    #[serde(default)]
-    pub links_to: Vec<String>,
-
-    /// Include only documents with at least one unresolved link.
-    #[serde(default)]
-    pub unresolved_links: bool,
+filter_params! {
+    /// Parameters for `vault.count` — mirrors `norn count`'s agent-useful flags: the
+    /// full find-filter surface plus `by` for grouping. `--format` is omitted (the
+    /// MCP tool always returns the structured envelope).
+    #[derive(Debug, Deserialize, schemars::JsonSchema, Default)]
+    #[serde(deny_unknown_fields)]
+    pub struct CountParams {
+        /// Frontmatter field(s) to group counts by — comma-separated, exactly the
+        /// CLI's `--by` token (e.g. `"project,lifecycle"`). Without `by`, only
+        /// the total is returned. One field returns a string `by` and a flat
+        /// value→count `groups` map; several fields return an array `by` and
+        /// nested `groups` (one map level per field, counts at the leaves).
+        #[serde(default)]
+        pub by: Option<String>,
+    }
 }
 
 /// Flat output envelope for `vault.count` — covers every [`CountReport`] variant
@@ -164,39 +99,16 @@ impl CountEnvelope {
     }
 }
 
-/// Map the flat MCP filter fields onto the shared wire [`FilterParams`].
-pub(crate) fn to_filter(p: CountParams) -> (Option<String>, FilterParams) {
-    let filter = FilterParams {
-        text: p.text,
-        eq: p.eq,
-        not_eq: p.not_eq,
-        r#in: p.r#in,
-        not_in: p.not_in,
-        starts_with: p.starts_with,
-        ends_with: p.ends_with,
-        contains: p.contains,
-        has: p.has,
-        missing: p.missing,
-        before: p.before,
-        after: p.after,
-        on: p.on,
-        path: p.path,
-        links_to: p.links_to,
-        unresolved_links: p.unresolved_links,
-    };
-    (p.by, filter)
-}
-
 /// Build the wire request. The single `by` comma token is split into fields the
 /// same way the CLI's `--by` (a `value_delimiter = ','` list) does.
 pub(crate) fn to_wire(p: CountParams) -> WireCountParams {
-    let (by, filter) = to_filter(p);
     WireCountParams {
-        by: by
+        by: p
+            .by
             .as_deref()
             .map(|token| token.split(',').map(str::to_string).collect())
             .unwrap_or_default(),
-        filter,
+        filter: p.to_filter(),
         dynamic_keys: Vec::new(),
     }
 }
