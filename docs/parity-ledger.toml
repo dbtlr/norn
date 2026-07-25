@@ -7,7 +7,7 @@
 # Format:
 #
 # [[entry]]
-# id = "PD-001"                      # stable, never reused
+# id = "PD-471"                      # the allocating task's number
 # surface = "find --format json"     # human-readable surface name
 # cases = ["find-json-basic"]        # explicit case ids the entry covers
 # old = "what the oracle does"
@@ -15,6 +15,21 @@
 # reason = "decided-better"          # or "discovered-inconsistency"
 # decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 # observed = { "find-json-basic" = 2 }   # divergence extent, in regions
+#
+# ID ALLOCATION — take the number of the TASK you are adding the entry under.
+# Task NRN-471 allocates `PD-471`; a task adding a second entry suffixes a
+# letter (`PD-471b`, `PD-471c`); if the number is somehow already taken, take
+# the next free suffix. Append new entries at the END of the file.
+#
+# Task numbers are already unique, so every branch allocates independently and
+# two branches in flight can never contend for one id. Nothing is renumbered
+# at rebase — a merge conflict between two branches that both appended is
+# resolved by keeping BOTH blocks. Ids are permanent: they are cited from
+# tests, other entries, the CHANGELOG and PR history, so an id is never reused
+# and never renumbered. `PD-101`..`PD-151` predate this protocol and were
+# allocated as one contiguous run; that block is closed and frozen at the head
+# of the file (`crates/norn-parity/tests/ledger.rs` pins it, and pins the
+# `PD-<digits>[a-z]` shape for every id).
 #
 # `observed` is what keeps `old`/`new` honest. A case passes by CITATION, and
 # a citation says nothing about WHAT differs — so without this an entry
@@ -41,8 +56,9 @@
 #      means the divergence changed, not that a number needs bumping.
 #
 # Runner-side rules (crates/norn-parity/src/ledger.rs), all enforced:
-# - Unknown `reason`, a missing required field, a duplicate entry id, or an
-#   entry citing an unknown case id is a load error (runner exit 2).
+# - Unknown `reason`, a missing required field, a duplicate entry id (so a
+#   collided id fails loudly rather than shadowing), or an entry citing an
+#   unknown case id is a load error (runner exit 2).
 # - An `observed` key the entry does not cite is a load error; a declared
 #   extent that disagrees with the observed one fails the run (exit 1),
 #   exactly as a stale entry does.
