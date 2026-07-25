@@ -180,9 +180,13 @@ pub enum Command {
         about = "Update one document — schema-aware frontmatter mutation + wholesale body replacement"
     )]
     Set(SetArgs),
+    // Two ways in (`--edits-json` or the six sugar flags) share one
+    // transactional contract that no single flag can state, so it earns
+    // `long_about` (rendered on `--help`, not `-h`).
     #[command(
         disable_help_flag = true,
-        about = "Edit one document's body — atomic content-anchored partial edits"
+        about = "Edit one document's body — atomic content-anchored partial edits",
+        long_about = "Edit one document's body with atomic, content-anchored partial edits.\n\nThe ops are an ordered array applied all-or-nothing, each against the result of the prior. Any anchor that fails to match refuses the whole batch (exit 2) and writes nothing — a `str_replace` whose `old` is missing, or matches more than once without `--replace-all`; a heading that names two sections, which refuses as ambiguous rather than guessing. Replace a whole body, or change frontmatter, with `norn set` instead."
     )]
     Edit(EditArgs),
     #[command(

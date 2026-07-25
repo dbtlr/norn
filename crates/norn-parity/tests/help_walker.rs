@@ -22,12 +22,12 @@
 //! Scope note (present-tense): the walker asserts the GLOBAL OPTIONS reshape,
 //! the deleted service-local `--vault <PATH>` flag (PD-134), the rewrite-only
 //! `vault` registry namespace (PD-101), and the description-prose disposition
-//! (PD-152) — the divergences the ledger records. It does NOT assert byte-parity
+//! (PD-461) — the divergences the ledger records. It does NOT assert byte-parity
 //! of the rest of each help page; the byte-exact `help-*` parity cases in
 //! `cases.rs` remain the precise per-surface pins.
 //!
 //! The prose gate is the one place a hand-written path list appears, and it is
-//! the ledger's list, not a coverage list: PD-152 decides which verbs earn
+//! the ledger's list, not a coverage list: PD-461 decides which verbs earn
 //! multi-paragraph description prose and which drop the prose the oracle prints.
 //! Enumeration still does the finding — a verb that gains prose, loses prose, or
 //! arrives with oracle prose nobody has judged falls outside both lists and
@@ -349,13 +349,18 @@ fn help_walker_service_local_vault_flag_is_deleted() {
 /// The paths whose `--help` earns multi-paragraph description prose: the reader
 /// makes a materially better decision with the paragraph than without it, and
 /// the page's flags, EXAMPLES, and conceptual sections do not already say it
-/// (PD-152). Any other path printing prose is an unjudged addition.
-const PROSE_KEPT: &[&str] = &["get", "self-update", "validate"];
+/// (PD-461). Any other path printing prose is an unjudged addition.
+const PROSE_KEPT: &[&str] = &["edit", "get", "self-update", "validate"];
 
 /// The paths where the oracle prints description prose and the rewrite does not
-/// (PD-152). Four groups, all judged: leaked source comments (`count`,
-/// `describe`), restatements of the page's own flag block, prose a richer
-/// section already covers, and prose describing a model ADR 0017 replaced.
+/// (PD-461). Five groups, all judged: leaked source comments (`count`,
+/// `describe`); prose the page itself already states, via its flag block, its
+/// summary, or a report it emits anyway (`set`, `move`, `delete`, `new`,
+/// `cache index`, `completions install`, `rewrite-wikilink`); prose a richer
+/// section already covers (`apply`, `repair`); a routing hint the sibling
+/// summaries already give (`completions init`); and prose no longer true of
+/// this tree, on `not_yet_ported` verbs whose pages the porting task writes
+/// fresh (`serve`, `service`, `cache`, `cache clear`, `cache prune`).
 const PROSE_DROPPED: &[&str] = &[
     "apply",
     "cache",
@@ -367,7 +372,6 @@ const PROSE_DROPPED: &[&str] = &[
     "count",
     "delete",
     "describe",
-    "edit",
     "move",
     "new",
     "repair",
@@ -377,20 +381,57 @@ const PROSE_DROPPED: &[&str] = &[
     "set",
 ];
 
-/// Substrings that only ever appear in prose lifted out of the source tree —
-/// module paths, build plumbing, and derive-macro names a help reader has no
-/// use for. The rewrite's shared-args structs (`GlobalArgs`, `MutationModeArgs`,
-/// `FilterArgs`) carry plain comments precisely so clap cannot adopt one as a
-/// flattening command's `long_about`, so none of these may reach any page.
-const SOURCE_LEAK_MARKERS: &[&str] = &["cli.rs", "build.rs", "clap::Args", "intra-crate"];
+/// The first structural sign of source-tree text in `page`, with surrounding
+/// context, or `None` when the page reads as help. Three shapes, none of which
+/// a help reader ever has use for and none of which the renderer emits: a Rust
+/// source-file token (`foo.rs`), rustdoc intra-doc-link syntax (`` [` ``), and
+/// an attribute (`#[`). The rewrite's flattened arg groups (`GlobalArgs`,
+/// `MutationModeArgs`, `FilterArgs`, `SortPaginateArgs`) carry plain comments
+/// precisely so clap cannot adopt one as a hosting command's description, so
+/// nothing of this shape may reach any page.
+fn source_leak(page: &str) -> Option<String> {
+    let bytes = page.as_bytes();
+    let context = |at: usize| {
+        let start = page[..at]
+            .char_indices()
+            .rev()
+            .nth(60)
+            .map_or(0, |(i, _)| i);
+        let end = page[at..]
+            .char_indices()
+            .nth(60)
+            .map_or(page.len(), |(i, _)| at + i);
+        page[start..end].replace('\n', " | ")
+    };
+    for (at, _) in page.match_indices(".rs") {
+        // `<ident>.rs` at a word boundary — a bare ".rs" inside a longer token
+        // (or a sentence-ending "…rs.") is not a file name.
+        let preceded = at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+        let followed = bytes
+            .get(at + 3)
+            .is_none_or(|c| !c.is_ascii_alphanumeric() && *c != b'_');
+        if preceded && followed {
+            return Some(format!("Rust source file token: ...{}...", context(at)));
+        }
+    }
+    if let Some(at) = page.find("[`") {
+        return Some(format!("rustdoc intra-doc link: ...{}...", context(at)));
+    }
+    if let Some(at) = page.find("#[") {
+        return Some(format!("Rust attribute: ...{}...", context(at)));
+    }
+    None
+}
 
-/// The description-prose disposition (PD-152), gated across the enumerated tree:
+/// The description-prose disposition (PD-461), gated across the enumerated tree:
 /// the rewrite prints prose exactly on `PROSE_KEPT`, and every page where the
 /// oracle prints prose the rewrite does not is a judged `PROSE_DROPPED` path. A
 /// verb outside both lists fails, which is the signal that a fresh disposition
-/// is owed. The leak guard rides along on the same enumeration: no rewrite page
-/// may carry source-internal text, and `count` / `describe` pin the oracle
-/// behavior that guard exists to prevent, so it can never pass vacuously.
+/// is owed. The leak guard rides along on the same enumeration and covers the
+/// WHOLE rendered page (not just its description region), since a flattened
+/// struct's doc comment can also surface as a flag or section description;
+/// `count` / `describe` pin the oracle behavior that guard exists to prevent,
+/// so it can never pass vacuously.
 #[test]
 fn help_walker_description_prose_matches_the_ledgered_disposition() {
     if common::oracle_missing("help_walker") {
@@ -407,26 +448,24 @@ fn help_walker_description_prose_matches_the_ledgered_disposition() {
     let mut dropped_seen: BTreeSet<String> = BTreeSet::new();
     for path in &paths {
         let name = pretty(path);
-        let rewrite_prose = description_prose(&String::from_utf8_lossy(
-            &run_help(&rewrite, path, &cwd).stdout,
-        ));
+        let rewrite_page =
+            String::from_utf8_lossy(&run_help(&rewrite, path, &cwd).stdout).to_string();
+        let rewrite_prose = description_prose(&rewrite_page);
         let oracle_prose = description_prose(&String::from_utf8_lossy(
             &run_help(&oracle, path, &cwd).stdout,
         ));
 
-        for marker in SOURCE_LEAK_MARKERS {
-            assert!(
-                !rewrite_prose.contains(marker),
-                "rewrite `{name} --help` prints source-internal text (`{marker}`) as its \
-                 description — a shared-args struct's doc comment reached a help page \
-                 (PD-152):\n{rewrite_prose}"
+        if let Some(leak) = source_leak(&rewrite_page) {
+            panic!(
+                "rewrite `{name} --help` prints source-tree text somewhere on the page — a \
+                 struct's doc comment reached help (PD-461): {leak}"
             );
         }
 
         if !rewrite_prose.is_empty() {
             assert!(
                 PROSE_KEPT.contains(&name.as_str()),
-                "rewrite `{name} --help` prints description prose but no PD-152 disposition \
+                "rewrite `{name} --help` prints description prose but no PD-461 disposition \
                  keeps it there — either the prose earns its place (add the path to PROSE_KEPT \
                  and say so in the ledger) or it should not be on the page:\n{rewrite_prose}"
             );
@@ -437,7 +476,7 @@ fn help_walker_description_prose_matches_the_ledgered_disposition() {
         if !oracle_prose.is_empty() {
             assert!(
                 PROSE_DROPPED.contains(&name.as_str()),
-                "oracle `{name} --help` prints description prose the rewrite drops, and PD-152 \
+                "oracle `{name} --help` prints description prose the rewrite drops, and PD-461 \
                  does not judge this path — decide whether the prose is earned, record it in the \
                  ledger, then list the path here:\n{oracle_prose}"
             );
@@ -448,26 +487,26 @@ fn help_walker_description_prose_matches_the_ledgered_disposition() {
     let kept: BTreeSet<String> = PROSE_KEPT.iter().map(|s| (*s).to_string()).collect();
     assert_eq!(
         kept_seen, kept,
-        "every PD-152 kept path must actually print its prose — a listed path that prints none \
+        "every PD-461 kept path must actually print its prose — a listed path that prints none \
          has silently lost it"
     );
     let dropped: BTreeSet<String> = PROSE_DROPPED.iter().map(|s| (*s).to_string()).collect();
     assert_eq!(
         dropped_seen, dropped,
-        "every PD-152 dropped path must still print prose on the oracle — a listed path the \
+        "every PD-461 dropped path must still print prose on the oracle — a listed path the \
          oracle no longer describes makes the entry stale"
     );
 
     // The leak the guard above exists to keep out, pinned on the oracle so a
     // rewrite that stopped flattening shared args could not silently retire it.
     for verb in ["count", "describe"] {
-        let leaked = description_prose(&String::from_utf8_lossy(
-            &run_help(&oracle, &[verb.to_string()], &cwd).stdout,
-        ));
+        let page = String::from_utf8_lossy(&run_help(&oracle, &[verb.to_string()], &cwd).stdout)
+            .to_string();
         assert!(
-            SOURCE_LEAK_MARKERS.iter().any(|m| leaked.contains(m)),
+            source_leak(&page).is_some(),
             "expected the oracle `{verb} --help` to print the shared filter struct's source \
-             comment as its description (the PD-152 baseline):\n{leaked}"
+             comment as its description (the PD-461 baseline):\n{}",
+            description_prose(&page)
         );
     }
 }

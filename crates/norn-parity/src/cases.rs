@@ -269,7 +269,7 @@ const HELP_CASES: &[Case] = &[
         plan: None,
     },
     // `count --help` is the pinned witness for the help-prose disposition
-    // (PD-152): the oracle prints the internal doc comment of the shared
+    // (PD-461): the oracle prints the internal doc comment of the shared
     // `FilterArgs` struct as `count`'s description prose, the rewrite prints
     // the one-line summary and nothing else. `count` is the cheapest ported
     // surface carrying that leak, so the divergence stays observable on a

@@ -10,6 +10,14 @@
 //! `$PAGER`; piped/non-TTY output and a short render write straight to stdout,
 //! unchanged from before the pager existed.
 //!
+//! Description prose (a verb's `long_about`, rendered under the one-line
+//! summary on `--help` only) is EARNED, not default: a verb gets it when its
+//! operating model spans several modes that no single flag description can
+//! state, and never to restate the flag block, an EXAMPLES block, or a
+//! conceptual section. `crates/norn-parity/tests/help_walker.rs` gates the
+//! current disposition across the whole clap tree, so adding or removing prose
+//! fails there until the divergence ledger records the decision.
+//!
 //! Deliberate simplifications:
 //! - No live-examples materialization: there is no query core yet, and `--help`
 //!   opens an empty cache and would emit none anyway (see `model.rs`).
