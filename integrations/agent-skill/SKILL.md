@@ -37,10 +37,10 @@ When in doubt, pass `-C <path>`.
 Once the vault root is picked, orient before querying or writing anything — don't guess at folder layout, rule names, or the frontmatter schema.
 
 ```bash
-norn describe --format json    # the orient-first move
+norn describe --schema --format json    # the orient-first move
 ```
 
-`describe` returns `folders` (every directory currently holding a document), `path_rules` (each rule's `match.path` glob plus the `frontmatter_defaults` a document there inherits), `creatable_rules` (rules usable with `norn new --as <rule>`: `name`, `target` template, `required_vars`, `frontmatter_defaults`, optional `body` scaffold), `inbox` (the `inbox.path` fallback target for `norn new --title "…"` with no path/`--as`, or `null`), and `schema` (the full `validate` config verbatim — every rule's `required_frontmatter`, `field_types`, `allowed_values`). Add `--data`/`--stats` for a contents-summary (`total`, per-field value distributions, date bounds) over the same filter surface `find`/`count` share — `--by field1,field2` names exact fields (bypassing the auto identity-skip that drops near-unique fields like `title`), and `--limit N` caps shown value-buckets per field (default 20, `0` = no cap). Read-only; never writes.
+`describe --schema` returns `folders` (every directory currently holding a document), `path_rules` (each rule's `match.path` glob plus the `frontmatter_defaults` a document there inherits), `creatable_rules` (rules usable with `norn new --as <rule>`: `name`, `target` template, `required_vars`, `frontmatter_defaults`, optional `body` scaffold), `inbox` (the `inbox.path` fallback target for `norn new --title "…"` with no path/`--as`, or `null`), and `schema` (the full `validate` config verbatim — every rule's `required_frontmatter`, `field_types`, `allowed_values`). Without `--schema`, `describe` reports those same structure fields as counts instead — the cheap "how big is this vault's config" glance. Add `--data`/`--stats` for a contents-summary (`total`, per-field value distributions, date bounds) over the same filter surface `find`/`count` share — `--by field1,field2` names exact fields (bypassing the auto identity-skip that drops near-unique fields like `title`), and `--limit N` caps shown value-buckets per field (default 20, `0` = no cap). Read-only; never writes.
 
 No `.norn/config.yaml` yet? `norn init` scaffolds one with commented example rules (refuses to overwrite an existing config unless `--force`). Once it exists:
 
@@ -51,7 +51,7 @@ norn config edit       # open it in $VISUAL/$EDITOR (auto-validates after)
 norn config migrate    # upgrade an older config to the current schema version
 ```
 
-`config show`/`validate` are read-only; `config edit`/`migrate` write to `.norn/config.yaml` itself (not vault documents). `describe` reads that config back as `path_rules`/`creatable_rules`/`inbox`/`schema` — after editing rules, re-run `describe` to confirm what an agent now sees.
+`config show`/`validate` are read-only; `config edit`/`migrate` write to `.norn/config.yaml` itself (not vault documents). `describe --schema` reads that config back as `path_rules`/`creatable_rules`/`inbox`/`schema` — after editing rules, re-run it to confirm what an agent now sees.
 
 ## Query and read — the everyday surface
 

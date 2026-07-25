@@ -1212,3 +1212,26 @@ new = "aliases do not participate in resolution (NRN-455), so `notes/gamma.md`'s
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 observed = { "read-find-all-cols-json-zoo" = { stdout = 8 } }
+
+# NRN-470 — the NRN-416 ruling applied to `describe`: `--format json` returns the
+# JSON representation of whatever the invocation prints WITHOUT it. `describe`
+# was the standing violator. Its records block is a structure-COUNTS summary
+# (folders / path rules / creatable / inbox) plus the `--data` tally, while
+# `--format json` serialized the whole declared config — every folder, every path
+# rule with its `frontmatter_defaults`, every creatable rule, and the entire
+# validate schema — so `describe --by type --format json` buried the requested
+# tally inside a whole-vault schema payload. The json slot is now that records
+# block's projection, and the declared config moves behind the explicit
+# `--schema` flag, which renders the SAME content in both slots (records as
+# sectioned YAML, json as the full report). `--schema` is where the dump lives
+# until the config-data verb `config show` is ported. See
+# `crates/norn-cli/src/display/render/describe.rs`.
+[[entry]]
+id = "PD-152"
+surface = "describe --format json (records-summary projection vs whole-config dump)"
+cases = ["describe-json-zoo"]
+old = "`describe --format json` serializes the whole describe report regardless of what a bare `describe` prints: `folders` as the full directory array, `path_rules` / `creatable_rules` as full objects carrying their `frontmatter_defaults`, `inbox`, and `schema` as the entire validate config"
+new = "`describe --format json` is the JSON projection of the records block — `folders` / `path_rules` / `creatable_rules` as integer COUNTS, `inbox` (`null` when unconfigured), and `data` only when a contents-summary was requested (`--data`/`--stats`/`--by`). The full declared config is reachable as `describe --schema`, whose `--format json` emits exactly the payload the oracle's bare `--format json` emitted, and whose records rendering prints the same sections human-legibly"
+reason = "decided-better"
+decision = "docs/decisions/0021-verbs-return-one-layer-renders.md"
+observed = {}

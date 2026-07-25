@@ -312,6 +312,12 @@ pub enum CountFormat {
 
 #[derive(Debug, Args)]
 pub struct DescribeArgs {
+    /// Expand the structure section from counts to the full declared config:
+    /// every folder, every path/creatable rule with its defaults, and the whole
+    /// frontmatter schema.
+    #[arg(long, help_heading = "Describe options")]
+    pub schema: bool,
+
     /// Include the vault contents-summary (totals, field distributions, date bounds).
     #[arg(long, help_heading = "Describe options")]
     pub data: bool,

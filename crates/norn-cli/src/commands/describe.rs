@@ -4,8 +4,10 @@
 //! The command maps its clap `Args` into [`DescribeParams`], summons the owner
 //! (which serves the structure from its retained config and the data summary
 //! from the warm cache), and returns the [`DescribeReport`] as an [`Output`]
-//! (NRN-370). The display layer renders it: `text`
-//! (default) is the count/summary block; `json` is the whole struct serialized.
+//! (NRN-370). The display layer renders it, and `json` carries exactly the
+//! content `records` carries: bare `describe` is the structure COUNTS plus the
+//! contents-summary, `--schema` expands the structure to the full declared
+//! config (folders, rules with their defaults, the frontmatter schema).
 
 use norn_wire::DescribeParams;
 
@@ -45,6 +47,7 @@ pub fn run(args: &DescribeArgs, global: &GlobalArgs) -> Result<Output, Diagnosti
     Ok(Output::Describe(DescribeView {
         report,
         by: args.by.clone(),
+        schema: args.schema,
         format: FormatChoice {
             explicit: Some(Format::from(args.format.unwrap_or(DescribeFormat::Records))),
             spec: FormatSpec {
