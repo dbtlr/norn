@@ -210,9 +210,12 @@ impl EventSink {
         };
         if let Some(w) = self.writer.as_mut() {
             let line = ev.to_json(&self.service_version).to_string();
-            // Two owners on DIFFERENT builds (a mid-upgrade window) can append to
-            // the same daily file concurrently; a line longer than PIPE_BUF is not
-            // guaranteed atomic and the two writers' bytes can interleave into one
+            // Two owners over one registered vault can append to the same daily
+            // file concurrently — they differ by build fingerprint (a mid-upgrade
+            // window) or by config identity (the window between a config edit and
+            // the previous owner's idle reap), since an owner is addressed by
+            // (root, build, config identity). A line longer than PIPE_BUF is not
+            // guaranteed atomic, so the two writers' bytes can interleave into one
             // torn line — the reader (`telemetry::read`) skips any line it cannot
             // parse rather than failing the whole read. Tracked: NRN-464.
             if writeln!(w, "{line}").and_then(|_| w.flush()).is_err() {
