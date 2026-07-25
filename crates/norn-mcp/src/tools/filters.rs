@@ -211,6 +211,27 @@ mod tests {
     }
 
     #[test]
+    fn every_composing_tool_still_denies_unknown_params() {
+        // `deny_unknown_fields` is a per-invocation obligation, not a property
+        // of the macro: the strictness attribute rides each tool's own struct
+        // attrs, so a new invocation that forgets it would silently accept a
+        // client typo and run an unintended query.
+        macro_rules! assert_denies_unknown {
+            ($($t:ty),+ $(,)?) => {$({
+                let err = serde_json::from_value::<$t>(serde_json::json!({"bogus": 1}))
+                    .unwrap_err();
+                let message = err.to_string();
+                assert!(
+                    message.contains("unknown field") && message.contains("bogus"),
+                    "{} accepted an unknown param, got: {message}",
+                    stringify!($t)
+                );
+            })+};
+        }
+        assert_denies_unknown!(FindParams, CountParams, DescribeParams);
+    }
+
+    #[test]
     fn the_filter_surface_is_exactly_these_sixteen_predicates() {
         // Adding or removing a predicate moves the published contract of three
         // tools at once, so it is a deliberate act that updates this list.

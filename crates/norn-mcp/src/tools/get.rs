@@ -29,7 +29,9 @@ pub struct GetParams {
     /// Which payload to return, in the same `--format` vocabulary `norn get`
     /// accepts: `records` (the default) returns document records; `markdown`
     /// returns one exact on-disk document and refuses unless exactly one
-    /// document is selected.
+    /// document is selected. The CLI's `json` / `jsonl` / `paths` have no MCP
+    /// spelling — they are renderings of the `records` payload, which
+    /// `structuredContent` already delivers as JSON.
     #[serde(default)]
     pub format: GetFormat,
 
@@ -419,10 +421,12 @@ mod tests {
 
     #[test]
     fn a_format_value_outside_the_cli_vocabulary_is_rejected() {
-        // `structured` was the pre-convergence spelling of `records`, and the
-        // CLI's `json` / `jsonl` / `paths` are renderings of the records
-        // payload with no MCP spelling — all four fail loudly, naming the two
-        // accepted values, rather than silently selecting a payload.
+        // `structured` is not an accepted value; neither are `json` / `jsonl` /
+        // `paths`, which name renderings rather than payloads. Each fails
+        // loudly instead of silently selecting a payload, and the failure
+        // TEACHES the accepted set — a client that guessed wrong recovers from
+        // the message alone, so the enumeration is asserted, not just the
+        // rejection.
         for value in ["structured", "json", "jsonl", "paths"] {
             let err =
                 serde_json::from_value::<GetParams>(json!({"targets": ["alpha"], "format": value}))
@@ -431,6 +435,10 @@ mod tests {
             assert!(
                 message.contains("unknown variant") && message.contains(value),
                 "got: {message}"
+            );
+            assert!(
+                message.contains("expected `records` or `markdown`"),
+                "the rejection must enumerate the accepted values, got: {message}"
             );
         }
     }

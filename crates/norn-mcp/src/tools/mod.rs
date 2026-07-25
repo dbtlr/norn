@@ -2,15 +2,17 @@
 //!
 //! Each module owns two things: the tool's MCP-facing **param struct** (a
 //! `schemars::JsonSchema` deriver whose generated schema IS the `tools/list`
-//! `inputSchema` — the published MCP contract) and, where the MCP
-//! output envelope differs from the verb's raw
-//! wire `Report`, the **output struct** plus the pure `to_wire` / `envelope`
-//! mappers. The find-filter predicates the three query tools share are the one
-//! exception to per-module ownership: they are declared once in [`filters`] and
-//! generated into each param struct. The `#[tool]` methods themselves live on `McpServer` in `server.rs`
-//! (rmcp requires them on the router impl block); each is a thin wrapper that
-//! builds the wire `Params` here, runs the routed owner request, and maps the
-//! `Report` back through here.
+//! `inputSchema` — the published MCP contract) and, where the MCP output
+//! envelope differs from the verb's raw wire `Report`, the **output struct**
+//! plus the pure `to_wire` / `envelope` mappers. The `#[tool]` methods
+//! themselves live on `McpServer` in `server.rs` (rmcp requires them on the
+//! router impl block); each is a thin wrapper that builds the wire `Params`
+//! here, runs the routed owner request, and maps the `Report` back through
+//! here.
+//!
+//! The find-filter predicates the three query tools share are the one exception
+//! to per-module ownership: they are declared once in [`filters`] and generated
+//! into each param struct.
 //!
 //! # Flat reads, wrapped mutations (deliberate, standing contract)
 //!
@@ -35,7 +37,7 @@ pub mod count;
 pub mod delete;
 pub mod describe;
 pub mod edit;
-pub mod filters;
+pub(crate) mod filters;
 pub mod find;
 pub mod get;
 pub mod move_doc;

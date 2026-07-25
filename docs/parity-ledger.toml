@@ -1013,18 +1013,39 @@ observed = { "read-find-col-truncated-page-suppressed-zoo" = { stderr = 1 }, "re
 # declare). A SECOND structural cause joined it under NRN-469: `get`'s `format`
 # enum publishes the CLI's `--format` value names, so its accepted values are
 # `records` / `markdown` where the oracle publishes `structured` / `markdown`
-# (the call-surface face of that rename is PD-469). The rest of the `tools/list`
-# delta is incidental prose (tool descriptions, the filter-predicate
-# descriptions the three read tools now publish from one definition, the
-# typed-note schemas PD-133 already covers on the call surface). See
-# `crates/norn-mcp/src/tools/get.rs` (the `starts_at` default and the `format`
-# vocabulary) and `crates/norn-mcp/src/server.rs` (the served catalog).
+# (the call-surface face of that rename is PD-469).
+#
+# The rest of the delta is NOT prose, and calling it that was wrong: a
+# descriptions-stripped structural diff of the two catalogs finds 38
+# input-schema differences. Fourteen are one cause — every rewrite param struct
+# declares `deny_unknown_fields`, so all 14 tools publish
+# `additionalProperties: false` where the oracle publishes none (a client typo
+# is refused rather than silently ignored). The other 24 land on six tools and
+# are enumerated in `new` below, because a case resolves to exactly one entry
+# and this is the only description this case will ever carry.
+#
+# Those 24 are MCP-SURFACE-ONLY shapes, NOT the MCP faces of CLI-side renames:
+# the corresponding CLI flags are byte-identical on both binaries
+# (`rewrite-wikilink <OLD> <NEW>`, `new --var KEY=VALUE`, `repair
+# --confidence`, `audit --status` / `--limit`, `edit --edits-json`, `find --col
+# COL1,COL2,...`). There is therefore no CLI-side divergence behind them and no
+# CLI-side entry to extend — the oracle's MCP params did not mirror the
+# oracle's own CLI, and the rewrite's do. Only the two `starts_at` items have a
+# CLI-side ancestor (PD-105). Enumerating them here declares them; whether any
+# individually warrants a reasoned decision of its own is open and was NOT
+# settled by the task that wrote this note.
+#
+# The genuinely prose-only remainder is the tool descriptions, the
+# filter-predicate descriptions the three read tools now publish from one
+# definition, and the typed-note schemas PD-133 already covers on the call
+# surface. See `crates/norn-mcp/src/tools/get.rs` (the `starts_at` default and
+# the `format` vocabulary) and `crates/norn-mcp/src/server.rs` (the catalog).
 [[entry]]
 id = "PD-141"
-surface = "mcp tools/list (published inputSchema — zero-indexed get.starts_at, get.format vocabulary)"
+surface = "mcp tools/list (published inputSchema — param strictness, get.starts_at / get.format, and six tools' param shapes)"
 cases = ["mcp-initialize-tools-list-zoo"]
-old = "the full `tools/list` catalog is 14 tools whose `get` `inputSchema` documents `starts_at` as a 1-indexed default (`default: 1`), matching the oracle's paging, and whose `format` enum accepts `structured` / `markdown`"
-new = "the catalog is the same 14 tools, but `get`'s published `inputSchema` documents `starts_at` as a zero-indexed default (`default: 0`, NRN-332) — the MCP-surface face of PD-105 — and its `format` enum accepts `records` / `markdown`, the CLI's own `--format` value names (NRN-469); the remaining catalog delta is incidental prose (descriptions / typed-note schemas)"
+old = "the full `tools/list` catalog is 14 tools, none of which constrains `additionalProperties`, so an unknown param key is silently ignored. `get`'s `inputSchema` documents `starts_at` as a 1-indexed default (`default: 1`), matching the oracle's paging, and its `format` enum accepts `structured` / `markdown`. Six other tools publish param shapes that do not mirror the oracle's own CLI flags: `find.col` is a string ARRAY (`default: []`) where `--col` takes one comma-separated token, and `find.starts_at` is `integer|null` (`default: null`); `new` takes `vars` as a KEY->VALUE OBJECT (`default: {}`) where `--var` is a repeatable `KEY=VALUE` token; `rewrite_wikilink` names its two required params `from` / `to` where the CLI positionals are `<OLD>` / `<NEW>`; `repair` takes `confidence` as a nullable `ConfidenceBand` enum `$def` and leaves its eight filter arrays with no declared default; `audit` takes `status` as an `AuditStatusFilter` enum `$def` (`applied` / `skipped` / `failed`) and `limit` as `integer|null` (`default: null`); `edit` types `edits` as an array of the `EditOp` union `$def` and lists it as REQUIRED alongside `target`"
+new = "the catalog is the same 14 tools, but every one publishes `additionalProperties: false` — each param struct declares `deny_unknown_fields`, so an unknown key is refused instead of ignored. `get`'s `inputSchema` documents `starts_at` as a zero-indexed default (`default: 0`, NRN-332) — the MCP-surface face of PD-105 — and its `format` enum accepts `records` / `markdown`, the CLI's own `--format` value names (NRN-469; the call-surface face is PD-469). The six other tools' params now mirror the CLI flags they stand for, which is an MCP-surface-only change on each (the CLI flags themselves are identical on both binaries, so no CLI-side entry covers them): `find.col` is `string|null` (`default: null`), one comma-separated token like `--col`, and `find.starts_at` is a plain `integer` (`default: 0`, the same PD-105 redesign); `new` takes `var` as an ARRAY of `KEY=VALUE` tokens (`default: []`), matching repeatable `--var`; `rewrite_wikilink`'s required params are `old` / `new`, matching the `<OLD>` / `<NEW>` positionals; `repair` takes `confidence_high` as a plain bool (`default: false`) in place of the enum `$def`, and its eight filter arrays declare `default: []`; `audit` takes `status` as `string|null` (`default: null`) in place of the enum `$def`, and `limit` as a plain `integer` (`default: 20`, the CLI's own `--limit` default); `edit` leaves `edits` untyped (`default: null`) and requires only `target`. The remaining delta is prose — tool descriptions, the filter-predicate descriptions the three read tools publish from one definition, and the typed-note schemas PD-133 covers on the call surface"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
 observed = { "mcp-initialize-tools-list-zoo" = { mcp = 1 } }
@@ -1395,7 +1416,7 @@ observed = { "help-count" = { stdout = 4 } }
 id = "PD-469"
 surface = "mcp tools/call vault.get (format param vocabulary)"
 cases = ["mcp-tools-call-get-format-records-zoo"]
-old = "`format: \"records\"` is an unknown variant: the call fails deserialization with `isError: true` and a text-only content of `failed to deserialize parameters: unknown variant `records`, expected `structured` or `markdown``, so the document-record payload is reachable only under the `structured` spelling"
+old = "`format: \"records\"` is an unknown variant: the call fails deserialization with `isError: true` and a text-only content reading ``failed to deserialize parameters: unknown variant `records`, expected `structured` or `markdown` ``, so the document-record payload is reachable only under the `structured` spelling"
 new = "`format: \"records\"` is the document-record payload's name, matching `norn get --format records`, and returns the ordinary `{records, section_failures, notes}` envelope with `isError: false`; `structured` is gone and now fails as the unknown variant, naming `records` / `markdown` as the accepted values"
 reason = "decided-better"
 decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"
