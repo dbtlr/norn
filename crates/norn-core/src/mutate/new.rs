@@ -255,13 +255,16 @@ pub fn execute(
 /// finding for it that `build_create`'s hand-computed warnings
 /// (missing-required/unknown-field/wikilink/stem-collision) don't already cover.
 ///
-/// Scope is the created path, not the vault: the warm pre-create graph
-/// (`baseline`) is overlaid with just the new file re-read from disk (the write
-/// already landed under `apply_migration_plan`; the owner's cache increment for
-/// `touched_paths` commits later). Link resolution runs across the composite so
-/// the new document's own links resolve against the whole vault, but only the one
-/// changed path is read from disk. Findings are then filtered to the created doc.
-/// Alias checks are skipped (`alias_field: None`) for this pass.
+/// Scope is the created path, not the vault, on both axes. Disk: the warm
+/// pre-create graph (`baseline`) is overlaid with just the new file re-read from
+/// disk (the write already landed under `apply_migration_plan`; the owner's cache
+/// increment for `touched_paths` commits later). Rules: the engine's
+/// document-scoped entry evaluates them against the created document alone, so
+/// per-create CPU tracks the rule count, not the vault's document count. What
+/// stays whole-graph is resolution — the overlay re-resolves links across the
+/// composite, and the reference-target types are read from the full index — since
+/// a link's status and its target's `type` depend on documents the created one
+/// never mentions. Alias checks are skipped (`alias_field: None`) for this pass.
 ///
 /// Dedup: a `RequiredFrontmatterMissing` finding whose field is already covered
 /// by a synth-phase `missing-required-field` warning is dropped and every other
@@ -290,7 +293,12 @@ fn post_create_validate(
         &index_options,
     );
 
-    let findings = crate::standards::validate_with_compiled(&fresh_index, &cfg.validate, compiled);
+    let findings = crate::standards::validate_document_with_compiled(
+        &fresh_index,
+        &cfg.validate,
+        compiled,
+        Utf8Path::new(doc_path),
+    );
 
     let already_warned: BTreeSet<&str> = existing_warnings
         .iter()
@@ -310,7 +318,7 @@ fn post_create_validate(
         .collect();
 
     let mut extra = Vec::new();
-    for finding in findings.iter().filter(|f| f.path.as_str() == doc_path) {
+    for finding in &findings {
         if finding.code == "value-not-allowed"
             && finding
                 .field

@@ -16,6 +16,8 @@ pub mod delete;
 pub mod edit;
 pub mod move_doc;
 pub mod new;
+#[cfg(test)]
+mod new_scope_independence;
 pub mod rewrite_wikilink;
 pub mod set;
 

@@ -1,13 +1,18 @@
 //! The validate engine: run every configured check against a built graph.
 //!
-//! One blessed public entry — [`validate_with_compiled`] — walks the graph
-//! index once, applies the graph/link/frontmatter checks per document, and
-//! returns the flat [`Finding`] list. It takes a
-//! [`CompiledConfig`] so path patterns are matched pre-compiled (an uncompiled
-//! per-document re-parse of every rule glob is the accidental quadratic this
-//! path avoids). The `validate` / `validate_rule*`
+//! Two public entries share one per-document body ([`document_findings`]), so
+//! the whole-vault and single-document passes cannot drift:
+//! [`validate_with_compiled`] walks the graph index once and returns the flat
+//! [`Finding`] list for every document; [`validate_document_with_compiled`]
+//! returns exactly the sub-list for ONE path, evaluating rules against that
+//! document alone while still resolving reference targets against the whole
+//! index. Both take a [`CompiledConfig`] so path patterns are matched
+//! pre-compiled (an uncompiled per-document re-parse of every rule glob is the
+//! accidental quadratic this path avoids). The `validate` / `validate_rule*`
 //! convenience wrappers are a second, uncompiled way to reach the same job —
 //! retained here only as `#[cfg(test)]` helpers.
+
+use camino::Utf8Path;
 
 use crate::domain::{Document, GraphIndex};
 
@@ -16,8 +21,37 @@ use crate::standards::findings::Finding;
 use crate::standards::path_match::{effective_match_glob, PathPattern};
 use crate::standards::predicates::frontmatter_predicates_match;
 
-/// Validate using pre-compiled path patterns — the single engine entry point.
-/// Call after loading the config via [`parse_config_compiled`](crate::standards::parse_config_compiled)
+/// Target-type lookup for `field_references` checks: a validated document's
+/// `type` frontmatter, keyed by path. Ignored documents are deliberately absent
+/// — their frontmatter is outside the validation contract, so references to
+/// them are never judged.
+type ReferenceTypes<'a> = std::collections::BTreeMap<&'a Utf8Path, Option<&'a serde_json::Value>>;
+
+// Test-only, PER-THREAD tally of documents the engine ran its checks over. The
+// whole-vault pass evaluates one per non-ignored document; the scoped pass
+// evaluates exactly one. The post-create scope guard resets it, drives the
+// post-create validate pass, and reads the count to prove that pass's rule
+// evaluation tracks the created document, not the vault. Thread-local so the
+// parallel test runner's other validate runs never pollute the measurement.
+#[cfg(test)]
+thread_local! {
+    static DOCS_EVALUATED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Reset the current thread's document-evaluation tally (test-only).
+#[cfg(test)]
+pub(crate) fn docs_evaluated_reset() {
+    DOCS_EVALUATED.with(|count| count.set(0));
+}
+
+/// Read the current thread's document-evaluation tally (test-only).
+#[cfg(test)]
+pub(crate) fn docs_evaluated_count() -> usize {
+    DOCS_EVALUATED.with(|count| count.get())
+}
+
+/// Validate using pre-compiled path patterns — the whole-vault engine entry
+/// point. Call after loading the config via [`parse_config_compiled`](crate::standards::parse_config_compiled)
 /// (or [`compile_config`](crate::standards::compile_config)) so every rule glob
 /// is matched pre-compiled.
 pub fn validate_with_compiled(
@@ -27,92 +61,188 @@ pub fn validate_with_compiled(
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
 
-    // Target-type lookup for `field_references` checks: each validated
-    // document's `type` frontmatter, keyed by path. Built once per run, and
-    // only when some rule declares the constraint. Ignored documents are
-    // deliberately absent — their frontmatter is outside the validation
-    // contract, so references to them are never judged.
-    let needs_reference_types = config
-        .rules
-        .iter()
-        .any(|rule| !rule.field_references.is_empty());
-    let type_by_path: std::collections::BTreeMap<&camino::Utf8Path, Option<&serde_json::Value>> =
-        if needs_reference_types {
-            index
-                .documents
-                .iter()
-                .filter(|doc| !document_ignored_compiled(doc, compiled, &config.ignore))
-                .map(|doc| {
-                    let ty = doc.frontmatter.as_ref().and_then(|fm| fm.get("type"));
-                    (doc.path.as_path(), ty)
-                })
-                .collect()
-        } else {
-            std::collections::BTreeMap::new()
-        };
+    // Built once per run, and only when some rule declares the constraint.
+    let type_by_path: ReferenceTypes<'_> = if needs_reference_types(config) {
+        index
+            .documents
+            .iter()
+            .filter(|doc| !document_ignored_compiled(doc, compiled, &config.ignore))
+            .map(|doc| {
+                let ty = doc.frontmatter.as_ref().and_then(|fm| fm.get("type"));
+                (doc.path.as_path(), ty)
+            })
+            .collect()
+    } else {
+        std::collections::BTreeMap::new()
+    };
 
     for document in &index.documents {
         if document_ignored_compiled(document, compiled, &config.ignore) {
             continue;
         }
-
-        findings.extend(crate::standards::checks::check_graph_diagnostics(document));
-
-        findings.extend(crate::standards::checks::check_required_frontmatter(
-            document,
-            &config.required_frontmatter,
-            None,
-        ));
-
-        for (rule, compiled_rule) in matching_rules_compiled(document, &config.rules, compiled) {
-            findings.extend(crate::standards::checks::check_required_frontmatter(
-                document,
-                &rule.required_frontmatter,
-                rule.name.as_deref(),
-            ));
-
-            findings.extend(crate::standards::checks::check_field_types(
-                document,
-                &rule.field_types,
-                rule.name.as_deref(),
-            ));
-
-            findings.extend(crate::standards::checks::check_forbidden_frontmatter(
-                document,
-                &rule.forbidden_frontmatter,
-                rule.name.as_deref(),
-            ));
-
-            if let Some(finding) = crate::standards::checks::check_allowed_paths_compiled(
-                document,
-                &compiled_rule.allowed_paths,
-                &rule.allowed_paths,
-                rule.name.as_deref(),
-            ) {
-                findings.push(finding);
-            }
-
-            findings.extend(crate::standards::checks::check_allowed_values(
-                document,
-                &rule.allowed_values,
-                rule.name.as_deref(),
-            ));
-
-            findings.extend(crate::standards::checks::check_field_references(
-                document,
-                &rule.field_references,
-                &type_by_path,
-                rule.name.as_deref(),
-            ));
-        }
-
-        findings.extend(crate::standards::checks::check_links(document));
-        if let Some(finding) = crate::standards::checks::check_portable_filename(document) {
-            findings.push(finding);
-        }
+        findings.extend(document_findings(document, config, compiled, &type_by_path));
     }
 
     findings
+}
+
+/// Validate ONE document: exactly the findings [`validate_with_compiled`]
+/// returns for `path`, in the same order, for the same index — without
+/// evaluating rules against any other document. Rule evaluation is
+/// document-local (every check is a pure function of one document plus the
+/// rule), so the only whole-graph input is the `field_references` target-type
+/// lookup, which is narrowed here to the document's own frontmatter link
+/// targets and still read from the full index. Link resolution itself is the
+/// caller's job: the passed index must already be resolved across the whole
+/// graph, since a link's resolved/unresolved/ambiguous status depends on every
+/// other document.
+///
+/// A path absent from the index, or one excluded by `validate.ignore`, yields
+/// no findings — the same answer the whole-vault pass gives for it.
+pub fn validate_document_with_compiled(
+    index: &GraphIndex,
+    config: &ValidateConfig,
+    compiled: &CompiledConfig,
+    path: &Utf8Path,
+) -> Vec<Finding> {
+    let Some(document) = lookup_document(index, path) else {
+        return Vec::new();
+    };
+    if document_ignored_compiled(document, compiled, &config.ignore) {
+        return Vec::new();
+    }
+    let type_by_path = reference_types_for_targets(index, document, config, compiled);
+    document_findings(document, config, compiled, &type_by_path)
+}
+
+/// Every check the engine runs for one document, in the order the flat finding
+/// list carries them. The single body behind both entry points.
+fn document_findings(
+    document: &Document,
+    config: &ValidateConfig,
+    compiled: &CompiledConfig,
+    type_by_path: &ReferenceTypes<'_>,
+) -> Vec<Finding> {
+    #[cfg(test)]
+    DOCS_EVALUATED.with(|count| count.set(count.get() + 1));
+
+    let mut findings = Vec::new();
+
+    findings.extend(crate::standards::checks::check_graph_diagnostics(document));
+
+    findings.extend(crate::standards::checks::check_required_frontmatter(
+        document,
+        &config.required_frontmatter,
+        None,
+    ));
+
+    for (rule, compiled_rule) in matching_rules_compiled(document, &config.rules, compiled) {
+        findings.extend(crate::standards::checks::check_required_frontmatter(
+            document,
+            &rule.required_frontmatter,
+            rule.name.as_deref(),
+        ));
+
+        findings.extend(crate::standards::checks::check_field_types(
+            document,
+            &rule.field_types,
+            rule.name.as_deref(),
+        ));
+
+        findings.extend(crate::standards::checks::check_forbidden_frontmatter(
+            document,
+            &rule.forbidden_frontmatter,
+            rule.name.as_deref(),
+        ));
+
+        if let Some(finding) = crate::standards::checks::check_allowed_paths_compiled(
+            document,
+            &compiled_rule.allowed_paths,
+            &rule.allowed_paths,
+            rule.name.as_deref(),
+        ) {
+            findings.push(finding);
+        }
+
+        findings.extend(crate::standards::checks::check_allowed_values(
+            document,
+            &rule.allowed_values,
+            rule.name.as_deref(),
+        ));
+
+        findings.extend(crate::standards::checks::check_field_references(
+            document,
+            &rule.field_references,
+            type_by_path,
+            rule.name.as_deref(),
+        ));
+    }
+
+    findings.extend(crate::standards::checks::check_links(document));
+    if let Some(finding) = crate::standards::checks::check_portable_filename(document) {
+        findings.push(finding);
+    }
+
+    findings
+}
+
+/// Does any rule declare a `field_references` constraint? Gates building the
+/// target-type lookup at all — the same condition on both entry points, so a
+/// config without the constraint pays nothing on either.
+fn needs_reference_types(config: &ValidateConfig) -> bool {
+    config
+        .rules
+        .iter()
+        .any(|rule| !rule.field_references.is_empty())
+}
+
+/// The [`ReferenceTypes`] entries one document's `field_references` checks can
+/// possibly consult: its own RESOLVED frontmatter link targets, read from the
+/// full index. A superset of what any single rule reads (each rule looks only
+/// at its own constrained fields) and a subset of the whole-vault map's
+/// entries, so every lookup answers identically — including the deliberate
+/// misses for ignored targets, which stay absent here too.
+fn reference_types_for_targets<'a>(
+    index: &'a GraphIndex,
+    document: &Document,
+    config: &ValidateConfig,
+    compiled: &CompiledConfig,
+) -> ReferenceTypes<'a> {
+    if !needs_reference_types(config) {
+        return std::collections::BTreeMap::new();
+    }
+    document
+        .links
+        .iter()
+        .filter(|link| link.status == crate::domain::LinkStatus::Resolved)
+        .filter(|link| {
+            link.source_context
+                .as_ref()
+                .is_some_and(|ctx| matches!(ctx.area, crate::domain::LinkSourceArea::Frontmatter))
+        })
+        .filter_map(|link| lookup_document(index, link.resolved_path.as_deref()?))
+        .filter(|target| !document_ignored_compiled(target, compiled, &config.ignore))
+        .map(|target| {
+            let ty = target.frontmatter.as_ref().and_then(|fm| fm.get("type"));
+            (target.path.as_path(), ty)
+        })
+        .collect()
+}
+
+/// Look one path up in the index. `documents` is sorted by path (the graph
+/// walk, the apply overlay, and the cache load all emit it sorted), so the
+/// lookup binary-searches rather than scanning — a scoped validate must not pay
+/// for the vault's size.
+fn lookup_document<'a>(index: &'a GraphIndex, path: &Utf8Path) -> Option<&'a Document> {
+    debug_assert!(
+        index.documents.windows(2).all(|w| w[0].path <= w[1].path),
+        "index documents must be sorted by path for lookup to find them"
+    );
+    index
+        .documents
+        .binary_search_by(|doc| doc.path.as_path().cmp(path))
+        .ok()
+        .map(|position| &index.documents[position])
 }
 
 fn document_ignored_compiled(
