@@ -2,11 +2,68 @@
 //! stdout/stderr/exit code.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::cases::Case;
+
+/// The environment every binary this module spawns runs under.
+///
+/// The caller's environment is CLEARED and rebuilt from a fixed allowlist.
+/// Anything a host carries that reaches a case is measured as a difference:
+/// a `norn serve` daemon the client finds through `$HOME` adds a version-skew
+/// line to one side's stderr, and a leaked `NORN_ROOT` points a case at a
+/// vault that is not its fixture. Neither is a property of the two binaries,
+/// which is the only thing a parity run is entitled to measure.
+///
+/// `HOME` and the XDG bases point into a scratch tree the run owns, so a
+/// registry, cache or config a binary creates for itself is created fresh
+/// and thrown away with the run. `NORN_ROOT` and `NORN_CONFIG_DIR` are
+/// removed explicitly after the allowlist is applied: `env_clear` already
+/// drops them, and the explicit removal keeps them dropped if the allowlist
+/// ever widens.
+pub struct SpawnEnv {
+    home: PathBuf,
+    cache: PathBuf,
+    config: PathBuf,
+}
+
+impl SpawnEnv {
+    /// Create the scratch `HOME` / XDG tree under `root` — a directory the
+    /// caller owns for the run (the fixture cache's temp root in a
+    /// comparison run).
+    pub fn create_in(root: &Path) -> std::io::Result<SpawnEnv> {
+        let home = root.join("scratch-home");
+        let cache = root.join("scratch-cache");
+        let config = root.join("scratch-config");
+        for dir in [&home, &cache, &config] {
+            std::fs::create_dir_all(dir)?;
+        }
+        Ok(SpawnEnv {
+            home,
+            cache,
+            config,
+        })
+    }
+
+    fn apply(&self, command: &mut Command) {
+        command.env_clear();
+        // PATH so a binary can find anything it shells out to; the locale and
+        // TMPDIR because a process needs somewhere to write and a charset to
+        // format with. Every one of these is identical for both sides.
+        for passthrough in ["PATH", "LANG", "LC_ALL", "TMPDIR"] {
+            if let Some(value) = std::env::var_os(passthrough) {
+                command.env(passthrough, value);
+            }
+        }
+        command.env("HOME", &self.home);
+        command.env("XDG_CACHE_HOME", &self.cache);
+        command.env("XDG_CONFIG_HOME", &self.config);
+        command.env_remove("NORN_ROOT");
+        command.env_remove("NORN_CONFIG_DIR");
+    }
+}
 
 /// A captured process outcome, pre-normalization.
 pub struct RawOutput {
@@ -108,10 +165,13 @@ fn spawn_with_stdin(
     argv: &[&str],
     stdin: Option<&str>,
     vault: &Path,
+    env: &SpawnEnv,
     binary_label: &str,
 ) -> Result<Spawned, ExecError> {
     let mut child = retry_while_busy(|| {
-        Command::new(binary)
+        let mut command = Command::new(binary);
+        env.apply(&mut command);
+        command
             .args(argv)
             .current_dir(vault)
             .stdin(Stdio::piped())
@@ -152,12 +212,17 @@ fn spawn_with_stdin(
 /// bug could otherwise hang the runner reading stdin that never arrives) and
 /// its frame-by-frame JSON comparison, not this raw byte comparison — see
 /// `crate::run::run_suites`, which branches before reaching this function.
-pub fn run_case(binary: &Path, case: &Case, vault: &Path) -> Result<RawOutput, ExecError> {
+pub fn run_case(
+    binary: &Path,
+    case: &Case,
+    vault: &Path,
+    env: &SpawnEnv,
+) -> Result<RawOutput, ExecError> {
     debug_assert!(
         case.stdin.is_none(),
         "an MCP case (stdin: Some) must be driven by crate::mcp::run_case, not exec::run_case"
     );
-    run_argv(binary, case.argv, None, vault)
+    run_argv(binary, case.argv, None, vault, env)
 }
 
 /// Lower-level than [`run_case`]: run arbitrary `argv`/`stdin` against
@@ -169,12 +234,13 @@ pub fn run_argv(
     argv: &[&str],
     stdin: Option<&str>,
     vault: &Path,
+    env: &SpawnEnv,
 ) -> Result<RawOutput, ExecError> {
     let binary_label = binary.display().to_string();
     let Spawned {
         child,
         stdin_writer,
-    } = spawn_with_stdin(binary, argv, stdin, vault, &binary_label)?;
+    } = spawn_with_stdin(binary, argv, stdin, vault, env, &binary_label)?;
 
     // `wait_with_output` drains stdout/stderr concurrently with the stdin
     // writer thread (spawned above) — waiting AND draining together is
@@ -220,6 +286,7 @@ pub fn run_argv_bounded(
     argv: &[&str],
     stdin: Option<&str>,
     vault: &Path,
+    env: &SpawnEnv,
     timeout: Duration,
 ) -> Result<RawOutput, ExecError> {
     const POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -228,7 +295,7 @@ pub fn run_argv_bounded(
     let Spawned {
         mut child,
         stdin_writer,
-    } = spawn_with_stdin(binary, argv, stdin, vault, &binary_label)?;
+    } = spawn_with_stdin(binary, argv, stdin, vault, env, &binary_label)?;
 
     let mut child_stdout = child.stdout.take().expect("stdout was piped");
     let stdout_reader = std::thread::spawn(move || -> Vec<u8> {
@@ -317,13 +384,12 @@ pub fn run_argv_bounded(
 /// strict to be (the oracle's version must succeed and match the ledger's
 /// pinned version; the phase-0 rewrite skeleton's `--version` exits 2 with
 /// a notice, and only its existence is required).
-pub fn probe_version(binary: &Path) -> Result<RawOutput, ExecError> {
+pub fn probe_version(binary: &Path, env: &SpawnEnv) -> Result<RawOutput, ExecError> {
     let binary_label = binary.display().to_string();
     let output = retry_while_busy(|| {
-        Command::new(binary)
-            .arg("--version")
-            .stdin(Stdio::null())
-            .output()
+        let mut command = Command::new(binary);
+        env.apply(&mut command);
+        command.arg("--version").stdin(Stdio::null()).output()
     })
     .map_err(|source| ExecError::Spawn {
         binary: binary_label,

@@ -69,6 +69,21 @@ pub fn rewrite_debug_binary() -> PathBuf {
     path
 }
 
+/// A scratch environment for tests that drive `norn_parity::exec` directly:
+/// the cleared-environment `SpawnEnv` plus the temp tree backing it, dropped
+/// together when the test ends.
+pub struct Scratch {
+    _dir: tempfile::TempDir,
+    pub env: norn_parity::exec::SpawnEnv,
+}
+
+pub fn scratch_env() -> Scratch {
+    let dir = tempfile::TempDir::new().expect("failed to create a scratch temp dir");
+    let env = norn_parity::exec::SpawnEnv::create_in(dir.path())
+        .expect("failed to create the scratch HOME/XDG tree");
+    Scratch { _dir: dir, env }
+}
+
 /// Write `body` as an executable `/bin/sh` script at `dir/name` — the one
 /// place this crate's tests materialize a fake binary, so every suite
 /// driving stubs (`tests/mcp.rs`, `tests/mutation.rs`) gets the same

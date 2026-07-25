@@ -157,7 +157,17 @@ fn resolve_ledger_or_exit(args: &Args) -> Result<PathBuf, ExitCode> {
 /// semver-shaped token — the pin the ledger's `meta.oracle_version` must
 /// match.
 fn oracle_version_or_exit(oracle: &Path) -> Result<String, ExitCode> {
-    let raw = exec::probe_version(oracle).map_err(|e| {
+    // Probed under the same cleared environment every case runs under, from a
+    // scratch tree that lives only as long as the probe.
+    let scratch = tempfile::TempDir::new().map_err(|e| {
+        eprintln!("norn-parity: could not create a scratch dir for the version probe: {e}");
+        ExitCode::from(2)
+    })?;
+    let env = exec::SpawnEnv::create_in(scratch.path()).map_err(|e| {
+        eprintln!("norn-parity: could not create the scratch HOME/XDG tree: {e}");
+        ExitCode::from(2)
+    })?;
+    let raw = exec::probe_version(oracle, &env).map_err(|e| {
         eprintln!("norn-parity: oracle --version failed: {e}");
         ExitCode::from(2)
     })?;

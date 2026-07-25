@@ -21,6 +21,10 @@ use crate::fixtures::{FixtureCache, FixtureError, Side};
 
 #[derive(Debug)]
 pub enum ConsistencyError {
+    /// The scratch HOME/XDG tree the checks spawn under could not be created.
+    ScratchEnvironment {
+        source: std::io::Error,
+    },
     Fixture(FixtureError),
     Exec(ExecError),
     Unparseable {
@@ -44,7 +48,7 @@ enum CheckFailure {
 struct Check {
     name: &'static str,
     fixture: Fixture,
-    invariant: fn(&Path, &Path) -> Result<Option<String>, CheckFailure>,
+    invariant: fn(&Path, &Path, &exec::SpawnEnv) -> Result<Option<String>, CheckFailure>,
 }
 
 /// The invariants, in report order (declaration order): both checks against
@@ -75,6 +79,10 @@ const CHECKS: &[Check] = &[
 impl std::fmt::Display for ConsistencyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ConsistencyError::ScratchEnvironment { source } => write!(
+                f,
+                "could not create the scratch HOME/XDG tree the checks spawn under: {source}"
+            ),
             ConsistencyError::Fixture(e) => write!(f, "{e}"),
             ConsistencyError::Exec(e) => write!(f, "{e}"),
             ConsistencyError::Unparseable {
@@ -110,6 +118,10 @@ fn fixture_label(fixture: &Fixture) -> String {
 /// runs its invariant; a `Some(message)` is a disagreement.
 pub fn run(oracle: &Path) -> Result<Vec<Finding>, ConsistencyError> {
     let mut cache = FixtureCache::new().map_err(ConsistencyError::Fixture)?;
+    // The same isolation the comparison modes spawn under: an invariant read
+    // off a host-influenced oracle describes the host, not the oracle.
+    let env = exec::SpawnEnv::create_in(cache.root())
+        .map_err(|source| ConsistencyError::ScratchEnvironment { source })?;
     let mut findings = Vec::new();
 
     for check in CHECKS {
@@ -118,7 +130,7 @@ pub fn run(oracle: &Path) -> Result<Vec<Finding>, ConsistencyError> {
         let vault = cache
             .vault_for(&check.fixture, Side::Oracle)
             .map_err(ConsistencyError::Fixture)?;
-        match (check.invariant)(oracle, &vault) {
+        match (check.invariant)(oracle, &vault, &env) {
             Ok(Some(message)) => findings.push(Finding {
                 check: check.name,
                 fixture: fixture_label(&check.fixture),
@@ -143,8 +155,12 @@ pub fn run(oracle: &Path) -> Result<Vec<Finding>, ConsistencyError> {
 /// `count` total equals the number of rows `find --format json --all`
 /// returns. `--all` bypasses `find`'s default 10-row page — without it the
 /// two commands are not comparable.
-fn check_count_matches_find(oracle: &Path, vault: &Path) -> Result<Option<String>, CheckFailure> {
-    let count_out = exec::run_argv(oracle, &["count", "--format", "json"], None, vault)
+fn check_count_matches_find(
+    oracle: &Path,
+    vault: &Path,
+    env: &exec::SpawnEnv,
+) -> Result<Option<String>, CheckFailure> {
+    let count_out = exec::run_argv(oracle, &["count", "--format", "json"], None, vault, env)
         .map_err(CheckFailure::Exec)?;
     let count_text = String::from_utf8_lossy(&count_out.stdout);
     let total = parse_int_field(&count_text, "total").ok_or_else(|| CheckFailure::Unparseable {
@@ -164,6 +180,7 @@ fn check_count_matches_find(oracle: &Path, vault: &Path) -> Result<Option<String
         &["find", "--format", "json", "--all", "--no-limit"],
         None,
         vault,
+        env,
     )
     .map_err(CheckFailure::Exec)?;
     let find_text = String::from_utf8_lossy(&find_out.stdout);
@@ -186,12 +203,14 @@ fn check_count_matches_find(oracle: &Path, vault: &Path) -> Result<Option<String
 fn check_summary_findings_equals_codes_sum(
     oracle: &Path,
     vault: &Path,
+    env: &exec::SpawnEnv,
 ) -> Result<Option<String>, CheckFailure> {
     let out = exec::run_argv(
         oracle,
         &["validate", "--summary", "--format", "json"],
         None,
         vault,
+        env,
     )
     .map_err(CheckFailure::Exec)?;
     let text = String::from_utf8_lossy(&out.stdout);

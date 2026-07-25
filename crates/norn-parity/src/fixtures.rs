@@ -90,6 +90,14 @@ impl FixtureCache {
         })
     }
 
+    /// The temp root every fixture vault is generated under. The scratch
+    /// `HOME` / XDG tree spawned binaries run against
+    /// (`crate::exec::SpawnEnv`) is created here too, so it is removed with
+    /// the fixtures when the run ends.
+    pub fn root(&self) -> &Path {
+        &self.canonical_root
+    }
+
     /// The per-(fixture, side) directory a read case's SHARED vault nests
     /// under — `<profile>-<seed>-<side>/vault`.
     fn rel(fixture: &Fixture, side: Side) -> PathBuf {

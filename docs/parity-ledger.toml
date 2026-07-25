@@ -43,6 +43,13 @@
 #
 # Authoring an entry, or reacting to a gap the run reports:
 #
+#   0. an extent is only meaningful from a run the HOST could not reach. The
+#      runner clears the environment for every binary it spawns (a scratch
+#      HOME / XDG tree, no NORN_ROOT / NORN_CONFIG_DIR) and refuses to run
+#      when the oracle writes to stderr on a freshly generated fixture, which
+#      is what a live `norn serve` daemon on the host looks like (NRN-490).
+#      Trust a number that came out of a clean run; re-measure one that did
+#      not;
 #   1. write the entry with `observed = {}` (the field is required, and may
 #      be empty until the first run measures it);
 #   2. run the gated comparison — `norn-parity --oracle <pinned> --rewrite
@@ -104,7 +111,7 @@ old = "the 22-command list ends at `audit` with no registered-vault namespace; G
 new = "a `vault` namespace (register/unregister/list/set) is listed after `audit`, exposing the ADR 0017 registry; GLOBAL OPTIONS drops `--config` and adds `--vault NAME`; the `-C/--cwd` description is shown in FULL (unclamped) in `--help`, only the concise line in `-h` (NRN-335)"
 reason = "decided-better"
 decision = "docs/decisions/0017-registered-vaults-summoned-owners.md"
-observed = { "help-bare" = 3 }
+observed = { "help-bare" = 4 }
 
 # The per-command GLOBAL OPTIONS change (NRN-345) on the two ported subcommand
 # help surfaces. Both drop `--config` and gain `--vault NAME`; neither has a

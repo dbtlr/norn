@@ -132,6 +132,19 @@ pub enum RunError {
     Ledger(LedgerError),
     Fixture(FixtureError),
     Exec(ExecError),
+    /// The scratch `HOME` / XDG tree spawned binaries run against could not
+    /// be created, so there is no isolated environment to run in.
+    ScratchEnvironment {
+        message: String,
+    },
+    /// The oracle wrote to stderr on a freshly generated fixture, where it
+    /// has nothing to report. Something outside the two binaries is reaching
+    /// the run, and every byte it contributes would be measured as a
+    /// difference — so the run stops instead of publishing numbers that
+    /// describe the host.
+    ForeignEnvironment {
+        stderr: String,
+    },
     /// A binary was killed by a signal rather than exiting — cannot be
     /// compared as a verdict, so the whole run aborts.
     Signaled {
@@ -204,6 +217,19 @@ impl std::fmt::Display for RunError {
             RunError::Ledger(e) => write!(f, "{e}"),
             RunError::Fixture(e) => write!(f, "{e}"),
             RunError::Exec(e) => write!(f, "{e}"),
+            RunError::ScratchEnvironment { message } => write!(
+                f,
+                "could not create the scratch HOME/XDG tree the run spawns binaries under: {message}"
+            ),
+            RunError::ForeignEnvironment { stderr } => write!(
+                f,
+                "the oracle wrote to stderr on a freshly generated fixture, so something outside \
+                 the two binaries is reaching this run and every byte it contributes would be \
+                 measured as a difference. The usual cause is a `norn serve` daemon on this host \
+                 that the client still finds (its version-skew notice lands on stderr); a stray \
+                 NORN_ROOT / NORN_CONFIG_DIR is the other. Stop the daemon (`norn service stop`) \
+                 and re-run. Oracle stderr was:\n{stderr}"
+            ),
             RunError::Signaled {
                 binary_label,
                 case_id,
@@ -234,8 +260,10 @@ impl std::fmt::Display for RunError {
                 actual,
             } => write!(
                 f,
-                "case `{case_id}`: oracle exited {actual}, expected {expected} — likely case rot \
-                 (the fixture or oracle surface changed under the argv)"
+                "case `{case_id}`: oracle exited {actual}, expected {expected} — either case rot \
+                 (the fixture or oracle surface changed under the argv) or the environment \
+                 reaching the oracle (a stray NORN_ROOT pointing it at another vault, a host \
+                 config), which the run isolates against but a `--cwd`-free argv can still expose"
             ),
             RunError::UnmetRequirement {
                 case_id,
@@ -296,8 +324,12 @@ fn is_semver_prefixed(s: &str) -> bool {
 /// Spawn `binary --version`, require it to succeed, and return its
 /// semver-shaped token (see [`parse_version_token`]). Used for the oracle,
 /// whose version must match the ledger's pinned `meta.oracle_version`.
-fn require_version(binary: &Path, label: &'static str) -> Result<String, RunError> {
-    let raw = exec::probe_version(binary).map_err(|e| RunError::Binary {
+fn require_version(
+    binary: &Path,
+    label: &'static str,
+    env: &exec::SpawnEnv,
+) -> Result<String, RunError> {
+    let raw = exec::probe_version(binary, env).map_err(|e| RunError::Binary {
         label,
         path: binary.display().to_string(),
         message: e.to_string(),
@@ -323,14 +355,52 @@ fn require_version(binary: &Path, label: &'static str) -> Result<String, RunErro
 /// The rewrite binary only needs to exist and be spawnable — the phase-0
 /// skeleton's `--version` prints a notice and exits 2, and that is
 /// accepted; only its existence is required (ADR 0018 phase-0 reality).
-fn require_spawnable(binary: &Path, label: &'static str) -> Result<(), RunError> {
-    exec::probe_version(binary)
+fn require_spawnable(
+    binary: &Path,
+    label: &'static str,
+    env: &exec::SpawnEnv,
+) -> Result<(), RunError> {
+    exec::probe_version(binary, env)
         .map(|_| ())
         .map_err(|e| RunError::Binary {
             label,
             path: binary.display().to_string(),
             message: e.to_string(),
         })
+}
+
+/// The fixture the environment preflight runs against — a freshly generated
+/// vault the oracle has nothing to say about, so any stderr it produces comes
+/// from somewhere else.
+const PREFLIGHT_FIXTURE: cases::Fixture = cases::Fixture {
+    profile_name: "clean",
+    seed: 1,
+};
+
+/// Run the oracle once against a freshly generated fixture and require its
+/// stderr to be EMPTY.
+///
+/// The environment isolation (`exec::SpawnEnv`) is what keeps the host out of
+/// a run; this is the check that the isolation held. Host contributions are
+/// invisible to the verdicts that would otherwise catch them — a `norn serve`
+/// daemon adding one stderr line to every oracle case makes 44 cases drift,
+/// and a self-check stays green throughout because both sides are the oracle
+/// and both carry the line.
+fn require_quiet_environment(
+    oracle: &Path,
+    fixture_cache: &mut FixtureCache,
+    env: &exec::SpawnEnv,
+) -> Result<(), RunError> {
+    let vault = fixture_cache
+        .materialize(&PREFLIGHT_FIXTURE, Side::Oracle, Some("preflight"))
+        .map_err(RunError::Fixture)?;
+    let raw = exec::run_argv(oracle, &["count"], None, &vault.path, env).map_err(RunError::Exec)?;
+    if raw.stderr.is_empty() {
+        return Ok(());
+    }
+    Err(RunError::ForeignEnvironment {
+        stderr: String::from_utf8_lossy(&raw.stderr).to_string(),
+    })
 }
 
 /// The `(suite_name, case)` pairs a mode + filter selects from `suites`, in
@@ -461,11 +531,21 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
 
     let self_check = matches!(config.mode, Mode::SelfCheck);
 
-    let oracle_version = require_version(config.oracle, "oracle")?;
+    // The fixture cache comes first because it owns the temp root the scratch
+    // environment lives under, and NOTHING is spawned outside that
+    // environment — not even the version probes.
+    let mut fixture_cache = FixtureCache::new().map_err(RunError::Fixture)?;
+    let env = exec::SpawnEnv::create_in(fixture_cache.root()).map_err(|e| {
+        RunError::ScratchEnvironment {
+            message: e.to_string(),
+        }
+    })?;
+
+    let oracle_version = require_version(config.oracle, "oracle", &env)?;
     // Self-check never runs the rewrite binary (candidate := oracle), so its
     // absence must not block vetting a case set — don't require it.
     if !self_check {
-        require_spawnable(config.rewrite, "rewrite")?;
+        require_spawnable(config.rewrite, "rewrite", &env)?;
     }
 
     // Ledger/pin policy is mode-scoped (see the `Mode` doc comment):
@@ -489,9 +569,10 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
         Some(loaded)
     };
 
+    require_quiet_environment(config.oracle, &mut fixture_cache, &env)?;
+
     let selected = select_cases(config.mode, config.suite_filter, suites)?;
 
-    let mut fixture_cache = FixtureCache::new().map_err(RunError::Fixture)?;
     let mut outcomes = Vec::new();
     let mut ran_ids: BTreeSet<&str> = BTreeSet::new();
     let mut diverged_ids: BTreeSet<&str> = BTreeSet::new();
@@ -565,7 +646,7 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                 roots: &candidate_roots,
                 label: candidate_label,
             };
-            match mcp::run_case(case.argv, frames, oracle_target, candidate_target) {
+            match mcp::run_case(case.argv, frames, oracle_target, candidate_target, &env) {
                 Ok(result) => {
                     // Case-rot guard, exactly as the non-MCP path below: the
                     // oracle side must exit exactly as declared. Unaffected
@@ -640,10 +721,11 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                     .map_err(RunError::Fixture)?;
                 let argv = substitute_plan_argv(case.argv, &plan_path);
                 let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-                exec::run_argv(config.oracle, &argv_refs, None, &oracle_vault.path)
+                exec::run_argv(config.oracle, &argv_refs, None, &oracle_vault.path, &env)
                     .map_err(RunError::Exec)?
             } else {
-                exec::run_case(config.oracle, case, &oracle_vault.path).map_err(RunError::Exec)?
+                exec::run_case(config.oracle, case, &oracle_vault.path, &env)
+                    .map_err(RunError::Exec)?
             };
             let oracle_norm = normalize::normalize_output(&oracle_raw, &oracle_roots, &steps)
                 .map_err(|e| normalize_run_error(e, "oracle", case.id))?;
@@ -670,10 +752,16 @@ pub fn run_suites(config: &RunConfig, suites: &'static [Suite]) -> Result<RunRep
                     .map_err(RunError::Fixture)?;
                 let argv = substitute_plan_argv(case.argv, &plan_path);
                 let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-                exec::run_argv(candidate_binary, &argv_refs, None, &candidate_vault.path)
-                    .map_err(RunError::Exec)?
+                exec::run_argv(
+                    candidate_binary,
+                    &argv_refs,
+                    None,
+                    &candidate_vault.path,
+                    &env,
+                )
+                .map_err(RunError::Exec)?
             } else {
-                exec::run_case(candidate_binary, case, &candidate_vault.path)
+                exec::run_case(candidate_binary, case, &candidate_vault.path, &env)
                     .map_err(RunError::Exec)?
             };
             let candidate_norm =
