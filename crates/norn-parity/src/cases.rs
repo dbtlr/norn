@@ -268,6 +268,25 @@ const HELP_CASES: &[Case] = &[
         normalize: NO_NORM,
         plan: None,
     },
+    // `count --help` is the pinned witness for the help-prose disposition
+    // (PD-152): the oracle prints the internal doc comment of the shared
+    // `FilterArgs` struct as `count`'s description prose, the rewrite prints
+    // the one-line summary and nothing else. `count` is the cheapest ported
+    // surface carrying that leak, so the divergence stays observable on a
+    // gated case rather than only in the help walker.
+    Case {
+        id: "help-count",
+        argv: &["count", "--help"],
+        fixture: HELP_FIXTURE,
+        stdin: None,
+        mutating: false,
+        ported: true,
+        expect_oracle_exit: 0,
+        requires_doc: None,
+        requires_code: None,
+        normalize: NO_NORM,
+        plan: None,
+    },
 ];
 
 /// validate ports for real (NRN-381): the read-side standards engine + verb.

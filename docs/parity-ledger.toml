@@ -1261,3 +1261,60 @@ new = "all four count lines print on every invocation — `folders`, `path rules
 reason = "decided-better"
 decision = "docs/decisions/0021-verbs-return-one-layer-renders.md"
 observed = { "describe-zoo" = { stdout = 1 }, "describe-data-zoo" = { stdout = 1 }, "describe-stats-zoo" = { stdout = 1 }, "describe-by-clean" = { stdout = 1 }, "describe-data-clean" = { stdout = 1 } }
+
+# NRN-461: the multi-paragraph description prose (`long_about`) a help page
+# prints between its one-line summary and USAGE is now EARNED, not inherited.
+# The bar: a reader would make a materially better decision with the paragraph
+# than without it. Prose that the page's own flag descriptions, EXAMPLES block,
+# or conceptual section already states does not clear it, and neither does prose
+# describing a model this tree replaced.
+#
+# The oracle prints such prose on 21 of the 45 enumerated help paths. The
+# rewrite prints it on three — `get`, `validate`, `self-update` — and drops it
+# on the other 18: `apply`, `cache`, `cache clear`, `cache index`,
+# `cache prune`, `completions init`, `completions install`, `count`, `delete`,
+# `describe`, `edit`, `move`, `new`, `repair`, `rewrite-wikilink`, `serve`,
+# `service`, `set`. The drops fall in four groups:
+#
+#   - LEAKED SOURCE COMMENTS (`count`, `describe`). Both verbs flatten the
+#     shared `FilterArgs` struct, and the oracle adopts that struct's internal
+#     doc comment as the verb's description — a reader gets "Kept in `cli.rs` so
+#     the build script can include this file without intra-crate deps" where the
+#     verb's own prose belongs. The rewrite spells those shared-args structs
+#     with plain comments so clap has nothing to adopt (the same guard
+#     `GlobalArgs` and `MutationModeArgs` carry). Never restored.
+#   - FLAG-BLOCK RESTATEMENTS (`set`, `move`, `delete`, `new`,
+#     `rewrite-wikilink`, `cache index`, `completions init`,
+#     `completions install`). The oracle re-lists `--yes` / `--dry-run` /
+#     `--force` / `--format` and the exit codes in prose above the OPTIONS block
+#     that already carries them. Under the uniform mutation-mode block (NRN-410)
+#     and the converged `--format` vocabulary (NRN-416) those recitations would
+#     also drift out of date against the flags they duplicate.
+#   - COVERED BY A RICHER SECTION (`apply`, `repair`, `edit`). `apply` renders
+#     HOW APPLY WRITES, `repair` renders EXAMPLES plus THE PLAN/APPLY BOUNDARY,
+#     and `edit`'s sugar flags (`--str-replace`, `--replace-section`, …) each
+#     name their JSON op, which is what the oracle's prose op table enumerated.
+#   - DESCRIBES A REPLACED MODEL (`serve`, `service`, `cache`, `cache clear`,
+#     `cache prune`). The prose describes one host-wide daemon on a single
+#     well-known socket and a global retained cache tree with a 90-day window
+#     and a 1 GiB cap. Under ADR 0017 the socket is per vault root and build
+#     fingerprint, and the cache db is pure derivation — created at summon,
+#     deleted at owner exit. Restoring the prose would document a model this
+#     tree deleted; the porting task for each verb writes its page fresh.
+#
+# `self-update` is the one restoration: its install-method restriction is
+# reachable from no flag description and decides whether the verb is the right
+# tool at all, so it is stated as one paragraph.
+#
+# `help-count` is the gated witness (the leak group, the largest defect). The
+# help walker (crates/norn-parity/tests/help_walker.rs) enforces the whole
+# disposition across every enumerated path, so a verb that gains or loses prose
+# without a decision fails there.
+[[entry]]
+id = "PD-152"
+surface = "<command> --help (description prose / long_about)"
+cases = ["help-count"]
+old = "`count --help` prints the internal doc comment of the shared `FilterArgs` struct as the verb's description — two paragraphs about `cli.rs`, `build.rs`, intra-crate deps, and where `build_document_query` lives — between the one-line summary and USAGE"
+new = "`count --help` prints the one-line summary and goes straight to USAGE: shared-args structs carry plain comments clap cannot adopt, so no source-internal text can reach a help page. Description prose is kept only where it decides something the flags, EXAMPLES, and conceptual sections do not — `get`, `validate`, and `self-update` — and is dropped on the other 18 paths that carry it on the oracle"
+reason = "discovered-inconsistency"
+decision = "docs/decisions/0018-greenfield-rewrite-oracle-parity.md"

@@ -240,9 +240,13 @@ pub enum Command {
         about = "Manage the per-vault `.norn/config.yaml`"
     )]
     Config(ConfigCommand),
+    // The install-method restriction is the one fact a reader needs BEFORE
+    // running this verb and it is reachable from no flag description, so it
+    // earns `long_about` (rendered on `--help`, not `-h`).
     #[command(
         disable_help_flag = true,
-        about = "Update norn to the latest GitHub release"
+        about = "Update norn to the latest GitHub release",
+        long_about = "Update norn to the latest GitHub release.\n\nWorks only when norn was installed via the official GitHub install script. A `cargo install`, a Homebrew formula, or a source build updates through that tool instead."
     )]
     SelfUpdate(SelfUpdateArgs),
     #[command(
