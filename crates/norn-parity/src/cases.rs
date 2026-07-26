@@ -106,11 +106,13 @@ pub struct Case {
     /// -> runner error naming case + requirement.
     pub requires_code: Option<&'static str>,
     /// Per-case normalization steps, appended to the universal
-    /// [`DEFAULT`](crate::normalize::DEFAULT). Empty for nearly every case —
-    /// one `help` case carries [`Normalization::SelfUpdateCommandRow`], since
-    /// the oracle's `self-update` COMMANDS row is a property of the
-    /// environment/build rather than of either binary; a ported surface that
-    /// emits other non-deterministic output adds steps here deliberately.
+    /// [`DEFAULT`](crate::normalize::DEFAULT). Most cases carry none; the
+    /// exceptions are deliberate: trace-emitting cases normalize trace ids,
+    /// authored-plan `apply` cases normalize plan hashes, and one `help` case
+    /// carries [`Normalization::SelfUpdateCommandRow`], since the oracle's
+    /// `self-update` COMMANDS row is a property of the environment/build
+    /// rather than of either binary. A ported surface that emits other
+    /// non-deterministic output adds steps here deliberately.
     pub normalize: &'static [Normalization],
     /// Authored-plan capability (NRN-394): for an `apply`-verb case, the raw
     /// `MigrationPlan` source text (JSON or YAML) with every
