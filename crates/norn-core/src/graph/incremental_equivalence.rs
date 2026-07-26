@@ -309,7 +309,10 @@ fn embedding_a_document_created_at_the_root_fires_the_root_rung_not_the_base_run
     // THREE rungs for that one link: base-relative (`dir/shared.md`),
     // root-relative (`shared.md`), and the stem bucket. `shared.md` is created
     // at the vault ROOT, not under `dir/`, so only the root-relative and stem
-    // rungs can hit — this pins that the root rung fires on its own, distinct
+    // rungs can hit. (The stem rung alone would also hit, so this is an
+    // equivalence claim over the embed shape, not an isolated pin of the root
+    // rung — `reverse.rs`'s `an_embed_records_every_rung_it_could_read` pins
+    // the rungs individually.) It exercises the root rung as distinct
     // from the base rung it sits alongside.
     let (_tmp, root) = vault();
     write(&root, "dir/a.md", "---\n---\n![[shared]]\n");
@@ -335,8 +338,11 @@ fn heading_churn_revalidates_a_documents_self_anchor_link() {
     // A document that links `[[#Heading]]` to one of its OWN headings takes the
     // self-reference branch of the resolution ladder (empty target, an anchor)
     // — `link_lookup_keys` records only the document's own source-path key for
-    // it, not a stem/path key derived from a target. Churning the heading the
-    // self-link names must still revalidate it.
+    // it, not a stem/path key derived from a target. (The changed path IS the
+    // source, so the doc enters the scope via `affected` regardless — this is
+    // an equivalence claim over the self-anchor shape, not an isolated pin of
+    // the source-path key arm.) Churning the heading the self-link names must
+    // still revalidate it.
     let (_tmp, root) = vault();
     write(
         &root,

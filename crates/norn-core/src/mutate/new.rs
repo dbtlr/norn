@@ -220,9 +220,8 @@ pub fn execute(
             // `index` IN PLACE — past this call the graph it points at is the
             // POST-CREATE state (pre-write baseline plus the new document), not
             // the pre-write baseline `apply_migration_plan` read above.
-            // Rebinding to a distinctly named reference makes that meaning
-            // change structural rather than a comment-only convention a later
-            // edit could silently violate by reaching for `index` again.
+            // The rebind is a named alias for readability; nothing enforces
+            // it — the borrow ends at the call, so the guard is this comment.
             let post_create_index = &mut index;
             let extra = post_create_validate(
                 cfg,

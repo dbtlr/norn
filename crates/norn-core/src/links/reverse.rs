@@ -130,7 +130,9 @@ impl ReverseLinkIndex {
     /// across the whole set rather than a fresh collection per document.
     pub(crate) fn build(documents: &[Document]) -> Self {
         // Capacity is link-derived, not document-derived: each link contributes
-        // 1-3 distinct keys (see `link_lookup_keys`), so `documents.len()` alone
+        // up to 5 distinct keys (see `link_lookup_keys`; a slash-bearing
+        // extensionless embed records base+root paths, their `.md` variants,
+        // and the stem), so `documents.len()` alone
         // undersizes the map on any vault where documents carry more than a
         // handful of links each.
         let link_count: usize = documents.iter().map(|document| document.links.len()).sum();
