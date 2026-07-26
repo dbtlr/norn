@@ -1498,7 +1498,11 @@ fn ready_slot(state: &Arc<OwnerState>) -> Option<Arc<VaultCacheSlot>> {
     state.slot()
 }
 
-/// The "vault not ready" report a read gets before warm-up finishes.
+/// The answer for a request that reached the slot gate with no warm slot to
+/// serve it. NOT "you asked too early": every frame that needs the warm context
+/// waits for [`await_warm_up_settled`] first, so this is only reachable when
+/// warm-up settled WITHOUT producing a slot — a fatal exit-to-heal, or a
+/// shutdown that landed mid-warm-up.
 fn not_ready() -> OwnerFrame {
     OwnerFrame::Error {
         message: "vault not ready".to_string(),

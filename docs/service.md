@@ -204,13 +204,13 @@ A few shapes are deliberately excluded from routing, by design, regardless of wh
 
 ### Reads
 
-A routed call has **no overall call timeout**. While its request socket is waiting for a response, the client heartbeats the vault-scoped control plane and interprets `writer_progress` on its own monotonic clock:
+A routed call has **no overall call timeout**. Each request is a stream on its own connection: while the daemon is working, it reports in-flight progress at least once a second, and then sends exactly one final answer. The client measures **silence between messages**, not total call time:
 
-- A responsive idle writer is healthy. Its sequence does not need to change.
-- A busy writer whose sequence advances is making progress, so the client waits indefinitely. A long chunked operation may outlive five seconds in total as long as it keeps publishing progress.
-- No compatible scoped pong for five seconds, or a busy writer whose sequence is unchanged for five seconds, classifies the service as stalled. This is the one service-level stall budget; sequence changes reset it. An indivisible writer step that publishes no transition inside the budget is therefore classified as stalled even if it is merely slow.
+- Any message resets the budget — an in-flight progress report counts exactly as much as the final answer. A long operation that keeps reporting is waited on however long the work takes.
+- Five seconds with no message of any kind classifies the service as stalled. This is the one service-level stall budget.
+- The verdict is keyed on a message *arriving*, never on what it says. A slow indivisible step is no longer classified as stalled for failing to publish a transition — it only has to keep reporting that it is alive.
 
-Non-writer tool-body progress is deliberately outside this signal. If scoped pongs stay healthy and the writer stays idle, the client continues waiting even though the tool body itself has no separate progress stamp.
+The cost of that is stated plainly: there is deliberately no "is it advancing?" check, so a daemon that keeps reporting but never finishes is waited on indefinitely. Interrupting the client is the escape. Progress reporting covers the whole time a request's work is in flight, whatever it is doing — including a request that arrives while the vault is still warming, which waits behind the warm-up and is then answered rather than failing.
 
 A read (`count`/`find`/`get`/`repair --plan`) still falls back to Direct on any daemon-side failure because it is safe to retry. Ordinary transport failures stay silent unless `--verbose`; a heartbeat-classified stall is always actionable and prints:
 
