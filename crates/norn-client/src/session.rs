@@ -50,9 +50,12 @@ use crate::SummonConfig;
 /// `SO_RCVTIMEO`, which restarts on every `read` that returns bytes, not on
 /// every complete line. Against this owner the two are the same thing — it
 /// writes each frame with a single buffered `write_all` + `flush`, so a frame
-/// arrives whole — and a hypothetical peer that dripped one byte per budget
-/// would be tolerated indefinitely without ever completing a frame. That shape
-/// is unreachable from the owner in this workspace and is not defended against.
+/// arrives whole or the connection dies (a heartbeat write that cannot land
+/// inside its own bound shuts the connection down rather than ever appending
+/// the terminal frame onto an unknown partial prefix) — and a hypothetical
+/// peer that dripped one byte per budget would be tolerated indefinitely
+/// without ever completing a frame. That shape is unreachable from the owner
+/// in this workspace and is not defended against.
 pub const STALL_BUDGET: Duration = Duration::from_secs(5);
 
 /// How often the readiness wait re-pings a not-yet-serving owner. Small enough
@@ -245,7 +248,7 @@ impl OwnerSession {
                 pid,
                 serving,
             }),
-            other => Err(unexpected_frame(other, "pong")),
+            other => Err(self.unexpected(other, "pong")),
         }
     }
 
@@ -253,7 +256,7 @@ impl OwnerSession {
     pub fn probe(&mut self) -> Result<u64, ClientError> {
         match self.request(&ClientFrame::Probe)? {
             OwnerFrame::Probe { document_count } => Ok(document_count),
-            other => Err(unexpected_frame(other, "probe report")),
+            other => Err(self.unexpected(other, "probe report")),
         }
     }
 
@@ -261,7 +264,7 @@ impl OwnerSession {
     pub fn find(&mut self, params: FindParams) -> Result<FindReport, ClientError> {
         match self.request(&ClientFrame::Find { params })? {
             OwnerFrame::Find { report } => Ok(report),
-            other => Err(unexpected_frame(other, "find report")),
+            other => Err(self.unexpected(other, "find report")),
         }
     }
 
@@ -269,7 +272,7 @@ impl OwnerSession {
     pub fn count(&mut self, params: CountParams) -> Result<CountReport, ClientError> {
         match self.request(&ClientFrame::Count { params })? {
             OwnerFrame::Count { report } => Ok(report),
-            other => Err(unexpected_frame(other, "count report")),
+            other => Err(self.unexpected(other, "count report")),
         }
     }
 
@@ -277,7 +280,7 @@ impl OwnerSession {
     pub fn get(&mut self, params: GetParams) -> Result<GetReport, ClientError> {
         match self.request(&ClientFrame::Get { params })? {
             OwnerFrame::Get { report } => Ok(report),
-            other => Err(unexpected_frame(other, "get report")),
+            other => Err(self.unexpected(other, "get report")),
         }
     }
 
@@ -285,7 +288,7 @@ impl OwnerSession {
     pub fn describe(&mut self, params: DescribeParams) -> Result<DescribeReport, ClientError> {
         match self.request(&ClientFrame::Describe { params })? {
             OwnerFrame::Describe { report } => Ok(report),
-            other => Err(unexpected_frame(other, "describe report")),
+            other => Err(self.unexpected(other, "describe report")),
         }
     }
 
@@ -293,7 +296,7 @@ impl OwnerSession {
     pub fn validate(&mut self, params: ValidateParams) -> Result<ValidateReport, ClientError> {
         match self.request(&ClientFrame::Validate { params })? {
             OwnerFrame::Validate { report } => Ok(report),
-            other => Err(unexpected_frame(other, "validate report")),
+            other => Err(self.unexpected(other, "validate report")),
         }
     }
 
@@ -303,7 +306,7 @@ impl OwnerSession {
     pub fn repair(&mut self, params: RepairParams) -> Result<RepairReport, ClientError> {
         match self.request(&ClientFrame::Repair { params })? {
             OwnerFrame::Repair { report } => Ok(report),
-            other => Err(unexpected_frame(other, "repair report")),
+            other => Err(self.unexpected(other, "repair report")),
         }
     }
 
@@ -315,7 +318,7 @@ impl OwnerSession {
     pub fn audit(&mut self, params: AuditParams) -> Result<AuditReport, ClientError> {
         match self.request(&ClientFrame::Audit { params })? {
             OwnerFrame::Audit { report } => Ok(report),
-            other => Err(unexpected_frame(other, "audit report")),
+            other => Err(self.unexpected(other, "audit report")),
         }
     }
 
@@ -327,7 +330,7 @@ impl OwnerSession {
     pub fn set(&mut self, params: SetParams) -> Result<SetReport, ClientError> {
         match self.request(&ClientFrame::Set { params })? {
             OwnerFrame::Set { report } => Ok(report),
-            other => Err(unexpected_frame(other, "set report")),
+            other => Err(self.unexpected(other, "set report")),
         }
     }
 
@@ -336,7 +339,7 @@ impl OwnerSession {
     pub fn new_document(&mut self, params: NewParams) -> Result<NewReport, ClientError> {
         match self.request(&ClientFrame::New { params })? {
             OwnerFrame::New { report } => Ok(report),
-            other => Err(unexpected_frame(other, "new report")),
+            other => Err(self.unexpected(other, "new report")),
         }
     }
 
@@ -345,7 +348,7 @@ impl OwnerSession {
     pub fn edit(&mut self, params: EditParams) -> Result<EditReport, ClientError> {
         match self.request(&ClientFrame::Edit { params })? {
             OwnerFrame::Edit { report } => Ok(report),
-            other => Err(unexpected_frame(other, "edit report")),
+            other => Err(self.unexpected(other, "edit report")),
         }
     }
 
@@ -355,7 +358,7 @@ impl OwnerSession {
     pub fn move_document(&mut self, params: MoveParams) -> Result<ApplyReport, ClientError> {
         match self.request(&ClientFrame::Move { params })? {
             OwnerFrame::Move { report } => Ok(report),
-            other => Err(unexpected_frame(other, "move report")),
+            other => Err(self.unexpected(other, "move report")),
         }
     }
 
@@ -364,7 +367,7 @@ impl OwnerSession {
     pub fn delete(&mut self, params: DeleteParams) -> Result<ApplyReport, ClientError> {
         match self.request(&ClientFrame::Delete { params })? {
             OwnerFrame::Delete { report } => Ok(report),
-            other => Err(unexpected_frame(other, "delete report")),
+            other => Err(self.unexpected(other, "delete report")),
         }
     }
 
@@ -376,7 +379,7 @@ impl OwnerSession {
     ) -> Result<ApplyReport, ClientError> {
         match self.request(&ClientFrame::RewriteWikilink { params })? {
             OwnerFrame::RewriteWikilink { report } => Ok(report),
-            other => Err(unexpected_frame(other, "rewrite-wikilink report")),
+            other => Err(self.unexpected(other, "rewrite-wikilink report")),
         }
     }
 
@@ -387,7 +390,7 @@ impl OwnerSession {
     pub fn apply(&mut self, params: ApplyParams) -> Result<ApplyReport, ClientError> {
         match self.request(&ClientFrame::Apply { params })? {
             OwnerFrame::Apply { report } => Ok(report),
-            other => Err(unexpected_frame(other, "apply report")),
+            other => Err(self.unexpected(other, "apply report")),
         }
     }
 
@@ -414,6 +417,13 @@ impl OwnerSession {
     /// (once) on the way out, so a surface drawing a transient line erases it
     /// whether the wait ended in Ready or in an error.
     ///
+    /// **The throttle clock is seeded at the WAIT's start, not at the first
+    /// not-Ready pong.** A warm-up that finishes inside one `PROGRESS_HEARTBEAT`
+    /// therefore draws nothing at all — matching the owner emitter's own
+    /// cadence (it does not heartbeat a request that finishes inside its first
+    /// interval either), rather than flashing a warming line for a wait that
+    /// was never actually slow.
+    ///
     /// Verbs still send nothing before Ready. That gate is load-bearing: a verb
     /// frame written pre-Ready would convert an owner that exits to heal
     /// mid-warm-up from a clean pre-send resummon into ADR 0011's post-send
@@ -427,10 +437,16 @@ impl OwnerSession {
     /// hard error (post-send uncertainty is a separate contract).
     pub fn wait_until_ready(&mut self, max_wait: Duration) -> Result<Pong, ClientError> {
         let start = Instant::now();
-        // When the last `warming` observation was handed to the sink; `None`
-        // until the first one. Also the "did this wait draw anything" flag the
-        // closing `finished` is gated on.
-        let mut warmed_at: Option<Instant> = None;
+        // The throttle clock, SEEDED AT WAIT START rather than at the first
+        // not-Ready pong: the first draw only happens once a full
+        // `PROGRESS_HEARTBEAT` of continuous not-Ready has elapsed, so a
+        // warm-up finishing inside that interval draws nothing (F4).
+        let mut last_drawn_at = start;
+        // Separate from the throttle clock above: `last_drawn_at` is always
+        // seeded to a real `Instant`, so it cannot itself answer "did this
+        // wait draw anything" the way an `Option` could. The closing
+        // `finished` call is gated on this instead.
+        let mut drawn = false;
         // One exit point, so the sink is closed out on EVERY way out — Ready,
         // timeout, or a surfaced error — rather than at four `return`s.
         let outcome = loop {
@@ -457,9 +473,11 @@ impl OwnerSession {
             // serving yet: that is the `warming` fact, read off the pong rather
             // than assumed from elapsed time. Throttled to the heartbeat floor —
             // a 20ms poll cadence would redraw a progress line 50 times a second
-            // to say the same thing.
-            if warmed_at.is_none_or(|at| at.elapsed() >= PROGRESS_HEARTBEAT) {
-                warmed_at = Some(Instant::now());
+            // to say the same thing — and the clock started at the WAIT's own
+            // start, so the first draw waits out a full interval too.
+            if last_drawn_at.elapsed() >= PROGRESS_HEARTBEAT {
+                last_drawn_at = Instant::now();
+                drawn = true;
                 self.progress
                     .progress(&Progress::new(ProgressPhase::Warming));
             }
@@ -470,7 +488,7 @@ impl OwnerSession {
             }
             std::thread::sleep(READY_POLL_INTERVAL);
         };
-        if warmed_at.is_some() {
+        if drawn {
             self.progress.finished();
         }
         outcome
@@ -512,7 +530,20 @@ impl OwnerSession {
         // never delivered, so it is safe to resummon and retry (even a mutation).
         // A held owner that idle-reaped between calls fails HERE on the first
         // write — the recovery seam a long-lived session (MCP) heals from.
-        self.writer.write_all(&line).map_err(classify_io_pre_send)?;
+        //
+        // A non-connection `Io` error is different: `write_all` can fail after
+        // committing a PARTIAL line to the socket, which desyncs the OWNER's
+        // line-oriented parser the same way an undecodable read does for THIS
+        // side (see [`desynchronizes`]) — so only that arm poisons the session.
+        // `OwnerGonePreSend` stays clean: that shape means nothing reached the
+        // socket at all, so its safe-retry contract is unaffected.
+        if let Err(e) = self.writer.write_all(&line) {
+            let err = classify_io_pre_send(e);
+            if matches!(err, ClientError::Io(_)) {
+                self.poisoned = true;
+            }
+            return Err(err);
+        }
         self.writer.flush().map_err(classify_io_pre_send)?;
 
         let mut observed_progress = false;
@@ -555,16 +586,47 @@ impl OwnerSession {
             }
         }
     }
+
+    /// [`unexpected_frame`], additionally poisoning the session on a genuine
+    /// protocol mismatch (NRN-512 delta): a terminal frame of a kind NEITHER
+    /// the verb's own success frame NOR one of the owner's two normal
+    /// cross-verb error paths — the owner answered a `find` with a `pong`,
+    /// say — means this reader is one frame behind where the owner's writer
+    /// thinks it is. That is the same "stream position now unknown" class
+    /// [`desynchronizes`] already names for the read-path failures in
+    /// [`request`](Self::request); the difference is only that this verdict is
+    /// reached by matching a frame's *kind* rather than by a read failing
+    /// outright.
+    ///
+    /// `Rejected` (a warm-up config error) and `Error` are NOT this: they are
+    /// well-formed terminal answers the owner sends deliberately, on ANY
+    /// request, when that request cannot be served — the stream is exactly
+    /// where the reader expects it, just carrying a different (still
+    /// understood) frame kind. Poisoning on those would force every caller
+    /// through a needless reconnect for a perfectly healthy connection — see
+    /// `ping_maps_a_rejected_config_error_onto_the_user_error_path`.
+    ///
+    /// Every verb method routes its non-success arm through this instead of
+    /// the free fn directly, so the poison can never be forgotten at a new
+    /// call site.
+    fn unexpected(&mut self, frame: OwnerFrame, expected: &str) -> ClientError {
+        let err = unexpected_frame(frame, expected);
+        if matches!(err, ClientError::Protocol(_)) {
+            self.poisoned = true;
+        }
+        err
+    }
 }
 
-/// Map a reply that is NOT a verb's own success frame onto a client error — the
-/// one shared tail every verb method routes its non-success arm through
-/// (NRN-411). A warm-up/user [`OwnerFrame::Rejected`] rides the user-error path
-/// ([`ClientError::Rejected`], carrying the message + hints); an
-/// [`OwnerFrame::Error`] becomes an [`ClientError::OwnerError`]; any other frame
-/// is a protocol mismatch labelled with `expected` (e.g. `"find report"`). A free
-/// fn, not a `request`-wrapping closure, so no verb closure returns the large
-/// `OwnerFrame` in an `Err` (which `clippy::result_large_err` would flag).
+/// Map a reply that is NOT a verb's own success frame onto a client error —
+/// every verb method reaches this through [`OwnerSession::unexpected`]
+/// (NRN-411 / the NRN-512 poisoning delta), never directly. A warm-up/user
+/// [`OwnerFrame::Rejected`] rides the user-error path ([`ClientError::Rejected`],
+/// carrying the message + hints); an [`OwnerFrame::Error`] becomes an
+/// [`ClientError::OwnerError`]; any other frame is a protocol mismatch labelled
+/// with `expected` (e.g. `"find report"`). A free fn, not a `request`-wrapping
+/// closure, so no verb closure returns the large `OwnerFrame` in an `Err`
+/// (which `clippy::result_large_err` would flag).
 fn unexpected_frame(frame: OwnerFrame, expected: &str) -> ClientError {
     match frame {
         OwnerFrame::Rejected { message, hints } => ClientError::Rejected { message, hints },
@@ -1114,15 +1176,19 @@ mod tests {
     /// it feeds the sink itself (NRN-512): a pong that reports a not-yet-serving
     /// state IS the `warming` fact. Nothing is invented — the observation is
     /// derived from the pong's typed `serving`, and it is throttled to the
-    /// heartbeat floor rather than emitted per 20ms poll.
+    /// heartbeat floor rather than emitted per 20ms poll. The throttle clock is
+    /// seeded at the wait's own start (F4), so this warm-up must outlast one
+    /// full `PROGRESS_HEARTBEAT` to draw anything at all — see the sub-interval
+    /// counterpart below for the "finishes inside the interval" case.
     #[test]
     fn the_readiness_wait_reports_warming_from_the_pongs_serving_state() {
         use norn_wire::ProgressPhase;
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("warming-wait.sock");
-        // `opening` for 400ms — twenty poll intervals, one heartbeat floor.
+        // `opening` for 1.3s — past the one-second heartbeat floor, so the
+        // wait's first draw fires once and the owner is Ready shortly after.
         let handle = fake_owner(socket.clone(), |started| {
-            if started.elapsed() < Duration::from_millis(400) {
+            if started.elapsed() < Duration::from_millis(1300) {
                 pong(ServingState::Opening)
             } else {
                 pong(ServingState::Ready)
@@ -1173,6 +1239,47 @@ mod tests {
         session.wait_until_ready(Duration::from_secs(5)).unwrap();
         assert!(sink.observations().is_empty());
         assert_eq!(sink.finishes(), 0);
+
+        drop(session);
+        handle.join().unwrap();
+    }
+
+    /// F4: a warm-up that finishes INSIDE one `PROGRESS_HEARTBEAT` must draw
+    /// nothing, not one observation. Before the fix the throttle clock seeded
+    /// on the FIRST not-Ready pong, so even a warm-up finishing in a few
+    /// milliseconds still drew one `warming` line — a flash for a wait that was
+    /// never actually slow. Seeding the clock at the wait's own start closes
+    /// that: the owner here reports `opening` for well under the heartbeat
+    /// floor before flipping to `Ready`.
+    #[test]
+    fn a_sub_interval_warm_up_draws_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("sub-interval-warm-up.sock");
+        // `opening` for 200ms — far short of the one-second heartbeat floor.
+        let handle = fake_owner(socket.clone(), |started| {
+            if started.elapsed() < Duration::from_millis(200) {
+                pong(ServingState::Opening)
+            } else {
+                pong(ServingState::Ready)
+            }
+        });
+
+        let mut session = connected_session(&socket);
+        let sink = RecordingSink::default();
+        session.set_progress_sink(Box::new(sink.clone()));
+
+        let got = session.wait_until_ready(Duration::from_secs(5)).unwrap();
+        assert_eq!(got.serving, ServingState::Ready);
+        assert!(
+            sink.observations().is_empty(),
+            "a warm-up finishing inside one heartbeat interval must draw nothing: {:?}",
+            sink.observations()
+        );
+        assert_eq!(
+            sink.finishes(),
+            0,
+            "nothing was drawn, so there is nothing to close out"
+        );
 
         drop(session);
         handle.join().unwrap();
@@ -1232,6 +1339,37 @@ mod tests {
         // succeed, so the caller gets an error rather than a wrong answer.
         match session.probe() {
             Ok(count) => panic!("a poisoned session served the late answer: {count}"),
+            Err(e) => assert!(
+                matches!(e, ClientError::OwnerUnavailable { .. }),
+                "expected the forced reconnect to surface, got {e:?}"
+            ),
+        }
+
+        drop(session);
+        handle.join().unwrap();
+    }
+
+    /// A terminal frame of the WRONG kind — here, an owner that answers a
+    /// `probe` with a `pong` — leaves the reader one frame behind where the
+    /// owner's writer thinks it is: the same desync class a stall verdict
+    /// leaves behind. This must poison the session too, so the next request
+    /// reconnects rather than reading whatever the (misbehaving) owner sends
+    /// next as if it were this request's own answer.
+    #[test]
+    fn an_unexpected_frame_poisons_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("wrong-kind.sock");
+        // Answers every request with a `pong` — wrong for `probe`.
+        let handle = fake_owner(socket.clone(), |_| pong(ServingState::Ready));
+
+        let mut session = connected_session(&socket);
+        let err = session.probe().expect_err("a pong is not a probe report");
+        assert!(matches!(err, ClientError::Protocol(_)), "got {err:?}");
+
+        // With no retained config the forced reconnect cannot succeed; the
+        // caller must get that error, never a read off the stale stream.
+        match session.probe() {
+            Ok(count) => panic!("a poisoned session served a stale-stream read: {count}"),
             Err(e) => assert!(
                 matches!(e, ClientError::OwnerUnavailable { .. }),
                 "expected the forced reconnect to surface, got {e:?}"
