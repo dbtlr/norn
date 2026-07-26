@@ -600,10 +600,13 @@ async fn write_frame(wr: &mut OwnedWriteHalf, frame: &OwnerFrame) -> anyhow::Res
 /// regression this guards against.
 ///
 /// Once `wire_broken` is latched there is nothing safe left to write: SHUT
-/// DOWN the write half instead. The client sees EOF, which for a mutation is
-/// the same ADR 0011 post-send uncertainty it already resolves by reading the
-/// vault — and it is honest: the peer had stopped reading and could never
-/// have received the report anyway.
+/// DOWN the write half instead. What the client then reads depends on what
+/// was already on the wire — a clean EOF (`OwnerGone`), or a truncated final
+/// line that fails to decode (`Protocol`); both poison the session, and both
+/// are for a mutation the same ADR 0011 post-send uncertainty it already
+/// resolves by reading the vault. The guarantee is narrower and real: a torn
+/// beat is never MERGED with a terminal report, so junk can never be
+/// mis-decoded as an answer.
 async fn write_terminal_frame(
     writer: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
     wire_broken: &Arc<AtomicBool>,
@@ -844,6 +847,12 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
         // request's answer on a wire that already carries unknown bytes.
         write_terminal_frame(&writer, &wire_broken, &response).await?;
         if wire_broken.load(Ordering::SeqCst) {
+            // A torn wire still honors the warm-up eager reap below: without
+            // it, a stale-error owner whose client also stopped reading would
+            // linger the full idle TTL answering the same dead error.
+            if warmup_reject {
+                state.request_shutdown();
+            }
             break;
         }
 
@@ -1911,9 +1920,13 @@ mod tests {
             let sentinel = OwnerFrame::Error {
                 message: "sentinel-terminal-frame-must-not-appear".to_string(),
             };
-            write_terminal_frame(&writer, &wire_broken, &sentinel)
-                .await
-                .expect("a broken-wire terminal write is a clean no-op, not an error");
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                write_terminal_frame(&writer, &wire_broken, &sentinel),
+            )
+            .await
+            .expect("a broken-wire terminal write must return, never pend against the full buffer")
+            .expect("a broken-wire terminal write is a clean no-op, not an error");
 
             // Drain everything the stalled peer ever received — the junk that
             // made it through before the buffer filled — and confirm two

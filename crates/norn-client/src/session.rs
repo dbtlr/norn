@@ -49,10 +49,12 @@ use crate::SummonConfig;
 /// Strictly it is a PER-READ budget: it is pushed onto the socket as
 /// `SO_RCVTIMEO`, which restarts on every `read` that returns bytes, not on
 /// every complete line. Against this owner the two are the same thing — it
-/// writes each frame with a single buffered `write_all` + `flush`, so a frame
-/// arrives whole or the connection dies (a heartbeat write that cannot land
-/// inside its own bound shuts the connection down rather than ever appending
-/// the terminal frame onto an unknown partial prefix) — and a hypothetical
+/// writes each frame with a single `write_all` + `flush`, so a frame arrives
+/// whole or the connection dies (a heartbeat write that cannot land inside
+/// its own bound shuts the connection down rather than ever appending the
+/// terminal frame onto an unknown partial prefix; the reader then sees EOF or
+/// one truncated final line — junk is never mis-decoded as an answer) — and a
+/// hypothetical
 /// peer that dripped one byte per budget would be tolerated indefinitely
 /// without ever completing a frame. That shape is unreachable from the owner
 /// in this workspace and is not defended against.
@@ -1185,10 +1187,11 @@ mod tests {
         use norn_wire::ProgressPhase;
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("warming-wait.sock");
-        // `opening` for 1.3s — past the one-second heartbeat floor, so the
+        // `opening` for 1.7s — comfortably past the one-second heartbeat
+        // floor and still short of the 2.0s second-draw boundary, so the
         // wait's first draw fires once and the owner is Ready shortly after.
         let handle = fake_owner(socket.clone(), |started| {
-            if started.elapsed() < Duration::from_millis(1300) {
+            if started.elapsed() < Duration::from_millis(1700) {
                 pong(ServingState::Opening)
             } else {
                 pong(ServingState::Ready)
