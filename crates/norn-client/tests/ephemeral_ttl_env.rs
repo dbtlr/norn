@@ -2,7 +2,7 @@
 //! `ephemeral_idle_ttl`, actually reaches a REAL summoned owner and controls
 //! how promptly it self-reaps. This is the mechanism the `norn-parity`
 //! harness relies on to bound owner lingering across a gated run of the
-//! ~167-case suite: a read case shares one owner per (fixture, side), while
+//! full case suite: a read case shares one owner per (fixture, side), while
 //! only a mutating case gets its own per-case owner — either way, the cost
 //! is meant to be lingering, not spawning.
 //!

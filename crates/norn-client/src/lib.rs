@@ -347,6 +347,9 @@ mod tests {
         // env-reading path.
         let prior = std::env::var(EPHEMERAL_TTL_ENV).ok();
 
+        std::env::remove_var(EPHEMERAL_TTL_ENV);
+        assert_eq!(ephemeral_idle_ttl(), DEFAULT_EPHEMERAL_TTL);
+
         std::env::set_var(EPHEMERAL_TTL_ENV, "5");
         assert_eq!(ephemeral_idle_ttl(), Duration::from_secs(5));
 

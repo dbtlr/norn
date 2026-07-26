@@ -47,13 +47,14 @@ use crate::cases::Case;
 ///   a mutating case's per-case vault isolation is unchanged — but a read
 ///   case is not per-case: read cases (`mutating: false`) share ONE cached
 ///   vault per (fixture, side) (`crate::fixtures`), and therefore share that
-///   cached vault's summoned owner too. Only the ~72 mutating cases get a
-///   fresh vault, and their own owner, per case. Before this override, the
+///   cached vault's summoned owner too. Only the mutating cases get a fresh
+///   vault, and their own owner, per case. Before this override, the
 ///   worst-case lingering population was on the order of the mutating-case
 ///   count plus the number of distinct read fixtures, candidate-side only —
-///   roughly 80 owners, not one per case. Left at the 120s production
-///   default they would linger that long after the run exits; the short
-///   override makes each one self-reap promptly behind the run instead.
+///   roughly 75 owners (67 mutating cases + ~8 distinct read fixtures), not
+///   one per case. Left at the 120s production default they would linger
+///   that long after the run exits; the short override makes each one
+///   self-reap promptly behind the run instead.
 ///   The pinned 0.48.x oracle has no ephemeral-owner tier and no reader for
 ///   this env var — only the candidate side ever summons an owner — which is
 ///   why forcing the same value on both sides does not turn the host into an
@@ -63,9 +64,12 @@ use crate::cases::Case;
 ///   pay a ~30ms re-summon instead of reusing the still-warm owner. The same
 ///   TTL also caps the OTHER side of that trade-off — the lingering-owner
 ///   ceiling — at roughly TTL ÷ per-case wall time concurrently-lingering
-///   owners: order-20 at the current 5s TTL (vs order-50 at a 2s TTL) on a
-///   slow runner, against the old 120s production default's unbounded
-///   accumulation across a whole gated run.
+///   owners. Assuming a ~100ms per-case wall time: order-50 at the current
+///   5s TTL, order-20 at a 2s TTL, against the old 120s production
+///   default's order-1200 by the same formula — a ceiling never actually
+///   reached because a full gated run finishes well under 120s, so at that
+///   default owners simply accumulate for the whole run instead of
+///   self-reaping.
 pub struct SpawnEnv {
     home: PathBuf,
     cache: PathBuf,
