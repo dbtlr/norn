@@ -47,7 +47,10 @@ pub fn execute(
         Ok(c) => c,
         Err(e) => return Ok(refused_new(refusal("config-invalid", e.to_string(), None))),
     };
-    let index = cache.load_graph_index()?;
+    // Mutable so the post-create validate pass can overlay the created document
+    // onto it IN PLACE instead of copying the vault to look at one new file. The
+    // pre-write state is not needed past the apply below.
+    let mut index = cache.load_graph_index()?;
     let now = parse_now(today)?;
 
     // ── --var KEY=VALUE ──────────────────────────────────────────────────────
@@ -218,7 +221,7 @@ pub fn execute(
                 &compiled,
                 &vault_root,
                 config,
-                &index,
+                &mut index,
                 created_path,
                 &warnings,
             );
@@ -255,16 +258,22 @@ pub fn execute(
 /// finding for it that `build_create`'s hand-computed warnings
 /// (missing-required/unknown-field/wikilink/stem-collision) don't already cover.
 ///
-/// Scope is the created path, not the vault, on both axes. Disk: the warm
+/// Scope is the created path, not the vault, on all three axes. Disk: the warm
 /// pre-create graph (`baseline`) is overlaid with just the new file re-read from
 /// disk (the write already landed under `apply_migration_plan`; the owner's cache
 /// increment for `touched_paths` commits later). Rules: the engine's
 /// document-scoped entry evaluates them against the created document alone, so
-/// per-create CPU tracks the rule count, not the vault's document count. What
-/// stays whole-graph is resolution — the overlay re-resolves links across the
-/// composite, and the reference-target types are read from the full index — since
-/// a link's status and its target's `type` depend on documents the created one
-/// never mentions. Alias checks are skipped (`alias_field: None`) for this pass.
+/// per-create CPU tracks the rule count, not the vault's document count.
+/// Resolution: the overlay re-derives the created document's links plus the
+/// blast radius the reverse link index reports, never the vault's whole link set.
+///
+/// The overlay mutates `baseline` IN PLACE — the verb owns its loaded index and
+/// does not need the pre-write state afterwards, so there is no copy of the
+/// vault to look at one new file. What stays whole-graph is the SEMANTICS of
+/// resolution: candidate lookups see every document, and the reference-target
+/// types are read from the full index, since a link's status and its target's
+/// `type` depend on documents the created one never mentions. Alias checks are
+/// skipped (`alias_field: None`) for this pass.
 ///
 /// Dedup: a `RequiredFrontmatterMissing` finding whose field is already covered
 /// by a synth-phase `missing-required-field` warning is dropped and every other
@@ -280,21 +289,20 @@ fn post_create_validate(
     compiled: &CompiledConfig,
     vault_root: &Utf8Path,
     config: Option<&VaultConfig>,
-    baseline: &GraphIndex,
+    baseline: &mut GraphIndex,
     doc_path: &str,
     existing_warnings: &[MutationWarning],
 ) -> Vec<MutationWarning> {
     let index_options = super::owner_index_options(config);
-    let mut fresh_index = baseline.clone();
     crate::graph::overlay_changed_paths(
-        &mut fresh_index,
+        baseline,
         vault_root,
         &[Utf8PathBuf::from(doc_path)],
         &index_options,
     );
 
     let findings = crate::standards::validate_document_with_compiled(
-        &fresh_index,
+        baseline,
         &cfg.validate,
         compiled,
         Utf8Path::new(doc_path),
