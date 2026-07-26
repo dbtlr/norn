@@ -17,6 +17,8 @@
 
 mod aliases;
 mod build;
+#[cfg(test)]
+mod incremental_equivalence;
 mod pattern;
 
 use camino::Utf8PathBuf;
