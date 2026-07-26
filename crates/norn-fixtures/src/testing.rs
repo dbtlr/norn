@@ -87,9 +87,12 @@ pub fn short_runtime_dir(prefix: &str) -> std::io::Result<TempDir> {
 /// answers instead of the binary under test, a `NORN_ROOT` points it at
 /// another vault, and a non-UTF-8 locale changes what it renders. The
 /// environment is cleared and rebuilt from PATH + TMPDIR, a pinned UTF-8
-/// locale, and a scratch HOME/XDG tree — the same shape `norn-parity`'s
+/// locale, and a scratch HOME/XDG tree — close to the shape `norn-parity`'s
 /// runner spawns under (`norn_parity::exec::SpawnEnv`), kept minimal here
-/// because this crate only needs to run one read-only verb.
+/// because this crate only spawns the pinned 0.48.x oracle to run one
+/// read-only verb. It does not set `NORN_EPHEMERAL_TTL_SECS`: that oracle has
+/// no ephemeral-owner tier and no reader for the var, so there is nothing
+/// here for it to control.
 pub struct ScratchEnv {
     dir: TempDir,
     home: PathBuf,

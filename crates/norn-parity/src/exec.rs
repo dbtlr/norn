@@ -42,6 +42,34 @@ use crate::cases::Case;
 /// - `NORN_ROOT` and `NORN_CONFIG_DIR` are removed explicitly after the
 ///   allowlist is applied. `env_clear` already drops them; the explicit
 ///   removal keeps them dropped if the allowlist ever widens.
+/// - `NORN_EPHEMERAL_TTL_SECS` is forced to [`OWNER_IDLE_TTL_SECS`]. There is
+///   no direct/no-daemon path (ADR 0017 reverses ADR 0016's cold path), and
+///   a mutating case's per-case vault isolation is unchanged — but a read
+///   case is not per-case: read cases (`mutating: false`) share ONE cached
+///   vault per (fixture, side) (`crate::fixtures`), and therefore share that
+///   cached vault's summoned owner too. Only the mutating cases get a fresh
+///   vault, and their own owner, per case. Before this override, the
+///   worst-case lingering population was on the order of the mutating-case
+///   count plus the number of distinct read fixtures, candidate-side only —
+///   roughly 75 owners (67 mutating cases + ~8 distinct read fixtures), not
+///   one per case. Left at the 120s production default they would linger
+///   that long after the run exits; the short override makes each one
+///   self-reap promptly behind the run instead.
+///   The pinned 0.48.x oracle has no ephemeral-owner tier and no reader for
+///   this env var — only the candidate side ever summons an owner — which is
+///   why forcing the same value on both sides does not turn the host into an
+///   input despite the "same value is not enough" rule above: the oracle
+///   deterministically ignores it. Accepted trade-off: at a short TTL,
+///   consecutive same-fixture read cases spaced more than TTL-seconds apart
+///   pay a ~30ms re-summon instead of reusing the still-warm owner. The same
+///   TTL also caps the OTHER side of that trade-off — the lingering-owner
+///   ceiling — at roughly TTL ÷ per-case wall time concurrently-lingering
+///   owners. Assuming a ~100ms per-case wall time: order-50 at the current
+///   5s TTL, order-20 at a 2s TTL, against the old 120s production
+///   default's order-1200 by the same formula — a ceiling never actually
+///   reached because a full gated run finishes well under 120s, so at that
+///   default owners simply accumulate for the whole run instead of
+///   self-reaping.
 pub struct SpawnEnv {
     home: PathBuf,
     cache: PathBuf,
@@ -50,6 +78,23 @@ pub struct SpawnEnv {
     /// are removed when the run ends.
     runtime: tempfile::TempDir,
 }
+
+/// The env var a `norn` binary reads to override its summoned-owner idle TTL
+/// (`norn_client::EPHEMERAL_TTL_ENV`). Duplicated as a literal rather than
+/// imported — the parity harness spawns `norn` as an opaque subprocess and
+/// must not link the crate it exercises, matching this file's existing
+/// `NORN_ROOT` / `NORN_CONFIG_DIR` literals.
+const EPHEMERAL_TTL_ENV: &str = "NORN_EPHEMERAL_TTL_SECS";
+
+/// How long a parity-spawned owner lingers idle before self-reaping. Short
+/// relative to the 120s production default (see [`SpawnEnv`]'s doc); long
+/// enough that a case's own request sequence against its fixture vault
+/// finishes well inside it. `5`, not `2`, matching the sibling convention
+/// (`TEST_OWNER_TTL_SECS` in `crates/norn/tests/cli.rs`) — a 2s TTL races a
+/// loaded CI runner's scheduling stalls (see
+/// `crates/norn-owner/tests/get_markdown_selection_guard.rs`'s NRN-462
+/// comment); 5s still fully solves lingering.
+const OWNER_IDLE_TTL_SECS: &str = "5";
 
 impl SpawnEnv {
     /// Create the scratch `HOME` / XDG tree under `root` — a directory the
@@ -93,6 +138,7 @@ impl SpawnEnv {
         command.env("XDG_RUNTIME_DIR", self.runtime.path());
         command.env_remove("NORN_ROOT");
         command.env_remove("NORN_CONFIG_DIR");
+        command.env(EPHEMERAL_TTL_ENV, OWNER_IDLE_TTL_SECS);
     }
 }
 

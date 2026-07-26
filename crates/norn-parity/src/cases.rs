@@ -76,19 +76,19 @@ pub struct Case {
     /// the ordinary argv/stdout/stderr comparison).
     pub stdin: Option<&'static [&'static str]>,
     /// Whether this argv WRITES to the vault (`set`/`new`/`edit`/`move`/
-    /// `delete`/`rewrite-wikilink`/`migrate` — arriving in later phases). A
-    /// mutating case runs each side against its OWN freshly generated vault
-    /// (never the cached per-side copy a read case shares) so one case's
-    /// writes never contaminate another and both sides start from identical
-    /// pre-state; after both sides run, the two resulting vault TREES are
-    /// compared and a difference feeds the same three-verdict machinery as a
+    /// `delete`/`rewrite-wikilink`/`migrate`). A mutating case runs each side
+    /// against its OWN freshly generated vault (never the cached per-side
+    /// copy a read case shares) so one case's writes never contaminate
+    /// another and both sides start from identical pre-state; after both
+    /// sides run, the two resulting vault TREES are compared and a
+    /// difference feeds the same three-verdict machinery as a
     /// stdout/stderr/exit difference (match / diverged-with-entry / drift —
-    /// no fourth state). `false` everywhere today: every current case is a
-    /// pure read.
+    /// no fourth state). `true` for the mutating cases, all ported; `false`
+    /// for the remaining pure-read cases.
     pub mutating: bool,
-    /// Gates whether the default (gated) bin run includes this case. Phase 0:
-    /// `false` everywhere; flips to `true` per-command as phases 1-3 port
-    /// surfaces. A ledger entry may only cite `ported` cases (see
+    /// Gates whether the default (gated) bin run includes this case. `true`
+    /// for every case in the catalog today — phases 1-3 finished porting
+    /// every surface. A ledger entry may only cite `ported` cases (see
     /// `crate::ledger`) — divergence can only be observed on a ported surface.
     pub ported: bool,
     /// The exit code the oracle is expected to produce for this argv. Any
@@ -106,9 +106,13 @@ pub struct Case {
     /// -> runner error naming case + requirement.
     pub requires_code: Option<&'static str>,
     /// Per-case normalization steps, appended to the universal
-    /// [`DEFAULT`](crate::normalize::DEFAULT). Empty everywhere today —
-    /// later-phase ported surfaces that emit e.g. timestamps add steps here
-    /// deliberately.
+    /// [`DEFAULT`](crate::normalize::DEFAULT). Most cases carry none; the
+    /// exceptions are deliberate: trace-emitting cases normalize trace ids,
+    /// authored-plan `apply` cases normalize plan hashes, and one `help` case
+    /// carries [`Normalization::SelfUpdateCommandRow`], since the oracle's
+    /// `self-update` COMMANDS row is a property of the environment/build
+    /// rather than of either binary. A ported surface that emits other
+    /// non-deterministic output adds steps here deliberately.
     pub normalize: &'static [Normalization],
     /// Authored-plan capability (NRN-394): for an `apply`-verb case, the raw
     /// `MigrationPlan` source text (JSON or YAML) with every
