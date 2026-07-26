@@ -15,6 +15,8 @@
 //! - [`Sink`] (stdout, styled record primitives) and [`Conversation`] (stderr,
 //!   the `note:` / `warning:` annotations).
 //! - [`Presenter`] / [`Diagnostic`] — the single stderr `norn:` diagnostic path.
+//! - [`stderr_progress_sink`] — the transient in-flight progress line, stderr
+//!   and TTY-only, so the payload stream is untouched by it.
 
 mod conversation;
 mod diagnostic;
@@ -23,6 +25,7 @@ mod fix_hints;
 mod format;
 mod output;
 mod presenter;
+mod progress;
 mod prompt;
 mod render;
 mod sink;
@@ -30,6 +33,7 @@ mod sink;
 pub use conversation::Conversation;
 pub use diagnostic::Diagnostic;
 pub use emit::{emit, emit_mutation};
+pub use progress::stderr_progress_sink;
 pub use format::{Format, FormatChoice, FormatSpec};
 pub use output::{
     ApplyMutationView, AuditView, CountView, DeleteMutationView, DescribeView, EditMutationView,

@@ -243,7 +243,12 @@ fn dispatch<O: Write, E: Write>(cli: Cli, presenter: &mut Presenter<O, E>) -> i3
         // MCP adapter, which runs the JSON-RPC server until the client closes
         // stdin. A resolution failure is a soft-landing diagnostic; a serve-loop
         // failure is an operational diagnostic.
-        Command::Mcp(_) => match routed::open_session(&cli.global) {
+        //
+        // The SILENT session: an MCP server owns its stdio conversation, so it
+        // consumes the owner's in-flight progress frames (which is what keeps
+        // the silence budget satisfied on a long routed mutation) and renders
+        // none of them.
+        Command::Mcp(_) => match routed::open_session_silent(&cli.global) {
             Ok(session) => match norn_mcp::serve_stdio(session) {
                 Ok(()) => display::EXIT_OK,
                 Err(err) => {

@@ -27,11 +27,31 @@ use crate::display::Diagnostic;
 pub const MAX_WAIT: Duration = Duration::from_secs(120);
 
 /// Resolve the target vault from the global flags, summon-or-connect its owner,
-/// and return a ready session. On failure returns a soft-landing [`Diagnostic`]
+/// and return a ready session that reports in-flight progress on a TTY.
+///
+/// The entry every VERB uses. On failure returns a soft-landing [`Diagnostic`]
 /// the caller presents on stderr (NRN-361): the headline plus a next-step hint
 /// where a diagnosis path genuinely exists (unknown vault name → `vault list`,
 /// a stale registry entry → re-register, and so on).
 pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
+    open_session_with_progress(global, true)
+}
+
+/// The same session with NO progress rendering — the entry `norn mcp` uses.
+///
+/// An MCP server owns its stdio conversation and has no line to redraw, so it
+/// consumes the owner's progress frames and forwards nothing. Consuming them is
+/// still what keeps the client's inter-frame silence budget satisfied, so a long
+/// routed mutation is as safe over MCP as it is on the CLI — the only thing
+/// dropped is the display.
+pub fn open_session_silent(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
+    open_session_with_progress(global, false)
+}
+
+fn open_session_with_progress(
+    global: &GlobalArgs,
+    progress: bool,
+) -> Result<OwnerSession, Diagnostic> {
     let cwd = std::env::current_dir()
         .map_err(|e| Diagnostic::new(format!("cannot read the current directory: {e}")))?;
     let home = ConfigHome::from_env().map_err(|e| config_error_diagnostic(&e))?;
@@ -122,6 +142,15 @@ pub fn open_session(global: &GlobalArgs) -> Result<OwnerSession, Diagnostic> {
         .with_events_dir(events_dir);
 
     let mut session = open(&config).map_err(|e| client_error_diagnostic(&e))?;
+    // Installed BEFORE the readiness wait: warm-up is the longest thing a first
+    // invocation waits on, so it is precisely what a user wants reported. The
+    // sink is `None` off a TTY, which is the whole piped-output guarantee — a
+    // redirected run draws nothing and its bytes are unchanged.
+    if progress {
+        if let Some(sink) = crate::display::stderr_progress_sink() {
+            session.set_progress_sink(sink);
+        }
+    }
     session
         .wait_until_ready(MAX_WAIT)
         .map_err(|e| client_error_diagnostic(&e))?;
