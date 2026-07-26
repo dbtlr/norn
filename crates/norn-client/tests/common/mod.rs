@@ -10,9 +10,13 @@ use std::time::Duration;
 use norn_client::SummonConfig;
 
 /// A [`SummonConfig`] for `vault_root` / `runtime_dir` / `ttl`, the real
-/// `norn` bin as the owner exe, and a fixed test fingerprint. Isolation
-/// across concurrent tests comes from each test's own TempDir `runtime_dir`,
-/// not the fingerprint, so every summon test in this crate shares one.
+/// `norn` bin as the owner exe, and a fixed test fingerprint (rather than
+/// [`norn_client::build_fingerprint`]) — the real fingerprint is derived from
+/// the running binary's path, which varies per test target and per build
+/// profile, so a fixed literal keeps the derived socket name stable
+/// regardless of which test binary computed it. Isolation across concurrent
+/// tests comes from each test's own TempDir `runtime_dir`, not the
+/// fingerprint, so every summon test in this crate shares one.
 pub fn base_config(vault_root: PathBuf, runtime_dir: PathBuf, ttl: Duration) -> SummonConfig {
     SummonConfig {
         vault_root,

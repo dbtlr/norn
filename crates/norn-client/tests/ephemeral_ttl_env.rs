@@ -1,9 +1,10 @@
 //! NRN-502: `NORN_EPHEMERAL_TTL_SECS` (`EPHEMERAL_TTL_ENV`), read by
 //! `ephemeral_idle_ttl`, actually reaches a REAL summoned owner and controls
 //! how promptly it self-reaps. This is the mechanism the `norn-parity`
-//! harness relies on to keep one owner per per-case fixture vault from
-//! lingering the 120s production default across a gated run of hundreds of
-//! cases — the cost is meant to be lingering, not spawning.
+//! harness relies on to bound owner lingering across a gated run of the
+//! ~167-case suite: a read case shares one owner per (fixture, side), while
+//! only a mutating case gets its own per-case owner — either way, the cost
+//! is meant to be lingering, not spawning.
 //!
 //! Hermetic like `summon_lifecycle.rs`: TempDir vault, TempDir runtime dir,
 //! bounded waits, never sleeps-as-synchronization. A single test in this

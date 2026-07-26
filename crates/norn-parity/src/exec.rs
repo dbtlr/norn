@@ -60,7 +60,12 @@ use crate::cases::Case;
 ///   input despite the "same value is not enough" rule above: the oracle
 ///   deterministically ignores it. Accepted trade-off: at a short TTL,
 ///   consecutive same-fixture read cases spaced more than TTL-seconds apart
-///   pay a ~30ms re-summon instead of reusing the still-warm owner.
+///   pay a ~30ms re-summon instead of reusing the still-warm owner. The same
+///   TTL also caps the OTHER side of that trade-off — the lingering-owner
+///   ceiling — at roughly TTL ÷ per-case wall time concurrently-lingering
+///   owners: order-20 at the current 5s TTL (vs order-50 at a 2s TTL) on a
+///   slow runner, against the old 120s production default's unbounded
+///   accumulation across a whole gated run.
 pub struct SpawnEnv {
     home: PathBuf,
     cache: PathBuf,

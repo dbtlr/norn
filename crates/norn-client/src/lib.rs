@@ -76,11 +76,19 @@ pub const DEFAULT_EPHEMERAL_TTL: Duration = Duration::from_secs(120);
 /// value.
 pub fn ephemeral_idle_ttl() -> Duration {
     match std::env::var(EPHEMERAL_TTL_ENV) {
-        Ok(raw) => match raw.trim().parse::<u64>() {
-            Ok(secs) if secs > 0 => Duration::from_secs(secs),
-            _ => DEFAULT_EPHEMERAL_TTL,
-        },
+        Ok(raw) => ttl_from_raw(&raw),
         Err(_) => DEFAULT_EPHEMERAL_TTL,
+    }
+}
+
+/// Pure parse of [`EPHEMERAL_TTL_ENV`]'s raw string value into a TTL,
+/// applying the fail-safe rules documented on [`ephemeral_idle_ttl`]:
+/// non-numeric, non-positive, or overflowing input falls back to
+/// [`DEFAULT_EPHEMERAL_TTL`].
+fn ttl_from_raw(raw: &str) -> Duration {
+    match raw.trim().parse::<u64>() {
+        Ok(secs) if secs > 0 => Duration::from_secs(secs),
+        _ => DEFAULT_EPHEMERAL_TTL,
     }
 }
 
@@ -277,31 +285,77 @@ fn ensure_runtime_dir_0700(dir: &std::path::Path) -> Result<(), ClientError> {
 mod tests {
     use super::*;
 
+    // ttl_from_raw is a pure function, so these run deterministically with no
+    // env interaction and can't flake on a caller's ambient env.
     #[test]
-    fn ephemeral_ttl_defaults_to_120s_without_env() {
-        // Only meaningful when the env is unset; guard so a caller's env can't
-        // flake it.
-        if std::env::var(EPHEMERAL_TTL_ENV).is_err() {
-            assert_eq!(ephemeral_idle_ttl(), Duration::from_secs(120));
-        }
+    fn ttl_from_raw_zero_falls_back_to_default() {
+        assert_eq!(
+            ttl_from_raw("0"),
+            DEFAULT_EPHEMERAL_TTL,
+            "a 0-second override must fail-safe to the default, not arm a livelock \
+             (an owner with ttl=0 reaps at its first idle tick mid-warm-up, and the \
+             client's resummon-on-gone retry would spawn another that does the same)"
+        );
     }
 
     #[test]
-    fn ephemeral_ttl_zero_falls_back_to_default() {
-        // Only meaningful when the env is unset before this test sets it;
-        // guard so a caller's env can't flake it, matching the sibling
-        // default-without-env test above.
-        if std::env::var(EPHEMERAL_TTL_ENV).is_err() {
-            std::env::set_var(EPHEMERAL_TTL_ENV, "0");
-            let ttl = ephemeral_idle_ttl();
-            std::env::remove_var(EPHEMERAL_TTL_ENV);
-            assert_eq!(
-                ttl,
-                Duration::from_secs(120),
-                "a 0-second override must fail-safe to the default, not arm a livelock \
-                 (an owner with ttl=0 reaps at its first idle tick mid-warm-up, and the \
-                 client's resummon-on-gone retry would spawn another that does the same)"
-            );
+    fn ttl_from_raw_plus_zero_falls_back_to_default() {
+        assert_eq!(ttl_from_raw("+0"), DEFAULT_EPHEMERAL_TTL);
+    }
+
+    #[test]
+    fn ttl_from_raw_zero_padded_falls_back_to_default() {
+        assert_eq!(ttl_from_raw("00"), DEFAULT_EPHEMERAL_TTL);
+    }
+
+    #[test]
+    fn ttl_from_raw_padded_whitespace_zero_falls_back_to_default() {
+        assert_eq!(ttl_from_raw(" 0 "), DEFAULT_EPHEMERAL_TTL);
+    }
+
+    #[test]
+    fn ttl_from_raw_empty_falls_back_to_default() {
+        assert_eq!(ttl_from_raw(""), DEFAULT_EPHEMERAL_TTL);
+    }
+
+    #[test]
+    fn ttl_from_raw_negative_falls_back_to_default() {
+        assert_eq!(ttl_from_raw("-1"), DEFAULT_EPHEMERAL_TTL);
+    }
+
+    #[test]
+    fn ttl_from_raw_non_numeric_falls_back_to_default() {
+        assert_eq!(ttl_from_raw("abc"), DEFAULT_EPHEMERAL_TTL);
+    }
+
+    #[test]
+    fn ttl_from_raw_trims_surrounding_whitespace() {
+        assert_eq!(ttl_from_raw(" 5 "), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn ttl_from_raw_overflow_falls_back_to_default() {
+        assert_eq!(ttl_from_raw("99999999999999999999"), DEFAULT_EPHEMERAL_TTL);
+    }
+
+    #[test]
+    fn ephemeral_idle_ttl_reads_the_env_var() {
+        // The only test that touches the process env for this knob. Rather
+        // than silently skipping when a caller's env already set the var
+        // (as the prior guarded tests did), save whatever value is present
+        // and restore it afterward, so the test always exercises the real
+        // env-reading path.
+        let prior = std::env::var(EPHEMERAL_TTL_ENV).ok();
+
+        std::env::set_var(EPHEMERAL_TTL_ENV, "5");
+        assert_eq!(ephemeral_idle_ttl(), Duration::from_secs(5));
+
+        std::env::set_var(EPHEMERAL_TTL_ENV, "0");
+        assert_eq!(ephemeral_idle_ttl(), DEFAULT_EPHEMERAL_TTL);
+
+        match prior {
+            Some(value) => std::env::set_var(EPHEMERAL_TTL_ENV, value),
+            None => std::env::remove_var(EPHEMERAL_TTL_ENV),
         }
     }
 

@@ -35,7 +35,7 @@ The default, applied across every variable norn reads: **an empty value is treat
 | `HOME` | unset | relative → loud error | last-resort config-home base. |
 | `XDG_RUNTIME_DIR` | unset (fall to `TMPDIR`) | n/a | owner-socket runtime dir base. |
 | `TMPDIR` | unset (fall to system temp) | n/a | owner-socket runtime dir base; empty now falls through rather than erroring (repaired in this sweep). |
-| `NORN_EPHEMERAL_TTL_SECS` | unset (default 120s) | fail-safe to default | resource knob (idle-owner lifetime only, never vault correctness); an unparseable value falls back to the default rather than aborting a command. |
+| `NORN_EPHEMERAL_TTL_SECS` | unset (default 120s) | fail-safe to default | resource knob (idle-owner lifetime only, never vault correctness); a non-positive or unparseable value falls back to the default rather than aborting a command. |
 | `NORN_OWNER_WARMUP_DELAY_MS` | no delay | no delay | internal test/debug seam. |
 | cache tuning knobs (`norn-core`) | debug-only | debug-only | compiled out of release builds entirely (`#[cfg(debug_assertions)]`). |
 

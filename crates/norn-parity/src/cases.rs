@@ -83,8 +83,8 @@ pub struct Case {
     /// pre-state; after both sides run, the two resulting vault TREES are
     /// compared and a difference feeds the same three-verdict machinery as a
     /// stdout/stderr/exit difference (match / diverged-with-entry / drift —
-    /// no fourth state). `false` everywhere today: every current case is a
-    /// pure read.
+    /// no fourth state). `true` for the ~72 write-verb cases already ported;
+    /// `false` for the remaining pure-read cases.
     pub mutating: bool,
     /// Gates whether the default (gated) bin run includes this case. Phase 0:
     /// `false` everywhere; flips to `true` per-command as phases 1-3 port

@@ -87,7 +87,7 @@ fn a_spawned_binary_sees_a_scratch_home_and_none_of_the_caller_environment() {
         "PATH is on the allowlist so a binary can still find what it shells out to, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("NORN_EPHEMERAL_TTL_SECS=5"),
+        stdout.lines().any(|l| l == "NORN_EPHEMERAL_TTL_SECS=5"),
         "the owner idle TTL override must reach a spawned binary, got:\n{stdout}"
     );
 }
