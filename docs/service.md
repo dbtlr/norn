@@ -64,7 +64,7 @@ norn service start       # load an installed-but-stopped daemon
 norn service stop        # unload the daemon (an honest stop — see below)
 norn service restart     # kill and rerun the loaded daemon
 norn service status      # host launchd state + a live control-ping
-norn service status --vault PATH  # also report one vault's serving/writer state
+norn service status --vault PATH  # also report one vault's serving state
 ```
 
 Every verb accepts `--format records|json` (default `records`); `json` always emits a machine-readable object, even on failure. `norn service` is macOS-only today — on any other host every verb refuses with:
@@ -150,7 +150,6 @@ serve: loaded, running (pid 73414)
   uptime 3m12s
   vault  /Users/example/vaults/atlas
   serving ready
-  writer  idle · sequence 17
   socket ~/.cache/norn/run/norn.sock
   plist  ~/Library/LaunchAgents/com.dbtlr.norn.serve.plist
   log    ~/.cache/norn/log/serve.log

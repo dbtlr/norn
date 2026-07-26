@@ -1208,16 +1208,18 @@ mod tests {
         assert_eq!(got.serving, ServingState::Ready);
 
         let observed = sink.observations();
-        assert_eq!(
-            observed.len(),
-            1,
-            "one observation per heartbeat floor, not one per poll: {observed:?}"
+        assert!(
+            (1..=2).contains(&observed.len()),
+            "one observation per heartbeat floor, not one per ~20ms poll — a \
+             1.7s warm-up admits one draw, or two when runner jitter carries \
+             the wait past the second floor: {observed:?}"
         );
-        assert_eq!(observed[0].phase, ProgressPhase::Warming);
-        assert_eq!(
-            (observed[0].done, observed[0].total),
-            (None, None),
-            "a warming observation is the phase alone"
+        assert!(
+            observed
+                .iter()
+                .all(|p| p.phase == ProgressPhase::Warming
+                    && (p.done, p.total) == (None, None)),
+            "a warming observation is the phase alone: {observed:?}"
         );
         assert_eq!(
             sink.finishes(),
