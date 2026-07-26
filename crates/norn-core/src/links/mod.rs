@@ -18,9 +18,12 @@
 
 pub mod markdown;
 pub mod resolve;
+pub(crate) mod reverse;
 mod target;
 pub mod wikilink;
 
 pub use markdown::parse_markdown_links;
 pub use resolve::resolve_links;
+pub(crate) use resolve::resolve_links_within;
+pub(crate) use reverse::ReverseLinkIndex;
 pub use wikilink::{parse_frontmatter_wikilinks, parse_wikilinks};

@@ -129,9 +129,20 @@ pub(crate) fn docs_parsed_count() -> usize {
 /// distinct affected-path strings (e.g. `Note.md` and `note.md`) can name the
 /// same file on disk, so each affected path's canonical form is checked against
 /// every canonical form already emitted this overlay and the repeat is skipped —
-/// the first spelling emitted (sorted order) wins. Link resolution runs over the
-/// whole composite because a single changed file can flip the resolution of
-/// links that point at it from anywhere in the vault.
+/// the first spelling emitted (sorted order) wins.
+///
+/// Link resolution keeps whole-graph SEMANTICS but bounded SCOPE (ADR
+/// [0005](../../../docs/decisions/0005-trusted-cache-via-warm-service.md),
+/// architecture invariant 13). Candidate lookups still see every document — a
+/// created file is visible to the whole vault — but only the affected set is
+/// re-derived: the changed documents themselves, plus the blast radius the
+/// [`ReverseLinkIndex`](crate::links::ReverseLinkIndex) reports for the changed
+/// paths' lookup keys. That radius is exactly the links a change can flip in
+/// either direction: a create can resolve a previously-dangling link elsewhere
+/// in the vault, and a delete can dangle a resolved one — both are documents
+/// that read a key the changed path owns. Every other link's answer is a
+/// function of table entries none of the changed paths touch, so re-deriving it
+/// would reproduce the value already stored.
 pub(crate) fn overlay_changed_paths(
     baseline: &mut GraphIndex,
     root: &Utf8Path,
@@ -139,6 +150,13 @@ pub(crate) fn overlay_changed_paths(
     options: &IndexOptions,
 ) {
     let affected: std::collections::BTreeSet<Utf8PathBuf> = changed_paths.iter().cloned().collect();
+
+    // Computed against the PRE-change documents, which is where the links that
+    // a create can newly satisfy — and a delete can newly dangle — still live.
+    let mut rescope = crate::links::ReverseLinkIndex::build(&baseline.documents)
+        .sources_for_paths(affected.iter().map(Utf8PathBuf::as_path));
+    rescope.extend(affected.iter().cloned());
+
     baseline
         .documents
         .retain(|doc| !affected.contains(&doc.path));
@@ -160,12 +178,19 @@ pub(crate) fn overlay_changed_paths(
         }
         baseline.files.push(file);
         if let Some(document) = document {
+            // The emitted document's path is its NORMALIZED form, which can
+            // differ from the caller's spelling in `affected` (e.g. `./probe.md`
+            // vs. the emitted `probe.md`). `resolve_links_within` scopes by
+            // `document.path`, so the rescope set must carry that normalized
+            // form too, or the freshly parsed document's own links never get
+            // re-resolved.
+            rescope.insert(document.path.clone());
             baseline.documents.push(document);
         }
     }
     baseline.documents.sort_by(|a, b| a.path.cmp(&b.path));
     baseline.files.sort_by(|a, b| a.path.cmp(&b.path));
-    resolve_links(&baseline.files, &mut baseline.documents);
+    crate::links::resolve_links_within(&baseline.files, &mut baseline.documents, Some(&rescope));
 }
 
 /// Parse ONE vault-relative path into its graph representation under the exact
@@ -853,6 +878,70 @@ mod tests {
         assert_eq!(
             matching_files, 1,
             "one physical file must overlay exactly one VaultFile too"
+        );
+    }
+
+    #[test]
+    fn overlay_changed_paths_resolves_new_documents_own_links_under_a_non_normalized_spelling() {
+        // A create's changed-path spelling need not already be normalized (a
+        // mutation-path caller can pass `./probe.md`). The freshly parsed
+        // document's OWN path is emitted in normalized form (`probe.md`), which
+        // must still land in the rescope set — otherwise `resolve_links_within`
+        // (which scopes by `document.path`) never re-derives the new document's
+        // own outgoing links, and they publish `Unresolved` with no
+        // `unresolved_reason` instead of resolving.
+        let (_tmp, root) = vault();
+        write(&root, "hub.md", "# Hub\n\nLinks to [[probe]].\n");
+        write(&root, "other.md", "# Other\n");
+        let mut baseline = build_index(&root).unwrap();
+
+        write(
+            &root,
+            "probe.md",
+            "# Probe\n\nLinks to [[other]] and [[hub]].\n",
+        );
+        let changed = vec![Utf8PathBuf::from("./probe.md")];
+        overlay_changed_paths(&mut baseline, &root, &changed, &IndexOptions::default());
+
+        let probe = baseline
+            .documents
+            .iter()
+            .find(|document| document.path == "probe.md")
+            .unwrap_or_else(|| {
+                panic!(
+                    "probe.md missing from overlaid documents: {:?}",
+                    baseline
+                        .documents
+                        .iter()
+                        .map(|d| d.path.as_str())
+                        .collect::<Vec<_>>()
+                )
+            });
+
+        let other_link = probe
+            .links
+            .iter()
+            .find(|link| link.target == "other")
+            .expect("probe.md should have a link targeting other");
+        assert_eq!(
+            other_link.status,
+            LinkStatus::Resolved,
+            "probe.md's own [[other]] link must resolve; got {:?} (reason {:?})",
+            other_link.status,
+            other_link.unresolved_reason
+        );
+
+        let hub_link = probe
+            .links
+            .iter()
+            .find(|link| link.target == "hub")
+            .expect("probe.md should have a link targeting hub");
+        assert_eq!(
+            hub_link.status,
+            LinkStatus::Resolved,
+            "probe.md's own [[hub]] link must resolve; got {:?} (reason {:?})",
+            hub_link.status,
+            hub_link.unresolved_reason
         );
     }
 }

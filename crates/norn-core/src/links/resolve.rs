@@ -13,227 +13,313 @@
 //! matches one doc's alias is surfaced as a deterministic `repair` hint (rewrite
 //! to the canonical stem link), not resolved here.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Component;
 
 use crate::domain::{Document, Link, LinkKind, LinkStatus, UnresolvedReason, VaultFile};
 use camino::{Utf8Path, Utf8PathBuf};
 use norn_frontmatter::heading::slugify;
 
+// Test-only, PER-THREAD tally of links actually re-resolved on the current
+// thread. A whole-graph resolve touches every link in the vault; a bounded
+// re-resolution touches the blast radius. The incremental-cost guard resets it,
+// drives one create, and reads the count to prove re-resolution scope tracks the
+// affected set, not the vault. Thread-local so the parallel test runner's other
+// resolvers never pollute the measurement.
+#[cfg(test)]
+thread_local! {
+    static LINKS_RESOLVED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Reset the current thread's link-resolution tally (test-only).
+#[cfg(test)]
+pub(crate) fn links_resolved_reset() {
+    LINKS_RESOLVED.with(|count| count.set(0));
+}
+
+/// Read the current thread's link-resolution tally (test-only).
+#[cfg(test)]
+pub(crate) fn links_resolved_count() -> usize {
+    LINKS_RESOLVED.with(|count| count.get())
+}
+
 /// Resolve every link on every document in place against the vault's file and
 /// document tables. Populates each link's `status`, `resolved_path`,
-/// `unresolved_reason`, and `candidates`.
+/// `unresolved_reason`, and `candidates`. This is the whole-graph entry point —
+/// cold start and full derivation; a maintenance path that knows its blast
+/// radius calls [`resolve_links_within`] instead.
 pub fn resolve_links(files: &[VaultFile], documents: &mut [Document]) {
-    let mut by_path: HashMap<String, Utf8PathBuf> = HashMap::new();
-    let mut by_path_lower: HashMap<String, Utf8PathBuf> = HashMap::new();
-    let mut by_stem: HashMap<String, Vec<Utf8PathBuf>> = HashMap::new();
-    let mut facts_by_path: HashMap<Utf8PathBuf, DocumentFacts> = HashMap::new();
-
-    for file in files {
-        by_path.insert(file.path.as_str().to_string(), file.path.clone());
-        by_path_lower.insert(file.path.as_str().to_lowercase(), file.path.clone());
-    }
-
-    for document in documents.iter() {
-        by_stem
-            .entry(document.stem.to_lowercase())
-            .or_default()
-            .push(document.path.clone());
-        facts_by_path.insert(
-            document.path.clone(),
-            DocumentFacts {
-                heading_slugs: document
-                    .headings
-                    .iter()
-                    .map(|heading| heading.slug.clone())
-                    .collect(),
-                block_ids: document.block_ids.clone(),
-            },
-        );
-    }
-
-    for document in documents.iter_mut() {
-        for link in &mut document.links {
-            let candidates = match link.kind {
-                LinkKind::Markdown => {
-                    resolve_markdown_link(&document.path, &link.target, &by_path, &by_path_lower)
-                }
-                LinkKind::Embed => {
-                    if link.target.is_empty() && (link.anchor.is_some() || link.block_ref.is_some())
-                    {
-                        vec![document.path.clone()]
-                    } else {
-                        resolve_embed_link(
-                            &document.path,
-                            &link.target,
-                            &by_path,
-                            &by_path_lower,
-                            &by_stem,
-                        )
-                    }
-                }
-                LinkKind::Wikilink => {
-                    if link.target.is_empty() && (link.anchor.is_some() || link.block_ref.is_some())
-                    {
-                        vec![document.path.clone()]
-                    } else {
-                        resolve_wikilink(&link.target, &by_path, &by_path_lower, &by_stem)
-                    }
-                }
-            };
-
-            match candidates.as_slice() {
-                [single] => {
-                    link.resolved_path = Some(single.clone());
-                    link.candidates = Vec::new();
-                    validate_resolved_reference(link, single, &facts_by_path);
-                }
-                [] => {
-                    link.status = LinkStatus::Unresolved;
-                    link.resolved_path = None;
-                    link.unresolved_reason = Some(UnresolvedReason::TargetMissing);
-                    link.candidates = Vec::new();
-                }
-                many => {
-                    link.status = LinkStatus::Ambiguous;
-                    link.resolved_path = None;
-                    link.unresolved_reason = Some(UnresolvedReason::Ambiguous);
-                    link.candidates = many.to_vec();
-                }
-            }
-        }
-    }
+    resolve_links_within(files, documents, None);
 }
 
-#[derive(Clone)]
-struct DocumentFacts {
-    heading_slugs: Vec<String>,
-    block_ids: Vec<String>,
-}
-
-fn validate_resolved_reference(
-    link: &mut Link,
-    target_path: &Utf8PathBuf,
-    facts_by_path: &HashMap<Utf8PathBuf, DocumentFacts>,
+/// Resolve links for the documents named by `scope` (all of them when `None`),
+/// against the tables derived from the WHOLE `files`/`documents` pair.
+///
+/// Resolution semantics stay whole-graph: every candidate lookup sees every
+/// document, so a target added anywhere is visible here. What `scope` bounds is
+/// which links are re-derived — the caller asserts that every other link's
+/// answer is unchanged. [`ReverseLinkIndex`](super::reverse::ReverseLinkIndex)
+/// is what lets a maintenance path make that assertion soundly.
+///
+/// Resolution runs in two passes so it can borrow the documents it reads instead
+/// of copying them: pass one computes every in-scope link's outcome while
+/// `documents` is borrowed immutably (the lookup tables point INTO it — no
+/// per-document heading/block-id copies), pass two writes the outcomes back.
+pub(crate) fn resolve_links_within(
+    files: &[VaultFile],
+    documents: &mut [Document],
+    scope: Option<&BTreeSet<Utf8PathBuf>>,
 ) {
-    let Some(facts) = facts_by_path.get(target_path) else {
-        link.status = LinkStatus::Resolved;
-        link.unresolved_reason = None;
-        return;
+    let planned = {
+        let tables = ResolutionTables::build(files, documents);
+        let mut planned: Vec<(usize, Vec<LinkResolution>)> = Vec::new();
+        for (position, document) in documents.iter().enumerate() {
+            if scope.is_some_and(|scope| !scope.contains(&document.path)) {
+                continue;
+            }
+            if document.links.is_empty() {
+                continue;
+            }
+            #[cfg(test)]
+            LINKS_RESOLVED.with(|count| count.set(count.get() + document.links.len()));
+            let outcomes = document
+                .links
+                .iter()
+                .map(|link| tables.resolve(&document.path, link))
+                .collect();
+            planned.push((position, outcomes));
+        }
+        planned
     };
 
-    if let Some(anchor) = &link.anchor {
-        let anchor_slug = slugify(anchor);
-        if !facts.heading_slugs.iter().any(|slug| slug == &anchor_slug) {
-            link.status = LinkStatus::Unresolved;
-            link.unresolved_reason = Some(UnresolvedReason::AnchorMissing);
-            return;
+    for (position, outcomes) in planned {
+        for (link, outcome) in documents[position].links.iter_mut().zip(outcomes) {
+            outcome.write_into(link);
+        }
+    }
+}
+
+/// One link's resolution outcome, owned so it can outlive the immutable borrow
+/// of the documents it was derived from.
+struct LinkResolution {
+    status: LinkStatus,
+    resolved_path: Option<Utf8PathBuf>,
+    unresolved_reason: Option<UnresolvedReason>,
+    candidates: Vec<Utf8PathBuf>,
+}
+
+impl LinkResolution {
+    fn write_into(self, link: &mut Link) {
+        link.status = self.status;
+        link.resolved_path = self.resolved_path;
+        link.unresolved_reason = self.unresolved_reason;
+        link.candidates = self.candidates;
+    }
+}
+
+/// The lookup tables the resolution ladder consults, borrowed from the graph
+/// they describe. Every value is a reference into `files`/`documents`, so
+/// building the tables costs hashing and no content copies.
+struct ResolutionTables<'a> {
+    by_path: HashMap<&'a str, &'a Utf8Path>,
+    by_path_lower: HashMap<String, &'a Utf8Path>,
+    by_stem: HashMap<String, Vec<&'a Utf8Path>>,
+    by_document_path: HashMap<&'a Utf8Path, &'a Document>,
+}
+
+impl<'a> ResolutionTables<'a> {
+    fn build(files: &'a [VaultFile], documents: &'a [Document]) -> Self {
+        let mut by_path: HashMap<&'a str, &'a Utf8Path> = HashMap::with_capacity(files.len());
+        let mut by_path_lower: HashMap<String, &'a Utf8Path> = HashMap::with_capacity(files.len());
+        for file in files {
+            by_path.insert(file.path.as_str(), file.path.as_path());
+            by_path_lower.insert(file.path.as_str().to_lowercase(), file.path.as_path());
+        }
+
+        let mut by_stem: HashMap<String, Vec<&'a Utf8Path>> = HashMap::new();
+        let mut by_document_path: HashMap<&'a Utf8Path, &'a Document> =
+            HashMap::with_capacity(documents.len());
+        for document in documents {
+            by_stem
+                .entry(document.stem.to_lowercase())
+                .or_default()
+                .push(document.path.as_path());
+            by_document_path.insert(document.path.as_path(), document);
+        }
+
+        Self {
+            by_path,
+            by_path_lower,
+            by_stem,
+            by_document_path,
         }
     }
 
-    if let Some(block_ref) = &link.block_ref {
-        if !facts.block_ids.iter().any(|block_id| block_id == block_ref) {
-            link.status = LinkStatus::Unresolved;
-            link.unresolved_reason = Some(UnresolvedReason::BlockRefMissing);
-            return;
+    fn resolve(&self, source_path: &Utf8Path, link: &Link) -> LinkResolution {
+        let candidates = match link.kind {
+            LinkKind::Markdown => self.resolve_markdown_link(source_path, &link.target),
+            LinkKind::Embed => {
+                if is_self_reference(link) {
+                    vec![source_path]
+                } else {
+                    self.resolve_embed_link(source_path, &link.target)
+                }
+            }
+            LinkKind::Wikilink => {
+                if is_self_reference(link) {
+                    vec![source_path]
+                } else {
+                    self.resolve_wikilink(&link.target)
+                }
+            }
+        };
+
+        match candidates.as_slice() {
+            [single] => self.resolved_reference(link, single),
+            [] => LinkResolution {
+                status: LinkStatus::Unresolved,
+                resolved_path: None,
+                unresolved_reason: Some(UnresolvedReason::TargetMissing),
+                candidates: Vec::new(),
+            },
+            many => LinkResolution {
+                status: LinkStatus::Ambiguous,
+                resolved_path: None,
+                unresolved_reason: Some(UnresolvedReason::Ambiguous),
+                candidates: many.iter().map(|path| path.to_path_buf()).collect(),
+            },
         }
     }
 
-    link.status = LinkStatus::Resolved;
-    link.unresolved_reason = None;
-}
+    fn resolved_reference(&self, link: &Link, target_path: &Utf8Path) -> LinkResolution {
+        let resolved = LinkResolution {
+            status: LinkStatus::Resolved,
+            resolved_path: Some(target_path.to_path_buf()),
+            unresolved_reason: None,
+            candidates: Vec::new(),
+        };
+        let Some(target) = self.by_document_path.get(target_path) else {
+            return resolved;
+        };
 
-fn resolve_markdown_link(
-    source_path: &Utf8Path,
-    target: &str,
-    by_path: &HashMap<String, Utf8PathBuf>,
-    by_path_lower: &HashMap<String, Utf8PathBuf>,
-) -> Vec<Utf8PathBuf> {
-    let base = source_path.parent().unwrap_or_else(|| Utf8Path::new(""));
-    resolve_path_like_target(base, target, by_path, by_path_lower)
-}
-
-fn resolve_embed_link(
-    source_path: &Utf8Path,
-    target: &str,
-    by_path: &HashMap<String, Utf8PathBuf>,
-    by_path_lower: &HashMap<String, Utf8PathBuf>,
-    by_stem: &HashMap<String, Vec<Utf8PathBuf>>,
-) -> Vec<Utf8PathBuf> {
-    let base = source_path.parent().unwrap_or_else(|| Utf8Path::new(""));
-    let base_matches = resolve_path_like_target(base, target, by_path, by_path_lower);
-    if !base_matches.is_empty() {
-        return base_matches;
-    }
-
-    let root_matches = resolve_path_like_target(Utf8Path::new(""), target, by_path, by_path_lower);
-    if !root_matches.is_empty() {
-        return root_matches;
-    }
-
-    resolve_wikilink(target, by_path, by_path_lower, by_stem)
-}
-
-fn resolve_wikilink(
-    target: &str,
-    by_path: &HashMap<String, Utf8PathBuf>,
-    by_path_lower: &HashMap<String, Utf8PathBuf>,
-    by_stem: &HashMap<String, Vec<Utf8PathBuf>>,
-) -> Vec<Utf8PathBuf> {
-    if target.contains('/') {
-        let path_matches =
-            resolve_path_like_target(Utf8Path::new(""), target, by_path, by_path_lower);
-        if !path_matches.is_empty() {
-            return path_matches;
+        if let Some(anchor) = &link.anchor {
+            let anchor_slug = slugify(anchor);
+            if !target
+                .headings
+                .iter()
+                .any(|heading| heading.slug == anchor_slug)
+            {
+                return LinkResolution {
+                    status: LinkStatus::Unresolved,
+                    unresolved_reason: Some(UnresolvedReason::AnchorMissing),
+                    ..resolved
+                };
+            }
         }
+
+        if let Some(block_ref) = &link.block_ref {
+            if !target
+                .block_ids
+                .iter()
+                .any(|block_id| block_id == block_ref)
+            {
+                return LinkResolution {
+                    status: LinkStatus::Unresolved,
+                    unresolved_reason: Some(UnresolvedReason::BlockRefMissing),
+                    ..resolved
+                };
+            }
+        }
+
+        resolved
     }
 
-    // Derive the stem key WITHOUT `Path::file_stem`, which truncates at the LAST
-    // dot and mangles dotted stems (`v0.40.0` -> `v0.40`, `periodic-0.4-review`
-    // -> `periodic-0`), stranding otherwise-resolvable wikilinks (NRN-123).
-    // Replicate file_stem's two useful effects deliberately: take the final path
-    // component (so a stale `dir/name` target still falls back to the `name`
-    // stem, keeping such links in the move/delete cascade set), then strip only a
-    // literal `.md` (never an arbitrary extension). Lowercase once; by_stem keys
-    // are lowercased at construction.
-    //
-    // The ladder ends at stem (NRN-455): aliases do NOT participate in resolution.
-    // A target that matches only an `aliases` entry returns ∅ here (dangling), and
-    // `repair` offers the deterministic rewrite-to-stem hint instead.
+    fn resolve_markdown_link(&self, source_path: &Utf8Path, target: &str) -> Vec<&'a Utf8Path> {
+        let base = source_path.parent().unwrap_or_else(|| Utf8Path::new(""));
+        self.resolve_path_like_target(base, target)
+    }
+
+    fn resolve_embed_link(&self, source_path: &Utf8Path, target: &str) -> Vec<&'a Utf8Path> {
+        let base = source_path.parent().unwrap_or_else(|| Utf8Path::new(""));
+        let base_matches = self.resolve_path_like_target(base, target);
+        if !base_matches.is_empty() {
+            return base_matches;
+        }
+
+        let root_matches = self.resolve_path_like_target(Utf8Path::new(""), target);
+        if !root_matches.is_empty() {
+            return root_matches;
+        }
+
+        self.resolve_wikilink(target)
+    }
+
+    fn resolve_wikilink(&self, target: &str) -> Vec<&'a Utf8Path> {
+        if target.contains('/') {
+            let path_matches = self.resolve_path_like_target(Utf8Path::new(""), target);
+            if !path_matches.is_empty() {
+                return path_matches;
+            }
+        }
+
+        // The ladder ends at stem (NRN-455): aliases do NOT participate in
+        // resolution. A target that matches only an `aliases` entry returns ∅
+        // here (dangling), and `repair` offers the deterministic
+        // rewrite-to-stem hint instead.
+        self.by_stem
+            .get(&wikilink_stem_key(target))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn resolve_path_like_target(&self, base: &Utf8Path, target: &str) -> Vec<&'a Utf8Path> {
+        let candidate = normalize_relative(base, target);
+        if let Some(path) = self.lookup_path(&candidate) {
+            return vec![path];
+        }
+        if candidate.extension().is_none() {
+            if let Some(path) = self.lookup_path(&candidate.with_extension("md")) {
+                return vec![path];
+            }
+        }
+        Vec::new()
+    }
+
+    fn lookup_path(&self, candidate: &Utf8Path) -> Option<&'a Utf8Path> {
+        self.by_path.get(candidate.as_str()).copied().or_else(|| {
+            self.by_path_lower
+                .get(&candidate.as_str().to_lowercase())
+                .copied()
+        })
+    }
+}
+
+/// An empty target carrying an anchor or a block ref points at the source
+/// document itself.
+fn is_self_reference(link: &Link) -> bool {
+    link.target.is_empty() && (link.anchor.is_some() || link.block_ref.is_some())
+}
+
+/// The `by_stem` bucket key a wikilink target derives.
+///
+/// Derived WITHOUT `Path::file_stem`, which truncates at the LAST dot and
+/// mangles dotted stems (`v0.40.0` -> `v0.40`, `periodic-0.4-review` ->
+/// `periodic-0`), stranding otherwise-resolvable wikilinks (NRN-123). Replicate
+/// file_stem's two useful effects deliberately: take the final path component
+/// (so a stale `dir/name` target still falls back to the `name` stem, keeping
+/// such links in the move/delete cascade set), then strip only a literal `.md`
+/// (never an arbitrary extension). Lowercase once; `by_stem` keys are lowercased
+/// at construction.
+pub(super) fn wikilink_stem_key(target: &str) -> String {
     let target_lower = target.to_lowercase();
     let last_component = target_lower.rsplit('/').next().unwrap_or(&target_lower);
-    let stem = last_component.strip_suffix(".md").unwrap_or(last_component);
-    by_stem.get(stem).cloned().unwrap_or_default()
+    last_component
+        .strip_suffix(".md")
+        .unwrap_or(last_component)
+        .to_string()
 }
 
-fn resolve_path_like_target(
-    base: &Utf8Path,
-    target: &str,
-    by_path: &HashMap<String, Utf8PathBuf>,
-    by_path_lower: &HashMap<String, Utf8PathBuf>,
-) -> Vec<Utf8PathBuf> {
-    let candidate = normalize_relative(base, target);
-    if let Some(path) = by_path.get(candidate.as_str()) {
-        return vec![path.clone()];
-    }
-    if let Some(path) = by_path_lower.get(&candidate.as_str().to_lowercase()) {
-        return vec![path.clone()];
-    }
-
-    if candidate.extension().is_none() {
-        let with_markdown_extension = candidate.with_extension("md");
-        if let Some(path) = by_path.get(with_markdown_extension.as_str()) {
-            return vec![path.clone()];
-        }
-        if let Some(path) = by_path_lower.get(&with_markdown_extension.as_str().to_lowercase()) {
-            return vec![path.clone()];
-        }
-    }
-
-    Vec::new()
-}
-
-fn normalize_relative(base: &Utf8Path, target: &str) -> Utf8PathBuf {
+pub(super) fn normalize_relative(base: &Utf8Path, target: &str) -> Utf8PathBuf {
     let joined = base.join(target);
     let mut normalized = Utf8PathBuf::new();
     for component in joined.as_std_path().components() {

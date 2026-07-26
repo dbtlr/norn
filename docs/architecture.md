@@ -59,7 +59,7 @@ Read it before adding a surface, a crate edge, or a mutation path. The point is 
 
 ## 13. Maintenance is incremental by default
 
-**A maintenance action touches the affected set, never the world.** A change's blast radius is computed — links from a touched document plus links to its stems and aliases, found by reverse lookup — and re-derivation is bounded to it; full derivation runs only at cold start and as the terminal heal rung. Complexity is contract: a substrate path that re-reads or re-resolves the whole vault per touched path is a defect even when its output is correct, because the maintenance layer's politeness budget is what keeps requests fast at scale (ADR [0005](./decisions/0005-trusted-cache-via-warm-service.md), [0017](./decisions/0017-registered-vaults-summoned-owners.md)).
+**A maintenance action touches the affected set, never the world.** A change's blast radius is computed — links from a touched document plus links to its path and stem, found by reverse lookup — and re-derivation is bounded to it; full derivation runs only at cold start and as the terminal heal rung. Complexity is contract: a substrate path that re-reads or re-resolves the whole vault per touched path is a defect even when its output is correct, because the maintenance layer's politeness budget is what keeps requests fast at scale (ADR [0005](./decisions/0005-trusted-cache-via-warm-service.md), [0017](./decisions/0017-registered-vaults-summoned-owners.md)).
 
 ## See also
 
