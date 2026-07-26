@@ -55,12 +55,14 @@ Read it before adding a surface, a crate edge, or a mutation path. The point is 
 
 ## 12. A cache fault degrades the cache, never the request
 
-**The cache is pure derivation, so a failure to maintain it never turns a confirmed apply into a request failure.** The mutation seam captures a pre-write baseline, lets the write land in the vault, and then commits the increment through the `norn-owner` runtime — the `commit_apply_increments_fire_and_degrade` call, whose result that seam deliberately drops. A failed increment evicts the generation it ran on, and the next read re-derives that generation from the files, which are the source of truth; the caller still receives the report for the write that landed. *Interim:* eviction is today's first response and is decided-to-be-replaced by a dirty-path queue plus a timer-driven heal worker in the maintenance layer; this invariant survives that change, because eviction and full re-derivation remain the terminal rung beneath the cheaper heals (ADR [0005](./decisions/0005-trusted-cache-via-warm-service.md), [0013](./decisions/0013-generational-contexts-two-class-writer.md), [0014](./decisions/0014-atomic-cache-publication.md)).
+**The cache is pure derivation, so a failure to maintain it never turns a confirmed apply into a request failure.** The mutation seam captures a pre-write baseline, lets the write land in the vault, and commits the increment afterward; the caller receives the report for the write that landed regardless of the increment's fate. A failed increment enqueues the touched paths in the store's dirty-path queue — write-ahead, in the same transaction as the attempt, so a live owner never holds an unrecorded failed increment — and a timer-driven heal worker re-derives just those paths. A request touching a queued-dirty path heals it inline before serving: known-dirty rows are never served silently, and the operator learns of the degradation as a report warning. Eviction is the terminal rung, not the first response — repeated heal failure or a breached backlog age escalates to generation eviction plus full re-derive, and whole-store corruption to delete-and-rebuild. *Transition:* eviction-first remains the implemented response until the queue lands (NRN-463); the ladder above is the decided contract it lands into (ADR [0005](./decisions/0005-trusted-cache-via-warm-service.md), [0013](./decisions/0013-generational-contexts-two-class-writer.md), [0014](./decisions/0014-atomic-cache-publication.md)).
+
+## 13. Maintenance is incremental by default
+
+**A maintenance action touches the affected set, never the world.** A change's blast radius is computed — links from a touched document plus links to its stems and aliases, found by reverse lookup — and re-derivation is bounded to it; full derivation runs only at cold start and as the terminal heal rung. Complexity is contract: a substrate path that re-reads or re-resolves the whole vault per touched path is a defect even when its output is correct, because the maintenance layer's politeness budget is what keeps requests fast at scale (ADR [0005](./decisions/0005-trusted-cache-via-warm-service.md), [0017](./decisions/0017-registered-vaults-summoned-owners.md)).
 
 ## See also
 
 - [Concepts](concepts.md) — the vault graph, frontmatter, and validate/repair loop these invariants operate on.
 - [Development](development.md) — build, test, and the per-task verification gate.
 - [Decision records](./decisions/) — the dated decisions these invariants distill.
-</content>
-</invoke>

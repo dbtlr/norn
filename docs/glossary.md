@@ -127,6 +127,26 @@ _Avoid_: validator (reserved for norn validate, which checks vault standards, no
 **Registration-gated durability**
 The principle that all durable vault artifacts — persistent cache entry, event stream, logs, health history — are benefits of explicit registration. Unregistered work is tmp-homed and disposable by definition. Answers every future "where does artifact X live" question.
 _Avoid_: opt-in persistence (undersells that the gate covers all artifacts, not just cache).
+
+**Step-aside**
+The owner-lifecycle mechanism enforcing one owner per vault: an owner serves only under the summon inputs it warmed with — vault config content plus the central-config-derived inputs (events dir/telemetry mode, cache home, log target). When the handshake echo on a fresh connect, the spawn-carried identity check at warm-up, or the owner's own input watch reveals drift, the owner drains in-flight work and exits; the client resummons. See [0017](./decisions/0017-registered-vaults-summoned-owners.md) (2026-07-26 amendment).
+_Avoid_: graceful restart, reload (nothing reloads — the owner is disposable by design).
+
+**Trust posture**
+The per-vault rung an owner serves under. **Presumed** — watcher healthy, auditor clean, dirty queue empty; requests answer from the warm generation with zero proof cost. **Degraded** — the substrate cannot vouch (watcher overflow or death, unsupported backend, auditor lag, observed drift); the owner re-proves freshness at request boundaries: slower, never stale. **Cold** — no owner; summon and warm up. Entry to Degraded is loud (operator line, durable event); exit requires a re-established watcher plus one clean reconcile cycle.
+_Avoid_: trust level, trusted/untrusted mode.
+
+**Maintenance spine**
+The one dirty-path queue in the owner's store plus the one timer-driven heal worker that drains it. Three producers — watcher events, failed cache increments, drift-auditor findings — one consumer; a request touching a queued path heals it inline first. An empty queue behind a healthy watcher is the Presumed rung's precondition.
+_Avoid_: repair pipeline, background jobs (there is exactly one spine, not a job zoo).
+
+**Registry janitor**
+The one component allowed to look across vault entries — orphaned entries have no owner to tend them. Runs at registry-write moments and on demand; deletes an entry only when it matches no registry row AND exceeds the safety age. Registration commits the registry row before creating the entry directory, so a rowless directory is always residue, never a vault mid-birth.
+_Avoid_: sweeper, pruner (the deleted pre-0017 cross-vault apparatus).
+
+**Assigned vault id**
+The stable opaque identifier (ULID) the registry assigns at registration; the persistent entry directory is keyed by it. Name and root are mutable registry pointers — durable artifacts survive rename and root-move because identity is assigned, never derived.
+_Avoid_: vault hash, root hash (the derived-identity pattern this replaces).
 **Parity oracle**
 The pinned released binary used as the executable specification during the registered-vault rewrite: same argv, same fixture vault — its outputs define "1:1 interfaces" for every ported surface. Post-switchover the parity suite becomes the standing release-to-release regression harness.
 
