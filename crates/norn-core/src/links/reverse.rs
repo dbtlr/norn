@@ -18,14 +18,22 @@
 //! key that link was missing), and a DELETE can dangle one (the removed path
 //! owned the key that link was hitting). Both are reverse-lookup hits.
 //!
-//! # Update discipline
+//! # Today: rebuilt per overlay call
 //!
-//! The unit of update is one document: [`build`](ReverseLinkIndex::build)
-//! records each document's key set independently, so an owner that keeps an
-//! index warm replaces one document's entries without touching any other. A
-//! maintenance action derives the index from the PRE-change document set,
-//! because that is where the links a create can newly satisfy — and a delete can
-//! newly dangle — still live.
+//! [`build`](ReverseLinkIndex::build) is called fresh on every
+//! [`overlay_changed_paths`](crate::graph::overlay_changed_paths) invocation,
+//! over the PRE-change document set — that is where the links a create can
+//! newly satisfy, and a delete can newly dangle, still live. Building walks
+//! every link once (O(total links) in the vault), but each link's own work is a
+//! smaller constant than resolving it: computing its key set, not doing a
+//! lookup against the resolution tables.
+//!
+//! `record` already does its work per document, one document's key set at a
+//! time, independent of every other document's — that shape is what makes a
+//! FUTURE warm index cheap (NRN-523: keep the index alive across calls and
+//! replace one document's entries in place instead of rebuilding). There is no
+//! warm index yet: no `remove`, no public per-document `update`, nothing
+//! persists between calls today.
 //!
 //! Keys are computed WITHOUT short-circuiting the ladder, so the recorded set is
 //! a superset of what any particular vault state makes the link read — an
@@ -121,8 +129,13 @@ impl ReverseLinkIndex {
     /// Index every link of every document. O(links), with one key buffer reused
     /// across the whole set rather than a fresh collection per document.
     pub(crate) fn build(documents: &[Document]) -> Self {
+        // Capacity is link-derived, not document-derived: each link contributes
+        // 1-3 distinct keys (see `link_lookup_keys`), so `documents.len()` alone
+        // undersizes the map on any vault where documents carry more than a
+        // handful of links each.
+        let link_count: usize = documents.iter().map(|document| document.links.len()).sum();
         let mut index = Self {
-            sources_by_key: HashMap::with_capacity(documents.len()),
+            sources_by_key: HashMap::with_capacity(link_count),
         };
         let mut keys = Vec::new();
         for document in documents {

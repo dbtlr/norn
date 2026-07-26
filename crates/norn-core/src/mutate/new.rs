@@ -216,12 +216,20 @@ pub fn execute(
     let mut warnings = built.warnings;
     if applied {
         if let Some(created_path) = path.as_deref() {
+            // `post_create_validate` overlays the newly created document onto
+            // `index` IN PLACE — past this call the graph it points at is the
+            // POST-CREATE state (pre-write baseline plus the new document), not
+            // the pre-write baseline `apply_migration_plan` read above.
+            // Rebinding to a distinctly named reference makes that meaning
+            // change structural rather than a comment-only convention a later
+            // edit could silently violate by reaching for `index` again.
+            let post_create_index = &mut index;
             let extra = post_create_validate(
                 cfg,
                 &compiled,
                 &vault_root,
                 config,
-                &mut index,
+                post_create_index,
                 created_path,
                 &warnings,
             );
@@ -272,8 +280,10 @@ pub fn execute(
 /// vault to look at one new file. What stays whole-graph is the SEMANTICS of
 /// resolution: candidate lookups see every document, and the reference-target
 /// types are read from the full index, since a link's status and its target's
-/// `type` depend on documents the created one never mentions. Alias checks are
-/// skipped (`alias_field: None`) for this pass.
+/// `type` depend on documents the created one never mentions. `index_options`
+/// below comes from [`owner_index_options`](super::owner_index_options), the
+/// same options the owner's warm index uses, so alias parsing is configured the
+/// same way here as everywhere else — this pass does not special-case aliases.
 ///
 /// Dedup: a `RequiredFrontmatterMissing` finding whose field is already covered
 /// by a synth-phase `missing-required-field` warning is dropped and every other
