@@ -1052,17 +1052,19 @@ mod tests {
     fn a_mutation_outliving_the_silence_budget_survives_on_heartbeats() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("long-mutation.sock");
-        // 6 heartbeats × 30ms ≈ 180ms of work against a 50ms budget: more than
-        // three whole budgets, with no gap ever reaching one.
+        // 6 heartbeats × 100ms ≈ 600ms of work against a 400ms budget: well
+        // past one whole budget, with no healthy gap ever near it. Margins are
+        // wide (100ms beat vs 400ms budget) because tight ones false-fail on
+        // loaded CI runners — the NRN-462 class.
         let handle = heartbeating_owner(
             socket.clone(),
             6,
-            Duration::from_millis(30),
+            Duration::from_millis(100),
             OwnerFrame::Probe { document_count: 42 },
         );
 
         let mut session = connected_session(&socket);
-        session.set_stall_budget(Duration::from_millis(50));
+        session.set_stall_budget(Duration::from_millis(400));
         let sink = RecordingSink::default();
         session.set_progress_sink(Box::new(sink.clone()));
 
@@ -1133,7 +1135,7 @@ mod tests {
             let mut line = String::new();
             let _ = reader.read_line(&mut line);
             for _ in 0..3 {
-                std::thread::sleep(Duration::from_millis(30));
+                std::thread::sleep(Duration::from_millis(100));
                 let frame = OwnerFrame::Progress {
                     progress: Progress::new(ProgressPhase::Warming),
                 };
@@ -1152,7 +1154,7 @@ mod tests {
         });
 
         let mut session = connected_session(&socket);
-        session.set_stall_budget(Duration::from_millis(50));
+        session.set_stall_budget(Duration::from_millis(400));
         let sink = RecordingSink::default();
         session.set_progress_sink(Box::new(sink.clone()));
 
