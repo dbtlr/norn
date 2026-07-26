@@ -41,8 +41,8 @@ mod report;
 
 pub use audit::{AuditEvent, AuditParams, AuditReport};
 pub use control::{
-    ClientFrame, OwnerFrame, Progress, ProgressPhase, ServingState, WriterProgress,
-    CONTROL_PROTOCOL, PROGRESS_HEARTBEAT,
+    ClientFrame, OwnerFrame, Progress, ProgressPhase, ServingState, CONTROL_PROTOCOL,
+    PROGRESS_HEARTBEAT,
 };
 pub use filter::FilterParams;
 pub use finding::{Finding, Note, Severity};

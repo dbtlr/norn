@@ -27,7 +27,7 @@ use norn_wire::{
     DeleteParams, DescribeParams, DescribeReport, EditParams, EditReport, FindParams, FindReport,
     GetParams, GetReport, MoveParams, NewParams, NewReport, OwnerFrame, Progress, RepairParams,
     RepairReport, RewriteWikilinkParams, ServingState, SetParams, SetReport, ValidateParams,
-    ValidateReport, WriterProgress, CONTROL_PROTOCOL,
+    ValidateReport, CONTROL_PROTOCOL,
 };
 
 use crate::error::ClientError;
@@ -90,7 +90,6 @@ pub struct Pong {
     pub build: Option<String>,
     pub pid: u32,
     pub serving: ServingState,
-    pub writer_progress: WriterProgress,
 }
 
 impl OwnerSession {
@@ -206,14 +205,12 @@ impl OwnerSession {
                 build,
                 pid,
                 serving,
-                writer_progress,
                 ..
             } => Ok(Pong {
                 version,
                 build,
                 pid,
                 serving,
-                writer_progress,
             }),
             other => Err(unexpected_frame(other, "pong")),
         }
@@ -372,9 +369,9 @@ impl OwnerSession {
     /// healthy however long it takes (~linear in vault size, 0017's accepted
     /// cost) — this loop only bounds the wait by `max_wait`.
     ///
-    /// [`WriterProgress`] rides the pong as a control-plane fact, but NO health
-    /// verdict is derived from it: an owner reports progress by emitting frames,
-    /// not by advancing a counter a poller inspects.
+    /// The pong carries no progress counter at all: an owner reports progress by
+    /// emitting frames, not by advancing a number a poller inspects, so there is
+    /// nothing here to sample between polls.
     ///
     /// Before Ready is first observed, an owner that goes away at the connection
     /// level ([`ClientError::OwnerGone`]) — the linux drain-window backlog race
@@ -672,14 +669,13 @@ mod tests {
         })
     }
 
-    fn pong(serving: ServingState, busy: bool, sequence: u64) -> OwnerFrame {
+    fn pong(serving: ServingState) -> OwnerFrame {
         OwnerFrame::Pong {
             protocol: CONTROL_PROTOCOL,
             version: "0.0.0".into(),
             build: None,
             pid: 1,
             serving,
-            writer_progress: WriterProgress { busy, sequence },
         }
     }
 
@@ -763,18 +759,23 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// Finding 1: a warm-up (non-busy `opening`) that runs LONGER than the stall
-    /// budget must still reach `ready` — it is healthy liveness, not a hang.
+    /// Finding 1: a warm-up (`opening`) that runs LONGER than the stall budget
+    /// must still reach `ready` — it is healthy liveness, not a hang. The
+    /// verdict is keyed on FRAMES arriving, which is why an owner that keeps
+    /// answering is alive no matter how long the build takes; there is no
+    /// progress counter a poller could declare frozen (NRN-512 deleted the
+    /// pong's `writer_progress`, so the sequence-stall heuristic it fed has no
+    /// wire representation left to test).
     #[test]
     fn warmup_longer_than_stall_budget_still_reaches_ready() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("warmup.sock");
-        // Non-busy `opening` for 150ms (>> the 50ms budget below), then ready.
+        // `opening` for 150ms (>> the 50ms budget below), then ready.
         let handle = fake_owner(socket.clone(), |started| {
             if started.elapsed() < Duration::from_millis(150) {
-                pong(ServingState::Opening, false, 0)
+                pong(ServingState::Opening)
             } else {
-                pong(ServingState::Ready, false, 0)
+                pong(ServingState::Ready)
             }
         });
 
@@ -783,37 +784,6 @@ mod tests {
         let got = session
             .wait_until_ready(Duration::from_secs(5))
             .expect("a long non-busy warm-up must not be declared hung");
-        assert_eq!(got.serving, ServingState::Ready);
-
-        drop(session);
-        handle.join().unwrap();
-    }
-
-    /// A busy writer stays healthy as long as it keeps answering — the health
-    /// verdict is keyed on FRAMES, not on the pong's progress sequence (NRN-512
-    /// replaced the sequence-advancement heuristic with the inter-frame silence
-    /// budget). A frozen sequence with prompt pongs is not a stall.
-    #[test]
-    fn busy_writer_with_a_frozen_sequence_still_reaches_ready() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("frozen-seq.sock");
-        // Busy, sequence pinned at 7 the whole time — well past the 50ms budget
-        // below — then ready. Under the old sequence-stall rule this was an
-        // owner-health error; under the frame protocol the prompt pongs ARE the
-        // proof of life.
-        let handle = fake_owner(socket.clone(), |started| {
-            if started.elapsed() < Duration::from_millis(150) {
-                pong(ServingState::Opening, true, 7)
-            } else {
-                pong(ServingState::Ready, true, 7)
-            }
-        });
-
-        let mut session = connected_session(&socket);
-        session.set_stall_budget(Duration::from_millis(50));
-        let got = session
-            .wait_until_ready(Duration::from_secs(5))
-            .expect("an owner that keeps answering is alive, frozen sequence or not");
         assert_eq!(got.serving, ServingState::Ready);
 
         drop(session);
@@ -961,9 +931,10 @@ mod tests {
     }
 
     /// Warm-up progress rides the SAME frames as any other in-flight work
-    /// (NRN-512's one-emitter rule): a request landing on a warming owner is
-    /// answered with `warming` progress frames and then its terminal frame,
-    /// through the one frame loop — no pre-Ready special path.
+    /// (NRN-512's one-emitter rule): a request PARKED behind warm-up is answered
+    /// with `warming` progress frames and then its terminal frame, through the
+    /// one frame loop — no pre-Ready special path. The frames carry no units,
+    /// because a build publishes no count the owner already holds.
     #[test]
     fn warm_up_progress_rides_the_same_frames() {
         use norn_wire::ProgressPhase;
@@ -976,10 +947,10 @@ mod tests {
             let mut writer = stream;
             let mut line = String::new();
             let _ = reader.read_line(&mut line);
-            for done in 1..=3u64 {
+            for _ in 0..3 {
                 std::thread::sleep(Duration::from_millis(30));
                 let frame = OwnerFrame::Progress {
-                    progress: Progress::new(ProgressPhase::Warming).with_done(done * 100),
+                    progress: Progress::new(ProgressPhase::Warming),
                 };
                 let mut buf = serde_json::to_vec(&frame).unwrap();
                 buf.push(b'\n');
@@ -1007,7 +978,12 @@ mod tests {
             observed.iter().all(|p| p.phase == ProgressPhase::Warming),
             "warm-up progress is tagged `warming`: {observed:?}"
         );
-        assert_eq!(observed[2].done, Some(300), "milestones ride the frame");
+        assert!(
+            observed
+                .iter()
+                .all(|p| p.done.is_none() && p.total.is_none()),
+            "a warming frame reports the phase alone: {observed:?}"
+        );
 
         drop(session);
         handle.join().unwrap();

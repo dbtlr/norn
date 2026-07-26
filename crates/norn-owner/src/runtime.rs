@@ -10,10 +10,9 @@
 //!   connect and observe `cold`/`opening`); the one-shot full build runs on a
 //!   blocking thread, moving the serving state `cold → opening → ready`.
 //! - **Control plane** (ADR 0013). A `ping` returns the vault's serving state
-//!   plus `writer_progress { busy, sequence }` without touching the vault
-//!   filesystem. There is no Direct fallback (0013's 2026-07-17 amendment): no
-//!   pong means the client summons; a stalled busy writer is an owner-health
-//!   event.
+//!   without touching the vault filesystem. There is no Direct fallback (0013's
+//!   2026-07-17 amendment): no pong means the client summons; an owner that
+//!   emits no frame for a whole silence budget is an owner-health event.
 //! - **Routed read.** A `probe` runs the trivial document-count read through the
 //!   slot's warm `serve_read` on a blocking thread — the stand-in exercised
 //!   before the read verbs land next task.
@@ -42,8 +41,8 @@ use norn_core::mutate::MutationExecution;
 use norn_core::standards::VaultConfig;
 use norn_core::telemetry::{Clock, EventSink, IdGen};
 use norn_wire::{
-    ClientFrame, OwnerFrame, Progress, ProgressPhase, ServingState, WriterProgress,
-    CONTROL_PROTOCOL, PROGRESS_HEARTBEAT,
+    ClientFrame, OwnerFrame, Progress, ProgressPhase, ServingState, CONTROL_PROTOCOL,
+    PROGRESS_HEARTBEAT,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
@@ -141,10 +140,6 @@ struct OwnerState {
     /// mutation. Amortizes the sweep to once per new day rather than once per
     /// mutation — see [`mark_swept_if_new_day`](Self::mark_swept_if_new_day).
     swept_day: Mutex<Option<String>>,
-    /// The process-wide parse odometer sampled BEFORE warm-up starts, so the
-    /// `warming` progress milestone reports documents parsed by THIS build
-    /// rather than by the process (NRN-512).
-    docs_parsed_baseline: u64,
 }
 
 impl OwnerState {
@@ -163,7 +158,6 @@ impl OwnerState {
             mutation_lock: tokio::sync::Mutex::new(()),
             events_dir,
             swept_day: Mutex::new(None),
-            docs_parsed_baseline: norn_core::graph::documents_parsed(),
         }
     }
 
@@ -173,17 +167,15 @@ impl OwnerState {
     /// warm-up, so that is what it reports — which is how warm-up progress and
     /// request progress become one emitter rather than two mechanisms.
     ///
-    /// Milestones are attached only where counting one is free: `warming`
-    /// reports documents parsed by this build (a process odometer sampled at
-    /// construction), and `applying` carries the plan's operation count when the
-    /// request is an `apply`. `reading` has no free unit to count, so it reports
-    /// the phase alone — a frame with no units is still proof of life, which is
-    /// the load-bearing part.
+    /// Milestones are attached only where the owner already has the number in
+    /// hand: `applying` carries the plan's operation count when the request is
+    /// an `apply`. `warming` and `reading` have no unit the build or the query
+    /// counts for its own reasons, so they report the phase alone — and a frame
+    /// with no units is still proof of life, which is the load-bearing part.
+    /// (Milestones a build could publish as it goes are NRN-527's question.)
     fn progress(&self, class: RequestClass, total: Option<u64>) -> Progress {
         if self.serving() != ServingState::Ready {
-            let parsed =
-                norn_core::graph::documents_parsed().saturating_sub(self.docs_parsed_baseline);
-            return Progress::new(ProgressPhase::Warming).with_done(parsed);
+            return Progress::new(ProgressPhase::Warming);
         }
         match class {
             RequestClass::Mutation => Progress::new(ProgressPhase::Applying).with_total(total),
@@ -253,19 +245,6 @@ impl OwnerState {
     /// error and then idle-reaps cleanly (exit 0).
     fn set_warmup_error(&self, message: String) {
         *self.warmup_error.lock().unwrap_or_else(|p| p.into_inner()) = Some(message);
-    }
-
-    fn writer_progress(&self) -> WriterProgress {
-        match self.slot() {
-            Some(slot) => {
-                let p = slot.writer_progress();
-                WriterProgress {
-                    busy: p.busy,
-                    sequence: p.sequence,
-                }
-            }
-            None => WriterProgress::default(),
-        }
     }
 
     /// Trip exit-to-heal: mark fatal and latch shutdown. Any cache error routes
@@ -841,7 +820,6 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                 build: state.build.clone(),
                 pid: std::process::id(),
                 serving: state.serving(),
-                writer_progress: state.writer_progress(),
             }
         }
         ClientFrame::Probe => {
@@ -1657,9 +1635,11 @@ mod tests {
                 "a {class:?} request on a cold owner is queued behind warm-up"
             );
         }
-        // The warming milestone counts documents parsed by THIS owner's build,
-        // so a fresh state reports zero rather than the process odometer.
-        assert_eq!(state.progress(RequestClass::Read, None).done, Some(0));
+        // `warming` carries NO units: the build publishes no count the owner
+        // already holds, and a fabricated one would be a manifest lie. The frame
+        // itself is the fact being reported.
+        let warming = state.progress(RequestClass::Read, None);
+        assert_eq!((warming.done, warming.total), (None, None));
 
         state.set_serving(ServingState::Ready);
         let reading = state.progress(RequestClass::Read, None);

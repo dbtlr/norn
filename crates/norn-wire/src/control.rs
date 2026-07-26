@@ -9,11 +9,12 @@
 //! shapes both sides encode.
 //!
 //! ADR 0013's control-plane contract carries forward inside the owner: a `Pong`
-//! reports the vault's [`ServingState`] (`cold | opening | ready`) plus its
-//! [`WriterProgress`] `{ busy, sequence }`. Per the 2026-07-17 amendment there
-//! is no Direct fallback — a client that gets no pong summons an owner; an owner
-//! that goes silent past the client's stall budget is an owner-health event,
-//! never a reroute.
+//! reports the vault's [`ServingState`] (`cold | opening | ready`). It carries
+//! NO writer-progress counter: liveness is proven by frames arriving, not by a
+//! counter a poller inspects, so no reader for one exists. Per the 2026-07-17
+//! amendment there is no Direct fallback — a client that gets no pong summons an
+//! owner; an owner that goes silent past the client's stall budget is an
+//! owner-health event, never a reroute.
 //!
 //! # The framed request protocol
 //!
@@ -54,20 +55,6 @@ pub enum ServingState {
     Opening,
     /// The warm context is built and serving reads.
     Ready,
-}
-
-/// Opaque per-vault writer progress (ADR 0013). `sequence` is forward progress,
-/// not wall-clock: it advances on open transitions, completed liveness work,
-/// bulk chunk boundaries, and terminal completion. A live idle writer is
-/// healthy; only `busy` with `sequence` unchanged past the stall budget is hung.
-///
-/// The wire twin of `norn_core::cache::WriterProgress` — the owner maps its
-/// engine-side value onto this so the client (which never links `norn-core`)
-/// can read it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WriterProgress {
-    pub busy: bool,
-    pub sequence: u64,
 }
 
 /// How often the owner emits an [`OwnerFrame::Progress`] frame while a request's
@@ -224,7 +211,6 @@ pub enum OwnerFrame {
         build: Option<String>,
         pid: u32,
         serving: ServingState,
-        writer_progress: WriterProgress,
     },
     /// The answer to `Probe`: the vault's live document count.
     Probe { document_count: u64 },
@@ -293,11 +279,36 @@ pub enum OwnerFrame {
 
 impl OwnerFrame {
     /// Whether this frame ENDS its request. Exactly one terminal frame closes
-    /// every request; [`Progress`](OwnerFrame::Progress) is the only
-    /// non-terminal variant, so a new frame kind is terminal by default and a
-    /// client's frame loop cannot forget to return it.
+    /// every request, and this predicate is what the client's frame loop
+    /// returns on (`norn-client`'s `OwnerSession::request`): a frame it calls
+    /// non-terminal is consumed as proof of life and the loop reads again.
+    ///
+    /// The match is EXHAUSTIVE by variant, never a negated `matches!`: the next
+    /// frame kind (a step-aside or shutdown notice) must state which side of the
+    /// split it belongs on rather than inheriting "terminal" by default and
+    /// silently ending a request that is still running.
     pub fn is_terminal(&self) -> bool {
-        !matches!(self, OwnerFrame::Progress { .. })
+        match self {
+            OwnerFrame::Progress { .. } => false,
+            OwnerFrame::Pong { .. }
+            | OwnerFrame::Probe { .. }
+            | OwnerFrame::Find { .. }
+            | OwnerFrame::Count { .. }
+            | OwnerFrame::Get { .. }
+            | OwnerFrame::Describe { .. }
+            | OwnerFrame::Validate { .. }
+            | OwnerFrame::Repair { .. }
+            | OwnerFrame::Audit { .. }
+            | OwnerFrame::Set { .. }
+            | OwnerFrame::New { .. }
+            | OwnerFrame::Edit { .. }
+            | OwnerFrame::Move { .. }
+            | OwnerFrame::Delete { .. }
+            | OwnerFrame::RewriteWikilink { .. }
+            | OwnerFrame::Apply { .. }
+            | OwnerFrame::Rejected { .. }
+            | OwnerFrame::Error { .. } => true,
+        }
     }
 }
 
@@ -331,10 +342,6 @@ mod tests {
             build: None,
             pid: 42,
             serving: ServingState::Ready,
-            writer_progress: WriterProgress {
-                busy: false,
-                sequence: 3,
-            },
         };
         let line = serde_json::to_string(&frame).unwrap();
         assert!(
