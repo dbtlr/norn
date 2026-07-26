@@ -6,16 +6,23 @@
 //! # One frame loop, one silence budget
 //!
 //! A request is one write followed by [`request`](OwnerSession::request)'s frame
-//! loop: every [`OwnerFrame::Progress`] is handed to the session's
-//! [`ProgressSink`] and the loop reads on; the single terminal frame ends the
-//! request. [`STALL_BUDGET`] is the INTER-FRAME silence budget — it is the
-//! socket's per-read deadline, so any frame restarts it. A long mutation that
-//! heartbeats therefore never trips it, while a wedged owner that emits nothing
-//! surfaces as [`ClientError::OwnerHealth`] at the budget (ADR 0013's
-//! 2026-07-17 amendment — never a Direct fallback).
+//! loop: every non-terminal frame ([`OwnerFrame::is_terminal`] names the split —
+//! today that is [`OwnerFrame::Progress`], whose observation goes to the
+//! session's [`ProgressSink`]) leaves the loop reading on; the single terminal
+//! frame ends the request. [`STALL_BUDGET`] is the socket's PER-READ deadline
+//! (`SO_RCVTIMEO`), so any byte restarts it. A long mutation that heartbeats
+//! therefore never trips it, while a wedged owner that emits nothing surfaces as
+//! [`ClientError::OwnerHealth`] at the budget (ADR 0013's 2026-07-17 amendment —
+//! never a Direct fallback).
 //!
 //! There is exactly ONE frame loop: waiting for a warming owner reads the same
 //! frames through the same loop as any other request.
+//!
+//! A failed request can leave the socket carrying frames the client never read —
+//! a stalled request's late answer arrives after the stall verdict. A session is
+//! therefore POISONED by any failure that leaves the stream's position unknown,
+//! and the next use reconnects rather than reading a stale frame as the new
+//! request's answer.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -25,20 +32,33 @@ use std::time::{Duration, Instant};
 use norn_wire::{
     ApplyParams, ApplyReport, AuditParams, AuditReport, ClientFrame, CountParams, CountReport,
     DeleteParams, DescribeParams, DescribeReport, EditParams, EditReport, FindParams, FindReport,
-    GetParams, GetReport, MoveParams, NewParams, NewReport, OwnerFrame, Progress, RepairParams,
-    RepairReport, RewriteWikilinkParams, ServingState, SetParams, SetReport, ValidateParams,
-    ValidateReport, CONTROL_PROTOCOL,
+    GetParams, GetReport, MoveParams, NewParams, NewReport, OwnerFrame, Progress, ProgressPhase,
+    RepairParams, RepairReport, RewriteWikilinkParams, ServingState, SetParams, SetReport,
+    ValidateParams, ValidateReport, CONTROL_PROTOCOL, PROGRESS_HEARTBEAT,
 };
 
 use crate::error::ClientError;
 use crate::SummonConfig;
 
 /// The service stall budget (ADR 0013): the maximum SILENCE the client tolerates
-/// between two frames of one request. Not a call timeout — a healthy owner
+/// while one request is in flight. Not a call timeout — a healthy owner
 /// heartbeats (`norn_wire::PROGRESS_HEARTBEAT`) while its long work runs, and
-/// every frame restarts the budget, so only an owner emitting nothing at all is
+/// every read restarts the budget, so only an owner emitting nothing at all is
 /// "hung".
+///
+/// Strictly it is a PER-READ budget: it is pushed onto the socket as
+/// `SO_RCVTIMEO`, which restarts on every `read` that returns bytes, not on
+/// every complete line. Against this owner the two are the same thing — it
+/// writes each frame with a single buffered `write_all` + `flush`, so a frame
+/// arrives whole — and a hypothetical peer that dripped one byte per budget
+/// would be tolerated indefinitely without ever completing a frame. That shape
+/// is unreachable from the owner in this workspace and is not defended against.
 pub const STALL_BUDGET: Duration = Duration::from_secs(5);
+
+/// How often the readiness wait re-pings a not-yet-serving owner. Small enough
+/// that a warm owner is observed immediately; the `warming` progress it feeds is
+/// throttled separately (see [`OwnerSession::wait_until_ready`]).
+const READY_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Where a session hands the in-flight [`Progress`] frames it reads.
 ///
@@ -81,6 +101,12 @@ pub struct OwnerSession {
     /// first observed — the linux-backlog race (see [`crate::open`]). `None` for
     /// test sessions wrapped around a fake owner: they never reconnect.
     config: Option<SummonConfig>,
+    /// Whether the socket's frame stream is at an UNKNOWN position — a failure
+    /// left frames possibly still in flight for a request that already returned
+    /// its verdict. The next [`request`](Self::request) reconnects instead of
+    /// reading, so a stalled request's late answer can never be served to the
+    /// caller as the NEXT request's answer.
+    poisoned: bool,
 }
 
 /// The parsed proof-of-life a `ping` returns.
@@ -114,6 +140,7 @@ impl OwnerSession {
             stall_budget: STALL_BUDGET,
             progress: Box::new(DiscardProgress),
             config,
+            poisoned: false,
         })
     }
 
@@ -128,7 +155,12 @@ impl OwnerSession {
     /// Re-establish the connection: re-run summon-or-connect (which re-validates
     /// the runtime dir and re-checks the peer uid) and swap in the fresh
     /// reader/writer/socket. Used to self-heal an owner that went away before
-    /// Ready. Requires a retained config (production sessions always have one).
+    /// Ready, and to clear a poisoned session. Requires a retained config
+    /// (production sessions always have one).
+    ///
+    /// A fresh socket is a fresh frame stream, so this is also the one place
+    /// [`poisoned`](Self::poisoned) clears: nothing another request wrote can be
+    /// waiting on it.
     fn reconnect(&mut self) -> Result<(), ClientError> {
         let config = self
             .config
@@ -146,6 +178,7 @@ impl OwnerSession {
         // session's budget so a shrunk (test) budget survives a reconnect and
         // the socket deadline never drifts from `stall_budget`.
         self.apply_stall_budget()?;
+        self.poisoned = false;
         Ok(())
     }
 
@@ -373,6 +406,19 @@ impl OwnerSession {
     /// emitting frames, not by advancing a number a poller inspects, so there is
     /// nothing here to sample between polls.
     ///
+    /// **The wait itself feeds the progress sink.** A pong whose
+    /// [`ServingState`] is not `Ready` IS the owner saying, in a typed fact, that
+    /// it is still warming — so this hands the sink a `warming` observation,
+    /// throttled to at most one per `PROGRESS_HEARTBEAT` rather than one per
+    /// poll. Nothing is invented: no pong, no observation. The sink is closed out
+    /// (once) on the way out, so a surface drawing a transient line erases it
+    /// whether the wait ended in Ready or in an error.
+    ///
+    /// Verbs still send nothing before Ready. That gate is load-bearing: a verb
+    /// frame written pre-Ready would convert an owner that exits to heal
+    /// mid-warm-up from a clean pre-send resummon into ADR 0011's post-send
+    /// uncertainty — for work that never ran.
+    ///
     /// Before Ready is first observed, an owner that goes away at the connection
     /// level ([`ClientError::OwnerGone`]) — the linux drain-window backlog race
     /// (see [`crate::open`]) — is self-healed by re-summoning (bounded by
@@ -381,7 +427,13 @@ impl OwnerSession {
     /// hard error (post-send uncertainty is a separate contract).
     pub fn wait_until_ready(&mut self, max_wait: Duration) -> Result<Pong, ClientError> {
         let start = Instant::now();
-        loop {
+        // When the last `warming` observation was handed to the sink; `None`
+        // until the first one. Also the "did this wait draw anything" flag the
+        // closing `finished` is gated on.
+        let mut warmed_at: Option<Instant> = None;
+        // One exit point, so the sink is closed out on EVERY way out — Ready,
+        // timeout, or a surfaced error — rather than at four `return`s.
+        let outcome = loop {
             let pong = match self.ping() {
                 Ok(pong) => pong,
                 // Owner went away before Ready — resummon and retry, bounded by
@@ -389,40 +441,69 @@ impl OwnerSession {
                 // healable this way, so it surfaces.
                 Err(e) if e.is_owner_gone() => {
                     if start.elapsed() > max_wait {
-                        return Err(e);
+                        break Err(e);
                     }
-                    self.reconnect()?;
-                    continue;
+                    match self.reconnect() {
+                        Ok(()) => continue,
+                        Err(e) => break Err(e),
+                    }
                 }
-                Err(e) => return Err(e),
+                Err(e) => break Err(e),
             };
             if pong.serving == ServingState::Ready {
-                return Ok(pong);
+                break Ok(pong);
+            }
+            // The owner just reported, as a typed serving state, that it is not
+            // serving yet: that is the `warming` fact, read off the pong rather
+            // than assumed from elapsed time. Throttled to the heartbeat floor —
+            // a 20ms poll cadence would redraw a progress line 50 times a second
+            // to say the same thing.
+            if warmed_at.is_none_or(|at| at.elapsed() >= PROGRESS_HEARTBEAT) {
+                warmed_at = Some(Instant::now());
+                self.progress
+                    .progress(&Progress::new(ProgressPhase::Warming));
             }
             if start.elapsed() > max_wait {
-                return Err(ClientError::OwnerHealth(
+                break Err(ClientError::OwnerHealth(
                     "timed out waiting for the owner to become ready".to_string(),
                 ));
             }
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(READY_POLL_INTERVAL);
+        };
+        if warmed_at.is_some() {
+            self.progress.finished();
         }
+        outcome
     }
 
     /// Send one frame and read the request's stream to its terminal frame.
     ///
-    /// The ONE frame loop (NRN-512). Every [`OwnerFrame::Progress`] is handed to
-    /// the progress sink and the loop reads again; the terminal frame returns.
-    /// The socket's read deadline is [`stall_budget`](Self::stall_budget), and a
-    /// read deadline restarts per `read` call — which is precisely what makes
-    /// the budget INTER-FRAME rather than a whole-call timeout. A mutation that
-    /// runs for a minute but heartbeats every second is healthy; an owner that
-    /// says nothing for a whole budget is hung.
+    /// The ONE frame loop (NRN-512). The loop returns exactly on
+    /// [`OwnerFrame::is_terminal`]; a non-terminal frame is consumed as proof of
+    /// life (a [`Progress`] hands its observation to the sink) and the loop reads
+    /// again. The socket's read deadline is
+    /// [`stall_budget`](Self::stall_budget), and a read deadline restarts per
+    /// `read` call — which is precisely what makes the budget a silence budget
+    /// rather than a whole-call timeout. A mutation that runs for a minute but
+    /// heartbeats every second is healthy; an owner that says nothing for a whole
+    /// budget is hung.
     ///
     /// Post-send failure shapes are unchanged (ADR 0011): EOF mid-stream is
     /// [`ClientError::OwnerGone`] — the request WAS written, so a mutation may
     /// have applied and no caller may blind-retry it — and a silence timeout is
     /// [`ClientError::OwnerHealth`].
+    ///
+    /// A verdict reached while the owner may still be writing leaves the stream
+    /// at an unknown position, so it POISONS the session (see
+    /// [`desynchronizes`]) and the next request reconnects first.
     fn request(&mut self, frame: &ClientFrame) -> Result<OwnerFrame, ClientError> {
+        // A poisoned socket may still deliver the previous request's late
+        // frames; reading them here would answer THIS request with the last
+        // one's report. A held session (the MCP server) is where that bites, so
+        // the recovery is a fresh connection, not a hopeful re-read.
+        if self.poisoned {
+            self.reconnect()?;
+        }
         let mut line = serde_json::to_vec(frame)
             .map_err(|e| ClientError::Protocol(format!("failed to encode frame: {e}")))?;
         line.push(b'\n');
@@ -453,13 +534,21 @@ impl OwnerSession {
                 Err(e) => Err(classify_io(e)),
             };
             match outcome {
-                Ok(OwnerFrame::Progress { progress }) => {
-                    observed_progress = true;
-                    self.progress.progress(&progress);
+                // Not the end of the request: consume it and read on. The frame
+                // arriving is itself the proof of life that restarts the budget;
+                // `Progress` additionally carries an observation to report.
+                Ok(frame) if !frame.is_terminal() => {
+                    if let OwnerFrame::Progress { progress } = &frame {
+                        observed_progress = true;
+                        self.progress.progress(progress);
+                    }
                 }
                 other => {
                     if observed_progress {
                         self.progress.finished();
+                    }
+                    if let Err(err) = &other {
+                        self.poisoned = desynchronizes(err);
                     }
                     return other;
                 }
@@ -481,6 +570,38 @@ fn unexpected_frame(frame: OwnerFrame, expected: &str) -> ClientError {
         OwnerFrame::Rejected { message, hints } => ClientError::Rejected { message, hints },
         OwnerFrame::Error { message } => ClientError::OwnerError(message),
         other => ClientError::Protocol(format!("expected {expected}, got {other:?}")),
+    }
+}
+
+/// Whether a failed request leaves the socket's frame stream at an UNKNOWN
+/// position — the session is poisoned and must reconnect before its next use.
+///
+/// - [`OwnerHealth`](ClientError::OwnerHealth): the client gave up on silence,
+///   but the owner was never told. Its terminal frame (and any further progress)
+///   can still arrive, and a HELD session reusing the socket would read that
+///   late answer as the NEXT request's — a `find` for B returning A's report,
+///   silently and with a clean exit code.
+/// - [`Protocol`](ClientError::Protocol): an undecodable line means the stream
+///   is not where the reader thinks it is.
+/// - [`Io`](ClientError::Io): a read that failed for a non-connection reason
+///   consumed an unknown number of bytes.
+///
+/// The connection-level shapes are NOT poison: that socket is dead, so there is
+/// nothing stale to read from it, and both are already a resummon signal
+/// ([`ClientError::is_owner_gone`]) with their own ADR 0011 retry contract.
+fn desynchronizes(err: &ClientError) -> bool {
+    match err {
+        ClientError::OwnerHealth(_) | ClientError::Protocol(_) | ClientError::Io(_) => true,
+        ClientError::OwnerGone(_)
+        | ClientError::OwnerGonePreSend(_)
+        | ClientError::OwnerUnavailable { .. }
+        | ClientError::ForeignOwner { .. }
+        | ClientError::OwnerError(_)
+        | ClientError::Rejected { .. }
+        | ClientError::Resolve(_)
+        | ClientError::NoRuntimeDir
+        | ClientError::InsecureRuntimeDir(_)
+        | ClientError::Spawn { .. } => false,
     }
 }
 
@@ -984,6 +1105,138 @@ mod tests {
                 .all(|p| p.done.is_none() && p.total.is_none()),
             "a warming frame reports the phase alone: {observed:?}"
         );
+
+        drop(session);
+        handle.join().unwrap();
+    }
+
+    /// The readiness wait is the longest thing a first invocation waits on, and
+    /// it feeds the sink itself (NRN-512): a pong that reports a not-yet-serving
+    /// state IS the `warming` fact. Nothing is invented — the observation is
+    /// derived from the pong's typed `serving`, and it is throttled to the
+    /// heartbeat floor rather than emitted per 20ms poll.
+    #[test]
+    fn the_readiness_wait_reports_warming_from_the_pongs_serving_state() {
+        use norn_wire::ProgressPhase;
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("warming-wait.sock");
+        // `opening` for 400ms — twenty poll intervals, one heartbeat floor.
+        let handle = fake_owner(socket.clone(), |started| {
+            if started.elapsed() < Duration::from_millis(400) {
+                pong(ServingState::Opening)
+            } else {
+                pong(ServingState::Ready)
+            }
+        });
+
+        let mut session = connected_session(&socket);
+        let sink = RecordingSink::default();
+        session.set_progress_sink(Box::new(sink.clone()));
+
+        let got = session.wait_until_ready(Duration::from_secs(5)).unwrap();
+        assert_eq!(got.serving, ServingState::Ready);
+
+        let observed = sink.observations();
+        assert_eq!(
+            observed.len(),
+            1,
+            "one observation per heartbeat floor, not one per poll: {observed:?}"
+        );
+        assert_eq!(observed[0].phase, ProgressPhase::Warming);
+        assert_eq!(
+            (observed[0].done, observed[0].total),
+            (None, None),
+            "a warming observation is the phase alone"
+        );
+        assert_eq!(
+            sink.finishes(),
+            1,
+            "the wait closes the sink out, so a transient line is erased"
+        );
+
+        drop(session);
+        handle.join().unwrap();
+    }
+
+    /// A warm owner answers `ready` on the first ping, so the wait draws
+    /// nothing at all — an already-warm vault must not flash a progress line.
+    #[test]
+    fn a_ready_owner_draws_no_warming_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("already-warm.sock");
+        let handle = fake_owner(socket.clone(), |_| pong(ServingState::Ready));
+
+        let mut session = connected_session(&socket);
+        let sink = RecordingSink::default();
+        session.set_progress_sink(Box::new(sink.clone()));
+
+        session.wait_until_ready(Duration::from_secs(5)).unwrap();
+        assert!(sink.observations().is_empty());
+        assert_eq!(sink.finishes(), 0);
+
+        drop(session);
+        handle.join().unwrap();
+    }
+
+    /// The stall verdict does not stop the owner: its answer to the abandoned
+    /// request can still land on the socket. A session that reused that socket
+    /// would serve those late frames as the NEXT request's answer — a wrong
+    /// report, at a clean exit code. The verdict therefore POISONS the session,
+    /// and the next request reconnects (here: fails to, since this test session
+    /// retains no config) instead of reading the stale frame.
+    #[test]
+    fn a_stall_verdict_poisons_the_session_against_the_late_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("late-answer.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut line = String::new();
+            // Read the first request, answer it LATE (past the client's budget),
+            // then keep serving a distinguishable second answer.
+            let _ = reader.read_line(&mut line);
+            std::thread::sleep(Duration::from_millis(150));
+            let mut buf = serde_json::to_vec(&OwnerFrame::Probe {
+                document_count: 111,
+            })
+            .unwrap();
+            buf.push(b'\n');
+            let _ = writer.write_all(&buf);
+            let _ = writer.flush();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let mut buf = serde_json::to_vec(&OwnerFrame::Probe {
+                    document_count: 222,
+                })
+                .unwrap();
+                buf.push(b'\n');
+                if writer.write_all(&buf).is_err() || writer.flush().is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut session = connected_session(&socket);
+        session.set_stall_budget(Duration::from_millis(30));
+        let err = session.probe().expect_err("a late answer is a stall");
+        assert!(matches!(err, ClientError::OwnerHealth(_)), "got {err:?}");
+
+        // The late `111` is now sitting on the socket. The next request must not
+        // return it; with no retained config the forced reconnect cannot
+        // succeed, so the caller gets an error rather than a wrong answer.
+        match session.probe() {
+            Ok(count) => panic!("a poisoned session served the late answer: {count}"),
+            Err(e) => assert!(
+                matches!(e, ClientError::OwnerUnavailable { .. }),
+                "expected the forced reconnect to surface, got {e:?}"
+            ),
+        }
 
         drop(session);
         handle.join().unwrap();
