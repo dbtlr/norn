@@ -50,7 +50,7 @@ fn a_spawned_binary_sees_a_scratch_home_and_none_of_the_caller_environment() {
     let stub = write_stub(
         bin_dir.path(),
         "reporter",
-        "#!/bin/sh\nprintf 'HOME=%s\\n' \"$HOME\"\nprintf 'XDG_CACHE_HOME=%s\\n' \"$XDG_CACHE_HOME\"\nprintf 'CARGO_PKG_NAME=%s\\n' \"${CARGO_PKG_NAME-<unset>}\"\nprintf 'PATH_SET=%s\\n' \"${PATH:+yes}\"\nexit 0\n",
+        "#!/bin/sh\nprintf 'HOME=%s\\n' \"$HOME\"\nprintf 'XDG_CACHE_HOME=%s\\n' \"$XDG_CACHE_HOME\"\nprintf 'CARGO_PKG_NAME=%s\\n' \"${CARGO_PKG_NAME-<unset>}\"\nprintf 'PATH_SET=%s\\n' \"${PATH:+yes}\"\nprintf 'NORN_EPHEMERAL_TTL_SECS=%s\\n' \"${NORN_EPHEMERAL_TTL_SECS-<unset>}\"\nexit 0\n",
     );
 
     let scratch = common::scratch_env();
@@ -85,6 +85,10 @@ fn a_spawned_binary_sees_a_scratch_home_and_none_of_the_caller_environment() {
     assert!(
         stdout.contains("PATH_SET=yes"),
         "PATH is on the allowlist so a binary can still find what it shells out to, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("NORN_EPHEMERAL_TTL_SECS=5"),
+        "the owner idle TTL override must reach a spawned binary, got:\n{stdout}"
     );
 }
 
