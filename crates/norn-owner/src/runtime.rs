@@ -591,6 +591,32 @@ async fn write_frame(wr: &mut OwnedWriteHalf, frame: &OwnerFrame) -> anyhow::Res
     Ok(())
 }
 
+/// Write the request's ONE terminal frame — unless the connection's wire is
+/// already broken (NRN-512 delta). A heartbeat write that hit its bound is
+/// CANCELLED mid-`write_all` (see [`Heartbeat::start_paced`]'s elapsed arm):
+/// how many bytes of that frame already reached the kernel buffer is unknown,
+/// so appending the terminal frame here would concatenate onto a possibly
+/// partial line, producing one line the client's decoder cannot parse — the
+/// regression this guards against.
+///
+/// Once `wire_broken` is latched there is nothing safe left to write: SHUT
+/// DOWN the write half instead. The client sees EOF, which for a mutation is
+/// the same ADR 0011 post-send uncertainty it already resolves by reading the
+/// vault — and it is honest: the peer had stopped reading and could never
+/// have received the report anyway.
+async fn write_terminal_frame(
+    writer: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+    wire_broken: &Arc<AtomicBool>,
+    frame: &OwnerFrame,
+) -> anyhow::Result<()> {
+    let mut wr = writer.lock().await;
+    if wire_broken.load(Ordering::SeqCst) {
+        let _ = wr.shutdown().await;
+        return Ok(());
+    }
+    write_frame(&mut wr, frame).await
+}
+
 /// The in-flight progress emitter (NRN-512): while a request's work runs, this
 /// writes an [`OwnerFrame::Progress`] at least every [`PROGRESS_HEARTBEAT`] so
 /// the client's inter-frame silence budget keeps resetting.
@@ -617,11 +643,12 @@ struct Heartbeat {
 impl Heartbeat {
     fn start(
         writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+        wire_broken: Arc<AtomicBool>,
         state: Arc<OwnerState>,
         class: RequestClass,
         total: Option<u64>,
     ) -> Self {
-        Self::start_paced(writer, state, class, total, PROGRESS_HEARTBEAT)
+        Self::start_paced(writer, wire_broken, state, class, total, PROGRESS_HEARTBEAT)
     }
 
     /// [`start`](Heartbeat::start) with an explicit beat interval. Production
@@ -631,6 +658,7 @@ impl Heartbeat {
     /// bound is derived from the interval, so the relation holds at any pace.
     fn start_paced(
         writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+        wire_broken: Arc<AtomicBool>,
         state: Arc<OwnerState>,
         class: RequestClass,
         total: Option<u64>,
@@ -663,7 +691,18 @@ impl Heartbeat {
                 // there is nothing to report to.
                 match tokio::time::timeout(interval * 3, write_frame(&mut wr, &frame)).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(_)) | Err(_) => break,
+                    Ok(Err(_)) => break,
+                    Err(_) => {
+                        // The elapsed arm: `write_frame`'s future was DROPPED
+                        // mid-`write_all`, not returned to us as an error, so
+                        // some prefix of this frame's bytes may already be on
+                        // the wire with no way to know how much. Latch the
+                        // connection as broken so the dispatch path never
+                        // appends the terminal frame onto that unknown prefix
+                        // (NRN-512 regression) — see [`write_terminal_frame`].
+                        wire_broken.store(true, Ordering::SeqCst);
+                        break;
+                    }
                 }
             }
         });
@@ -721,6 +760,12 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
     // Shared with the heartbeat task: both write frames onto this one half, and
     // the mutex is what serializes them into well-formed lines.
     let writer = Arc::new(tokio::sync::Mutex::new(wr));
+    // Latched by a beat whose write hit its bound mid-frame (NRN-512 delta):
+    // once true, the wire may already carry a partial frame, so nothing more
+    // may be written onto it — see [`write_terminal_frame`]. Connection-scoped
+    // (not per-request), because a beat spans the SAME writer this loop reuses
+    // across requests.
+    let wire_broken = Arc::new(AtomicBool::new(false));
     let mut reader = BufReader::new(rd);
     let mut line = String::new();
 
@@ -766,6 +811,7 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
                 let heartbeat = (!is_liveness_ping(&frame)).then(|| {
                     Heartbeat::start(
                         Arc::clone(&writer),
+                        Arc::clone(&wire_broken),
                         Arc::clone(&state),
                         request_class(&frame),
                         progress_total(&frame),
@@ -792,9 +838,14 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
         }
         state.in_flight.fetch_sub(1, Ordering::SeqCst);
 
-        // The one terminal frame. The heartbeat is already stopped and joined,
-        // so nothing can follow this on the wire for this request.
-        write_frame(&mut *writer.lock().await, &response).await?;
+        // The one terminal frame — unless a beat already broke the wire (see
+        // `write_terminal_frame`), in which case the write half is shut down
+        // instead and the connection ends here rather than serving a partial
+        // request's answer on a wire that already carries unknown bytes.
+        write_terminal_frame(&writer, &wire_broken, &response).await?;
+        if wire_broken.load(Ordering::SeqCst) {
+            break;
+        }
 
         if warmup_reject {
             // The client has now received the warm-up error (the write+flush
@@ -1774,6 +1825,7 @@ mod tests {
             let interval = Duration::from_millis(20);
             let beat = Heartbeat::start_paced(
                 Arc::new(tokio::sync::Mutex::new(wr)),
+                Arc::new(AtomicBool::new(false)),
                 Arc::new(OwnerState::new(None, None)),
                 RequestClass::Read,
                 None,
@@ -1801,12 +1853,22 @@ mod tests {
     /// before the request releases `in_flight`, so a beat parked forever inside
     /// `write_all` leaves the owner unreapable, holding its flock and its db for
     /// as long as that peer lives.
+    ///
+    /// NRN-512 delta (the regression): the write future that hit the bound was
+    /// CANCELLED mid-frame, so an unknown prefix of that frame's bytes may
+    /// already be stuck in the peer's stalled receive buffer. Appending the
+    /// terminal frame after that — the pre-fix behavior — would produce one
+    /// concatenated line the client's decoder cannot parse. The fix latches
+    /// `wire_broken` on this exact arm and routes the terminal write through
+    /// [`write_terminal_frame`], which must shut the write half down instead:
+    /// this test drains the stalled peer's whole receive buffer and asserts
+    /// what comes after is EOF, never more bytes.
     #[test]
     fn a_beat_whose_write_cannot_complete_ends_within_its_bound() {
         block_on(async {
             // The peer is kept ALIVE and never read from, so writes block rather
             // than fail.
-            let (_peer, owner_side) = UnixStream::pair().unwrap();
+            let (peer, owner_side) = UnixStream::pair().unwrap();
             let (_rd, wr) = owner_side.into_split();
             let writer = Arc::new(tokio::sync::Mutex::new(wr));
             // Fill the socket buffer first: after this, any further write pends
@@ -1817,9 +1879,11 @@ mod tests {
                 let _ = tokio::time::timeout(Duration::from_millis(300), wr.write_all(&junk)).await;
             }
 
+            let wire_broken = Arc::new(AtomicBool::new(false));
             let interval = Duration::from_millis(20);
             let beat = Heartbeat::start_paced(
                 Arc::clone(&writer),
+                Arc::clone(&wire_broken),
                 Arc::new(OwnerState::new(None, None)),
                 RequestClass::Read,
                 None,
@@ -1836,6 +1900,45 @@ mod tests {
                 "a beat that cannot complete its write must give up, not park forever"
             );
             beat.stop().await;
+            assert!(
+                wire_broken.load(Ordering::SeqCst),
+                "a beat that gave up on its bound must latch the connection as broken"
+            );
+
+            // The dispatch path's terminal write, guarded by the now-latched
+            // flag: it must NOT write the (sentinel) terminal frame, and must
+            // shut the write half down instead.
+            let sentinel = OwnerFrame::Error {
+                message: "sentinel-terminal-frame-must-not-appear".to_string(),
+            };
+            write_terminal_frame(&writer, &wire_broken, &sentinel)
+                .await
+                .expect("a broken-wire terminal write is a clean no-op, not an error");
+
+            // Drain everything the stalled peer ever received — the junk that
+            // made it through before the buffer filled — and confirm two
+            // things: the sentinel text is nowhere in it (no terminal frame was
+            // appended), and the stream ends in EOF (the write half really was
+            // shut down), never in more bytes to read.
+            let mut peer = peer;
+            let mut drained = Vec::new();
+            let mut buf = [0u8; 65536];
+            loop {
+                use tokio::io::AsyncReadExt;
+                match tokio::time::timeout(Duration::from_millis(500), peer.read(&mut buf)).await {
+                    Ok(Ok(0)) => break, // EOF: the write half was shut down
+                    Ok(Ok(n)) => drained.extend_from_slice(&buf[..n]),
+                    Ok(Err(e)) => panic!("unexpected read error while draining: {e}"),
+                    Err(_) => panic!(
+                        "no EOF within the drain budget — the write half was never shut down"
+                    ),
+                }
+            }
+            let drained_text = String::from_utf8_lossy(&drained);
+            assert!(
+                !drained_text.contains("sentinel-terminal-frame-must-not-appear"),
+                "the terminal frame must never be written onto a broken wire, got: {drained_text}"
+            );
         });
     }
 
@@ -1852,6 +1955,7 @@ mod tests {
             {
                 let _beat = Heartbeat::start_paced(
                     Arc::new(tokio::sync::Mutex::new(wr)),
+                    Arc::new(AtomicBool::new(false)),
                     Arc::new(OwnerState::new(None, None)),
                     RequestClass::Read,
                     None,
