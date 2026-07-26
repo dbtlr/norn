@@ -608,7 +608,10 @@ async fn write_frame(wr: &mut OwnedWriteHalf, frame: &OwnerFrame) -> anyhow::Res
 /// regardless — see [`handle_connection`]'s disconnect contract.
 struct Heartbeat {
     cancel: Arc<tokio::sync::Notify>,
-    handle: tokio::task::JoinHandle<()>,
+    /// `None` once [`stop`](Heartbeat::stop) has taken the join handle to await
+    /// it. An `Option` so `stop` can consume the handle while [`Drop`] still has
+    /// one to abort on the path `stop` never reaches.
+    handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Heartbeat {
@@ -618,6 +621,21 @@ impl Heartbeat {
         class: RequestClass,
         total: Option<u64>,
     ) -> Self {
+        Self::start_paced(writer, state, class, total, PROGRESS_HEARTBEAT)
+    }
+
+    /// [`start`](Heartbeat::start) with an explicit beat interval. Production
+    /// always beats at [`PROGRESS_HEARTBEAT`]; the parameter exists so the
+    /// liveness properties below (a write that cannot land ends the loop; a drop
+    /// aborts it) are testable in milliseconds rather than seconds. The write
+    /// bound is derived from the interval, so the relation holds at any pace.
+    fn start_paced(
+        writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+        state: Arc<OwnerState>,
+        class: RequestClass,
+        total: Option<u64>,
+        interval: Duration,
+    ) -> Self {
         let cancel = Arc::new(tokio::sync::Notify::new());
         let beat_cancel = Arc::clone(&cancel);
         let handle = tokio::spawn(async move {
@@ -626,27 +644,60 @@ impl Heartbeat {
                 // task is mid-write is not lost: the next `notified()` returns
                 // from the stored permit and the loop exits.
                 tokio::select! {
-                    _ = tokio::time::sleep(PROGRESS_HEARTBEAT) => {}
+                    _ = tokio::time::sleep(interval) => {}
                     _ = beat_cancel.notified() => break,
                 }
                 let frame = OwnerFrame::Progress {
                     progress: state.progress(class, total),
                 };
                 let mut wr = writer.lock().await;
-                if write_frame(&mut wr, &frame).await.is_err() {
-                    break;
+                // The write is BOUNDED. An undeliverable heartbeat is worthless
+                // in itself, and an unbounded one is actively harmful: `stop`
+                // awaits this task, and it is awaited BEFORE the request
+                // releases `in_flight`, so a beat parked forever inside
+                // `write_all` — a peer that stopped reading and let the socket
+                // buffer fill — would leave the owner unreapable, holding its
+                // flock and its db for as long as that peer lives. Three
+                // intervals is generous for one short line onto a socket
+                // somebody is reading; past that the client is not consuming, so
+                // there is nothing to report to.
+                match tokio::time::timeout(interval * 3, write_frame(&mut wr, &frame)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) | Err(_) => break,
                 }
             }
         });
-        Self { cancel, handle }
+        Self {
+            cancel,
+            handle: Some(handle),
+        }
     }
 
     /// Stop beating and WAIT for the beat task to be gone. Awaiting (rather than
     /// aborting) is what guarantees no progress frame can be interleaved after
     /// the terminal frame.
-    async fn stop(self) {
+    async fn stop(mut self) {
         self.cancel.notify_one();
-        let _ = self.handle.await;
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for Heartbeat {
+    /// The belt to [`stop`](Heartbeat::stop)'s braces: a heartbeat that goes out
+    /// of scope WITHOUT being stopped — an unwind between start and stop — would
+    /// otherwise leave a detached task beating on this connection for as long as
+    /// the process lives, which is exactly the silence budget the frames exist to
+    /// satisfy turned into a lie about work nobody is doing.
+    ///
+    /// The ordinary path is untouched: `stop` takes the handle before this runs,
+    /// so there is nothing left to abort and the "beat task is gone before the
+    /// terminal frame" ordering is still established by the await, never here.
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
     }
 }
 
@@ -704,14 +755,26 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
                 // Progress frames flow for the whole time this request's work is
                 // in flight, and stop — awaited — before the terminal frame is
                 // written below.
-                let heartbeat = Heartbeat::start(
-                    Arc::clone(&writer),
-                    Arc::clone(&state),
-                    request_class(&frame),
-                    progress_total(&frame),
-                );
+                //
+                // `ping` gets NO heartbeat: it is answered from owner state
+                // without touching the vault, so it returns orders of magnitude
+                // inside the client's silence budget and a beat task per
+                // readiness ping is pure waste. It also makes the pong path
+                // structurally progress-free rather than accidentally so — the
+                // readiness wait reports warming from the pong's own serving
+                // state, not from frames the ping raced.
+                let heartbeat = (!is_liveness_ping(&frame)).then(|| {
+                    Heartbeat::start(
+                        Arc::clone(&writer),
+                        Arc::clone(&state),
+                        request_class(&frame),
+                        progress_total(&frame),
+                    )
+                });
                 let outcome = dispatch(&state, frame).await;
-                heartbeat.stop().await;
+                if let Some(heartbeat) = heartbeat {
+                    heartbeat.stop().await;
+                }
                 outcome
             }
             Err(err) => (
@@ -1388,11 +1451,20 @@ fn read_markdown_source(cache: &norn_core::cache::Cache, report: &mut norn_wire:
     }
 }
 
+/// Whether this frame is the O(1) liveness probe: answered from owner state
+/// alone, at any serving state, without touching the vault. Two properties key
+/// off it — a ping never waits for warm-up ([`needs_warm_context`]) and never
+/// starts a progress heartbeat ([`handle_connection`]) — because both follow
+/// from the same fact about what a ping costs.
+fn is_liveness_ping(frame: &ClientFrame) -> bool {
+    matches!(frame, ClientFrame::Ping { .. })
+}
+
 /// Whether this frame needs the warm context, and so waits for warm-up to
-/// settle instead of being answered early. Everything except `ping`, which is
-/// the O(1) liveness probe and must answer at any serving state.
+/// settle instead of being answered early. Everything except the liveness ping,
+/// which must answer at any serving state.
 fn needs_warm_context(frame: &ClientFrame) -> bool {
-    !matches!(frame, ClientFrame::Ping { .. })
+    !is_liveness_ping(frame)
 }
 
 /// How often the warm-up wait re-checks. Small relative to a build so the wait
@@ -1685,6 +1757,113 @@ mod tests {
             None
         );
         assert_eq!(progress_total(&ClientFrame::Probe), None);
+    }
+
+    /// A peer that is GONE must end the beat loop: the write fails outright and
+    /// there is nothing left to report to.
+    #[test]
+    fn a_beat_that_cannot_be_delivered_ends_its_own_loop() {
+        block_on(async {
+            let (peer, owner_side) = UnixStream::pair().unwrap();
+            drop(peer); // the client vanished before the first beat
+            let (_rd, wr) = owner_side.into_split();
+            let interval = Duration::from_millis(20);
+            let beat = Heartbeat::start_paced(
+                Arc::new(tokio::sync::Mutex::new(wr)),
+                Arc::new(OwnerState::new(None, None)),
+                RequestClass::Read,
+                None,
+                interval,
+            );
+
+            // One beat, one bounded write attempt, then out. Well inside the
+            // interval + write bound; a loop that ignored the failure would
+            // still be beating here.
+            tokio::time::sleep(interval * 6).await;
+            assert!(
+                beat.handle
+                    .as_ref()
+                    .expect("stop has not run yet")
+                    .is_finished(),
+                "an undeliverable beat must end the loop, not retry forever"
+            );
+            beat.stop().await;
+        });
+    }
+
+    /// A peer that is PRESENT but has stopped reading is the dangerous shape:
+    /// the socket buffer fills and the write neither fails nor completes. The
+    /// bound is what saves the owner — `stop` awaits this task, and it is awaited
+    /// before the request releases `in_flight`, so a beat parked forever inside
+    /// `write_all` leaves the owner unreapable, holding its flock and its db for
+    /// as long as that peer lives.
+    #[test]
+    fn a_beat_whose_write_cannot_complete_ends_within_its_bound() {
+        block_on(async {
+            // The peer is kept ALIVE and never read from, so writes block rather
+            // than fail.
+            let (_peer, owner_side) = UnixStream::pair().unwrap();
+            let (_rd, wr) = owner_side.into_split();
+            let writer = Arc::new(tokio::sync::Mutex::new(wr));
+            // Fill the socket buffer first: after this, any further write pends
+            // indefinitely instead of returning.
+            {
+                let mut wr = writer.lock().await;
+                let junk = vec![b'x'; 4 << 20];
+                let _ = tokio::time::timeout(Duration::from_millis(300), wr.write_all(&junk)).await;
+            }
+
+            let interval = Duration::from_millis(20);
+            let beat = Heartbeat::start_paced(
+                Arc::clone(&writer),
+                Arc::new(OwnerState::new(None, None)),
+                RequestClass::Read,
+                None,
+                interval,
+            );
+
+            // One interval to the first beat, three more for its write bound.
+            tokio::time::sleep(interval * 10).await;
+            assert!(
+                beat.handle
+                    .as_ref()
+                    .expect("stop has not run yet")
+                    .is_finished(),
+                "a beat that cannot complete its write must give up, not park forever"
+            );
+            beat.stop().await;
+        });
+    }
+
+    /// Dropping a heartbeat WITHOUT stopping it — the unwind path — must leave
+    /// nothing beating. Without the abort, a detached task keeps writing progress
+    /// onto a live connection for the life of the process, which is the client's
+    /// silence budget being satisfied by a lie.
+    #[test]
+    fn dropping_a_heartbeat_leaves_nothing_beating() {
+        block_on(async {
+            let (peer, owner_side) = UnixStream::pair().unwrap();
+            let (_rd, wr) = owner_side.into_split();
+            let interval = Duration::from_millis(20);
+            {
+                let _beat = Heartbeat::start_paced(
+                    Arc::new(tokio::sync::Mutex::new(wr)),
+                    Arc::new(OwnerState::new(None, None)),
+                    RequestClass::Read,
+                    None,
+                    interval,
+                );
+                // Dropped here, before its first beat could ever be written.
+            }
+
+            let mut reader = BufReader::new(peer);
+            let mut line = String::new();
+            let read = tokio::time::timeout(interval * 6, reader.read_line(&mut line)).await;
+            assert!(
+                read.is_err() || line.is_empty(),
+                "an aborted beat must write nothing, got {line:?}"
+            );
+        });
     }
 
     /// NRN-400 (review): the retention sweep (`prune_events` +
