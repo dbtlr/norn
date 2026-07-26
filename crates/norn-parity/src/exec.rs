@@ -42,6 +42,15 @@ use crate::cases::Case;
 /// - `NORN_ROOT` and `NORN_CONFIG_DIR` are removed explicitly after the
 ///   allowlist is applied. `env_clear` already drops them; the explicit
 ///   removal keeps them dropped if the allowlist ever widens.
+/// - `NORN_EPHEMERAL_TTL_SECS` is forced to [`OWNER_IDLE_TTL_SECS`]. Every
+///   fixture vault a case runs against gets its own summoned owner (there is
+///   no direct/no-daemon path — ADR 0017 reverses ADR 0016's cold path, and
+///   parity never shares a vault or an owner across cases), so a gated run
+///   over the full suite summons on the order of the suite's case count.
+///   Left at the 120s production default they would linger for that long
+///   after the run exits; the short override makes each one self-reap
+///   promptly behind the run instead. This is the cost of "one owner per
+///   fixture vault" staying lingering, not spawning.
 pub struct SpawnEnv {
     home: PathBuf,
     cache: PathBuf,
@@ -50,6 +59,19 @@ pub struct SpawnEnv {
     /// are removed when the run ends.
     runtime: tempfile::TempDir,
 }
+
+/// The env var a `norn` binary reads to override its summoned-owner idle TTL
+/// (`norn_client::EPHEMERAL_TTL_ENV`). Duplicated as a literal rather than
+/// imported — the parity harness spawns `norn` as an opaque subprocess and
+/// must not link the crate it exercises, matching this file's existing
+/// `NORN_ROOT` / `NORN_CONFIG_DIR` literals.
+const EPHEMERAL_TTL_ENV: &str = "NORN_EPHEMERAL_TTL_SECS";
+
+/// How long a parity-spawned owner lingers idle before self-reaping. Short
+/// relative to the 120s production default (see [`SpawnEnv`]'s doc); long
+/// enough that a case's own request sequence against its fixture vault
+/// finishes well inside it.
+const OWNER_IDLE_TTL_SECS: &str = "2";
 
 impl SpawnEnv {
     /// Create the scratch `HOME` / XDG tree under `root` — a directory the
@@ -93,6 +115,7 @@ impl SpawnEnv {
         command.env("XDG_RUNTIME_DIR", self.runtime.path());
         command.env_remove("NORN_ROOT");
         command.env_remove("NORN_CONFIG_DIR");
+        command.env(EPHEMERAL_TTL_ENV, OWNER_IDLE_TTL_SECS);
     }
 }
 
