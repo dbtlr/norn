@@ -3,8 +3,10 @@
 //! there is no separate pre-Ready path and no "vault not ready" early answer.
 //!
 //! This is the one-emitter rule observed from the wire: the same heartbeat that
-//! paces a long apply paces warm-up, so the client's inter-frame silence budget
-//! is satisfied by whichever phase happens to be running.
+//! paces a long apply paces warm-up, so the client's silence budget is satisfied
+//! by whichever phase happens to be running. It also pins the other half of the
+//! protocol — that the terminal frame is LAST — which is what the owner buys by
+//! stopping and joining the heartbeat before it writes that frame.
 //!
 //! Hermetic: a TempDir vault + a TempDir runtime dir and the internal
 //! `NORN_OWNER_WARMUP_DELAY_MS` slow-build seam. This is the only test in this
@@ -64,6 +66,11 @@ fn a_request_during_warm_up_rides_warming_progress_frames_then_its_answer() {
     let owner = std::thread::spawn(move || norn_owner::run(config).expect("owner run"));
 
     let stream = connect(&socket_path);
+    // A generous deadline: it exists so a protocol regression FAILS instead of
+    // hanging this test forever, not as a timing assertion.
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
     let mut writer = stream.try_clone().unwrap();
     let mut reader = BufReader::new(stream);
     let mut line = serde_json::to_vec(&ClientFrame::Probe).unwrap();
@@ -72,29 +79,46 @@ fn a_request_during_warm_up_rides_warming_progress_frames_then_its_answer() {
     writer.flush().unwrap();
 
     // Read the request's whole stream: progress frames until the terminal one.
-    let mut phases = Vec::new();
+    let mut observed = Vec::new();
     let terminal = loop {
         let mut raw = String::new();
         let read = reader.read_line(&mut raw).expect("owner frame");
         assert_ne!(read, 0, "owner closed before answering the probe");
         match serde_json::from_str::<OwnerFrame>(raw.trim()).expect("decodable frame") {
-            OwnerFrame::Progress { progress } => phases.push(progress.phase),
+            OwnerFrame::Progress { progress } => observed.push(progress),
             terminal => break terminal,
         }
     };
 
     assert!(
-        phases.len() >= 2,
-        "a ~2.5s warm-up must heartbeat more than once, got {phases:?}"
+        observed.len() >= 2,
+        "a ~2.5s warm-up must heartbeat more than once, got {observed:?}"
     );
     assert!(
-        phases.iter().all(|p| *p == ProgressPhase::Warming),
-        "a request queued behind warm-up reports `warming`, got {phases:?}"
+        observed.iter().all(|p| p.phase == ProgressPhase::Warming),
+        "a request queued behind warm-up reports `warming`, got {observed:?}"
+    );
+    assert!(
+        observed
+            .iter()
+            .all(|p| p.done.is_none() && p.total.is_none()),
+        "warming carries no units — the frame itself is the fact, got {observed:?}"
     );
     assert!(
         matches!(terminal, OwnerFrame::Probe { .. }),
         "the request is answered once warm-up lands — never `vault not ready`, got {terminal:?}"
     );
+
+    // NOTHING follows the terminal frame. Closing the write half ends the
+    // owner's connection loop, so the next read is EOF — unless a beat slipped
+    // out after the answer, in which case it is sitting in this buffer and is
+    // read here instead. That is exactly what stopping and JOINING the heartbeat
+    // before writing the terminal frame buys: a client can treat the terminal
+    // frame as the end of the request without tolerating a trailing beat.
+    writer.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut trailing = String::new();
+    let read = reader.read_line(&mut trailing).expect("stream end");
+    assert_eq!(read, 0, "a frame followed the terminal frame: {trailing:?}");
 
     drop(reader);
     drop(writer);
