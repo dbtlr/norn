@@ -27,6 +27,9 @@ pub enum Glyph {
     /// Change arrow (before → after). UTF: `→` (RIGHTWARDS ARROW). ASCII
     /// fallback: `->`. First consumer: the mutation-verb change lines.
     Arrow,
+    /// Continuation ellipsis. UTF: `…` (HORIZONTAL ELLIPSIS). ASCII fallback:
+    /// `...`. Consumer: the transient in-flight progress line.
+    Ellipsis,
 }
 
 pub fn render(g: Glyph, ascii: bool) -> &'static str {
@@ -43,6 +46,8 @@ pub fn render(g: Glyph, ascii: bool) -> &'static str {
         (Glyph::Marker, true) => ">",
         (Glyph::Arrow, false) => "→",
         (Glyph::Arrow, true) => "->",
+        (Glyph::Ellipsis, false) => "…",
+        (Glyph::Ellipsis, true) => "...",
     }
 }
 
@@ -92,6 +97,12 @@ mod tests {
     fn marker_utf_and_ascii() {
         assert_eq!(render(Glyph::Marker, false), "▸");
         assert_eq!(render(Glyph::Marker, true), ">");
+    }
+
+    #[test]
+    fn ellipsis_utf_and_ascii() {
+        assert_eq!(render(Glyph::Ellipsis, false), "…");
+        assert_eq!(render(Glyph::Ellipsis, true), "...");
     }
 
     use crate::test_support::EnvGuard;
