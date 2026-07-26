@@ -18,6 +18,7 @@ use tempfile::TempDir;
 
 use super::{build_index_with_options, overlay_changed_paths, IndexOptions};
 use crate::domain::GraphIndex;
+use crate::links::resolve_links;
 
 fn vault() -> (TempDir, Utf8PathBuf) {
     let tmp = TempDir::new().unwrap();
@@ -102,6 +103,39 @@ fn assert_overlay_equals_rebuild(
         comparable(&incremental),
         comparable(&rebuilt),
         "{case}: incremental re-resolution diverged from a full rebuild"
+    );
+}
+
+/// Overlay `changed` onto `baseline`, then assert the SCOPED re-resolution
+/// agrees with a FULL `resolve_links` pass over the identical overlaid
+/// document set (a clone of the overlay's own output, not a rebuild).
+///
+/// This isolates the scoping axis from the file-identity axis:
+/// [`assert_overlay_equals_rebuild`] compares against a cold rebuild, so a
+/// spelling variant of a changed path (e.g. `./probe.md`) can trip the
+/// pre-existing case/spelling-collision retain bug tracked separately as
+/// NRN-524, which has nothing to do with whether the SCOPE the overlay chose
+/// to re-resolve was the right one. Here both sides see exactly the same
+/// files and documents — the only question is whether re-resolving just the
+/// blast radius produced the same answer whole-graph resolution would have,
+/// for that fixed document set.
+fn assert_overlay_scoping_is_sound(
+    root: &Utf8Path,
+    baseline: GraphIndex,
+    changed: &[Utf8PathBuf],
+    case: &str,
+) {
+    let mut incremental = baseline;
+    overlay_changed_paths(&mut incremental, root, changed, &options());
+
+    let mut fully_resolved = incremental.clone();
+    resolve_links(&fully_resolved.files, &mut fully_resolved.documents);
+
+    assert_eq!(
+        comparable(&incremental),
+        comparable(&fully_resolved),
+        "{case}: scoped overlay diverged from a full resolve_links pass over the SAME \
+         overlaid document set"
     );
 }
 
@@ -269,6 +303,67 @@ fn a_non_markdown_file_appearing_captures_a_markdown_link() {
     assert_overlay_equals_rebuild(&root, baseline, &["assets/shot.png"], "asset create");
 }
 
+#[test]
+fn embedding_a_document_created_at_the_root_fires_the_root_rung_not_the_base_rung() {
+    // `dir/a.md` embeds `![[shared]]`. `link_lookup_keys`'s `Embed` arm records
+    // THREE rungs for that one link: base-relative (`dir/shared.md`),
+    // root-relative (`shared.md`), and the stem bucket. `shared.md` is created
+    // at the vault ROOT, not under `dir/`, so only the root-relative and stem
+    // rungs can hit — this pins that the root rung fires on its own, distinct
+    // from the base rung it sits alongside.
+    let (_tmp, root) = vault();
+    write(&root, "dir/a.md", "---\n---\n![[shared]]\n");
+    let baseline = build_index_with_options(&root, &options()).unwrap();
+    let a = baseline
+        .documents
+        .iter()
+        .find(|d| d.path == "dir/a.md")
+        .unwrap();
+    assert!(
+        a.links
+            .iter()
+            .any(|link| link.target == "shared" && link.resolved_path.is_none()),
+        "the pre-state must have a dangling embed for the create to bite"
+    );
+
+    write(&root, "shared.md", "---\n---\n# Shared\n");
+    assert_overlay_equals_rebuild(&root, baseline, &["shared.md"], "root-rung embed create");
+}
+
+#[test]
+fn heading_churn_revalidates_a_documents_self_anchor_link() {
+    // A document that links `[[#Heading]]` to one of its OWN headings takes the
+    // self-reference branch of the resolution ladder (empty target, an anchor)
+    // — `link_lookup_keys` records only the document's own source-path key for
+    // it, not a stem/path key derived from a target. Churning the heading the
+    // self-link names must still revalidate it.
+    let (_tmp, root) = vault();
+    write(
+        &root,
+        "self.md",
+        "---\n---\n# Section A\n\nSee [[#Section A]] above.\n",
+    );
+    let baseline = build_index_with_options(&root, &options()).unwrap();
+    let doc = baseline
+        .documents
+        .iter()
+        .find(|d| d.path == "self.md")
+        .unwrap();
+    assert!(
+        doc.links
+            .iter()
+            .any(|link| link.target.is_empty() && link.resolved_path.is_some()),
+        "the pre-state self-anchor link must already resolve"
+    );
+
+    write(
+        &root,
+        "self.md",
+        "---\n---\n# Section B\n\nSee [[#Section A]] above.\n",
+    );
+    assert_overlay_equals_rebuild(&root, baseline, &["self.md"], "self-anchor heading churn");
+}
+
 // ── Randomized single-change property ───────────────────────────────────────
 
 /// Deterministic xorshift64* — a seeded generator so a failure reproduces from
@@ -300,9 +395,16 @@ const FOLDERS: [&str; 4] = ["", "notes/", "notes/deep/", "archive/"];
 
 /// Draw a document path that does not collide with an existing one even on a
 /// case-insensitive filesystem. Two differently-cased spellings of one path name
-/// ONE file on macOS, which makes "the vault contains both" untestable there;
-/// case sensitivity in RESOLUTION is still exercised, via link targets that
-/// differ in case from the document they name.
+/// ONE file on macOS, which makes "the vault contains both" untestable there —
+/// but even where the filesystem tolerates it, `resolve_links`'s `by_path_lower`
+/// table has only one entry for two paths differing only in case, a known,
+/// separately pinned defect (`case_only_duplicate_filenames_silently_overwrite_in_path_lower`
+/// in `links::resolve`; tracked as NRN-524). Generating a case-only collision
+/// here would make an overlay-vs-rebuild mismatch ambiguous between "the
+/// scoping logic under test is wrong" and "the pre-existing table-collision
+/// defect fired," so this sweep dodges the collision entirely rather than
+/// exercising it. Case sensitivity in RESOLUTION is still exercised, via link
+/// targets that differ in case from the document they name.
 fn distinct_path(rng: &mut Rng, taken: &[String]) -> Option<String> {
     let rel = format!(
         "{}{}.md",
@@ -321,21 +423,32 @@ fn generated_vault(rng: &mut Rng, root: &Utf8Path) -> Vec<String> {
         let Some(rel) = distinct_path(rng, &paths) else {
             continue;
         };
+        let own_heading = NAMES[rng.below(NAMES.len())];
         let mut body = String::from("---\naliases:\n  - ");
         body.push_str(NAMES[rng.below(NAMES.len())]);
         body.push_str("\n---\n\n# Heading ");
-        body.push_str(NAMES[rng.below(NAMES.len())]);
+        body.push_str(own_heading);
         body.push_str("\n\n");
-        for _ in 0..rng.below(4) + 1 {
+        for _ in 0..rng.below(6) + 1 {
             let target = NAMES[rng.below(NAMES.len())];
-            match rng.below(4) {
+            match rng.below(6) {
                 0 => body.push_str(&format!("[[{target}]] ")),
                 1 => body.push_str(&format!(
                     "[[{}{target}]] ",
                     FOLDERS[rng.below(FOLDERS.len())]
                 )),
                 2 => body.push_str(&format!("[link]({target}.md) ")),
-                _ => body.push_str(&format!("[[{target}#Heading {target}]] ")),
+                3 => body.push_str(&format!("[[{target}#Heading {target}]] ")),
+                // Wikilink-embed: same target resolution as a wikilink, but the
+                // `!`-prefixed embed form, which walks a different rung set
+                // (base-relative, root-relative, and stem — see
+                // `link_lookup_keys`'s `LinkKind::Embed` arm).
+                4 => body.push_str(&format!("![[{target}]] ")),
+                // Self-anchor: an empty-target wikilink pointing at this
+                // document's OWN heading — the self-reference branch that owns
+                // only its own source-path key, not a stem/path key derived
+                // from `target`.
+                _ => body.push_str(&format!("[[#Heading {own_heading}]] ")),
             }
         }
         body.push_str("\n\nparagraph ^blk\n");
@@ -405,5 +518,93 @@ fn incremental_matches_a_full_rebuild_for_a_random_single_document_change() {
             "seed {seed}: incremental re-resolution diverged from a full rebuild for \
              changed={changed:?}"
         );
+    }
+}
+
+/// Confound-free counterpart to
+/// [`incremental_matches_a_full_rebuild_for_a_random_single_document_change`]:
+/// that test compares against a cold REBUILD, which conflates two axes — did
+/// the overlay choose the right SCOPE to re-resolve, and did it land on the
+/// right DOCUMENT SET (file/duplicate handling, tracked separately as
+/// NRN-524). A changed-path spelling variant or a phantom entry can trip the
+/// second axis without the scoping logic under test being at fault at all.
+///
+/// This sweep isolates the first axis: [`assert_overlay_scoping_is_sound`]
+/// compares the overlay's scoped re-resolution against a full `resolve_links`
+/// pass over a CLONE of that same overlay's own document set, so there is no
+/// second document set to disagree about. It also perturbs the changed-path
+/// spelling (a bare rel vs. a `./`-prefixed rel) and adds a phantom entry (a
+/// changed path that never existed on disk, as another layer might report) to
+/// confirm neither perturbs the scoping proof.
+#[test]
+fn scoped_overlay_matches_full_resolve_over_the_same_document_set_for_random_changes() {
+    for seed in 1u64..=300 {
+        let mut rng = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 5);
+        let (_tmp, root) = vault();
+        let paths = generated_vault(&mut rng, &root);
+        let baseline = build_index_with_options(&root, &options()).unwrap();
+
+        let victim = paths[rng.below(paths.len())].clone();
+        let mut changed: Vec<String> = match rng.below(4) {
+            // Create a brand-new document that may collide on stem.
+            0 => {
+                let Some(rel) = distinct_path(&mut rng, &paths) else {
+                    continue;
+                };
+                write(&root, &rel, "---\n---\n# Fresh\n\nparagraph ^blk\n");
+                vec![rel]
+            }
+            // Delete an existing document.
+            1 => {
+                remove(&root, &victim);
+                vec![victim]
+            }
+            // Rename an existing document into another folder.
+            2 => {
+                let body = std::fs::read_to_string(root.join(&victim).as_std_path()).unwrap();
+                let stem = Utf8Path::new(&victim).file_stem().unwrap().to_string();
+                let moved = format!("{}{stem}.md", FOLDERS[rng.below(FOLDERS.len())]);
+                if paths.iter().any(|taken| taken.eq_ignore_ascii_case(&moved)) {
+                    continue;
+                }
+                remove(&root, &victim);
+                write(&root, &moved, &body);
+                vec![victim, moved]
+            }
+            // Rewrite an existing document's frontmatter, headings, and links.
+            _ => {
+                let target = NAMES[rng.below(NAMES.len())];
+                write(
+                    &root,
+                    &victim,
+                    &format!(
+                        "---\naliases:\n  - {target}\n---\n\n# Rewritten {target}\n\n[[{target}]] \
+                         [[{target}#Rewritten {target}]]\n\nparagraph ^other\n"
+                    ),
+                );
+                vec![victim]
+            }
+        };
+
+        // Spelling variant: a caller can report a changed path with a leading
+        // `./`. Both sides of THIS comparison overlay the identical set either
+        // way, so this can only exercise the scoping logic, never the
+        // dedup/retain axis NRN-524 owns.
+        if rng.below(2) == 0 {
+            changed = changed.into_iter().map(|rel| format!("./{rel}")).collect();
+        }
+        // Phantom entry: a changed path that never existed before or after —
+        // e.g. a rename another layer reported that this vault never actually
+        // saw. `parse_graph_path` returns `None` for it and it drops out; the
+        // reverse-index lookup for it is simply empty.
+        if rng.below(3) == 0 {
+            changed.push(format!(
+                "{}ghost-{seed}.md",
+                FOLDERS[rng.below(FOLDERS.len())]
+            ));
+        }
+
+        let changed: Vec<Utf8PathBuf> = changed.iter().map(Utf8PathBuf::from).collect();
+        assert_overlay_scoping_is_sound(&root, baseline, &changed, &format!("seed {seed}"));
     }
 }
