@@ -108,24 +108,25 @@ fn client_frame_variants(src: &str) -> Vec<String> {
     variants
 }
 
-/// Extract the `dispatch` match arm body for `ClientFrame::{variant}`: the
-/// brace-delimited block following that pattern's `=>`. Panics with a
-/// diagnostic if the variant's arm cannot be found, so a rename that drops a
-/// variant from `runtime.rs` fails this test rather than silently narrowing
-/// what it checks.
-fn extract_arm_body<'a>(src: &'a str, variant: &str) -> &'a str {
-    let needle = format!("ClientFrame::{variant} ");
-    let pat_start = src
-        .find(&needle)
-        .unwrap_or_else(|| panic!("no `ClientFrame::{variant}` arm found in runtime.rs"));
-    let arrow = src[pat_start..]
-        .find("=>")
-        .map(|i| pat_start + i)
-        .unwrap_or_else(|| panic!("no `=>` after `ClientFrame::{variant}` pattern"));
-    let brace_start = src[arrow..]
+/// The brace-delimited body of the named `fn` in `src`.
+///
+/// Every scan below narrows to one function first. `runtime.rs` holds more than
+/// one match over `ClientFrame` — the dispatch match and the progress
+/// classifier — so an unscoped `find` would extract whichever came first in the
+/// file and silently check the wrong construct.
+fn fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
+    let start = src
+        .find(signature)
+        .unwrap_or_else(|| panic!("no `{signature}` in runtime.rs"));
+    brace_block(src, start)
+}
+
+/// The brace-delimited block starting at the first `{` at or after `from`.
+fn brace_block(src: &str, from: usize) -> &str {
+    let brace_start = src[from..]
         .find('{')
-        .map(|i| arrow + i)
-        .unwrap_or_else(|| panic!("no `{{` opening the `ClientFrame::{variant}` arm body"));
+        .map(|i| from + i)
+        .expect("no `{` opening the scanned block");
     let mut depth = 0i32;
     for (i, c) in src[brace_start..].char_indices() {
         match c {
@@ -139,17 +140,35 @@ fn extract_arm_body<'a>(src: &'a str, variant: &str) -> &'a str {
             _ => {}
         }
     }
-    panic!("unbalanced braces scanning the `ClientFrame::{variant}` arm body");
+    panic!("unbalanced braces scanning a block in runtime.rs");
+}
+
+/// Extract the `dispatch_frame` match arm body for `ClientFrame::{variant}`: the
+/// brace-delimited block following that pattern's `=>`. Panics with a
+/// diagnostic if the variant's arm cannot be found, so a rename that drops a
+/// variant from `runtime.rs` fails this test rather than silently narrowing
+/// what it checks.
+fn extract_arm_body<'a>(src: &'a str, variant: &str) -> &'a str {
+    let needle = format!("ClientFrame::{variant} ");
+    let pat_start = src
+        .find(&needle)
+        .unwrap_or_else(|| panic!("no `ClientFrame::{variant}` arm found in dispatch_frame"));
+    let arrow = src[pat_start..]
+        .find("=>")
+        .map(|i| pat_start + i)
+        .unwrap_or_else(|| panic!("no `=>` after `ClientFrame::{variant}` pattern"));
+    brace_block(src, arrow)
 }
 
 #[test]
 fn every_mutation_variant_routes_through_dispatch_mutation() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime.rs");
     let src = fs::read_to_string(&path).expect("read runtime.rs");
+    let dispatch = fn_body(&src, "async fn dispatch_frame(");
 
     let mut failures = Vec::new();
     for variant in MUTATION_VARIANTS {
-        let body = extract_arm_body(&src, variant);
+        let body = extract_arm_body(dispatch, variant);
         if !body.contains("dispatch_mutation(") {
             failures.push(format!(
                 "ClientFrame::{variant}'s arm does not call `dispatch_mutation(` — it bypasses \
@@ -168,6 +187,48 @@ fn every_mutation_variant_routes_through_dispatch_mutation() {
         failures.is_empty(),
         "every mutation-class ClientFrame variant must route through dispatch_mutation \
          (NRN-411):\n{failures:#?}"
+    );
+}
+
+/// NRN-512: `request_class` is a SECOND partition of the same variants — it
+/// decides whether an in-flight request reports the `applying` or the `reading`
+/// progress phase. The compiler forces it to be exhaustive but cannot stop a
+/// variant landing in the wrong arm, which would have a mutation heartbeat
+/// `reading`. This pins the two partitions to the same lists `dispatch_frame` is
+/// checked against, so they cannot drift apart.
+#[test]
+fn the_progress_classifier_partitions_variants_like_dispatch_does() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime.rs");
+    let src = fs::read_to_string(&path).expect("read runtime.rs");
+    let body = fn_body(&src, "fn request_class(");
+    // The function is one match with two arms; the mutation arm's patterns are
+    // everything before `=> RequestClass::Mutation`.
+    let split = body
+        .find("=> RequestClass::Mutation")
+        .expect("request_class must have a `RequestClass::Mutation` arm");
+    let (mutation_arm, read_arm) = body.split_at(split);
+
+    let mut failures = Vec::new();
+    for variant in MUTATION_VARIANTS {
+        if !mutation_arm.contains(&format!("ClientFrame::{variant} ")) {
+            failures.push(format!(
+                "ClientFrame::{variant} is a mutation but request_class does not report `applying` for it"
+            ));
+        }
+    }
+    for variant in READ_VARIANTS {
+        let needle = format!("ClientFrame::{variant} ");
+        // `Probe` is a unit variant, so it appears without a payload pattern.
+        let bare = format!("ClientFrame::{variant}\n");
+        if !read_arm.contains(&needle) && !read_arm.contains(&bare) {
+            failures.push(format!(
+                "ClientFrame::{variant} is a read but request_class does not report `reading` for it"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "request_class must partition ClientFrame exactly as dispatch does:\n{failures:#?}"
     );
 }
 

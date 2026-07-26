@@ -111,6 +111,25 @@ pub(crate) fn docs_parsed_count() -> usize {
     DOCS_PARSED.with(|count| count.get())
 }
 
+/// A process-wide, monotonic odometer of documents parsed from disk.
+///
+/// Distinct in scope from the test-only thread-local above, which measures ONE
+/// thread's parse count precisely so the size-independence guard cannot be
+/// polluted by the parallel test runner. This one is the opposite trade: a
+/// process-wide count, readable from a thread other than the parser's, which is
+/// what a progress reporter needs — an owner samples it before a warm-up build
+/// and reports the delta as the `warming` milestone (NRN-512).
+///
+/// It is an ODOMETER, not a gauge: it only ever increases, it is never reset,
+/// and it is `Relaxed` because no correctness decision reads it. A caller wanting
+/// "documents parsed by this build" subtracts its own start sample.
+static DOCUMENTS_PARSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Read the process-wide document-parse odometer. See [`DOCUMENTS_PARSED`].
+pub fn documents_parsed() -> u64 {
+    DOCUMENTS_PARSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Overlay the freshly-parsed state of `changed_paths` onto `baseline`, then
 /// re-resolve every link across the composite graph. Only the changed paths are
 /// read from disk — every other document and file is reused from `baseline` — so
@@ -308,6 +327,7 @@ fn parse_document(
 ) -> Document {
     #[cfg(test)]
     DOCS_PARSED.with(|count| count.set(count.get() + 1));
+    DOCUMENTS_PARSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = absolute_path
         .strip_prefix(root)
         .unwrap_or(absolute_path)

@@ -17,6 +17,12 @@
 //! - **Routed read.** A `probe` runs the trivial document-count read through the
 //!   slot's warm `serve_read` on a blocking thread — the stand-in exercised
 //!   before the read verbs land next task.
+//! - **Framed progress.** Every request answers with zero-or-more
+//!   [`OwnerFrame::Progress`] frames and then exactly one terminal frame. One
+//!   emitter ([`Heartbeat`]) paces them at [`PROGRESS_HEARTBEAT`] for the whole
+//!   time a request's work is in flight, whatever the phase — warming, reading,
+//!   applying — so the client's inter-frame silence budget is never tripped by
+//!   healthy long work.
 //! - **Idle-TTL self-reap.** After `idle_ttl` with no request in flight, the
 //!   owner shuts down: unbinds the socket and deletes the db. Bounds orphan
 //!   lifetime to ~one TTL; the flock makes any orphan detectable.
@@ -35,8 +41,12 @@ use norn_core::grammar::FieldRejection;
 use norn_core::mutate::MutationExecution;
 use norn_core::standards::VaultConfig;
 use norn_core::telemetry::{Clock, EventSink, IdGen};
-use norn_wire::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
+use norn_wire::{
+    ClientFrame, OwnerFrame, Progress, ProgressPhase, ServingState, WriterProgress,
+    CONTROL_PROTOCOL, PROGRESS_HEARTBEAT,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
 
 use crate::lifecycle;
@@ -131,6 +141,10 @@ struct OwnerState {
     /// mutation. Amortizes the sweep to once per new day rather than once per
     /// mutation — see [`mark_swept_if_new_day`](Self::mark_swept_if_new_day).
     swept_day: Mutex<Option<String>>,
+    /// The process-wide parse odometer sampled BEFORE warm-up starts, so the
+    /// `warming` progress milestone reports documents parsed by THIS build
+    /// rather than by the process (NRN-512).
+    docs_parsed_baseline: u64,
 }
 
 impl OwnerState {
@@ -149,6 +163,31 @@ impl OwnerState {
             mutation_lock: tokio::sync::Mutex::new(()),
             events_dir,
             swept_day: Mutex::new(None),
+            docs_parsed_baseline: norn_core::graph::documents_parsed(),
+        }
+    }
+
+    /// The progress observation to report right now for an in-flight request of
+    /// `class`. The phase is derived from OWNER STATE, not from the request
+    /// alone: any request landing on a not-yet-`Ready` owner is queued behind
+    /// warm-up, so that is what it reports — which is how warm-up progress and
+    /// request progress become one emitter rather than two mechanisms.
+    ///
+    /// Milestones are attached only where counting one is free: `warming`
+    /// reports documents parsed by this build (a process odometer sampled at
+    /// construction), and `applying` carries the plan's operation count when the
+    /// request is an `apply`. `reading` has no free unit to count, so it reports
+    /// the phase alone — a frame with no units is still proof of life, which is
+    /// the load-bearing part.
+    fn progress(&self, class: RequestClass, total: Option<u64>) -> Progress {
+        if self.serving() != ServingState::Ready {
+            let parsed =
+                norn_core::graph::documents_parsed().saturating_sub(self.docs_parsed_baseline);
+            return Progress::new(ProgressPhase::Warming).with_done(parsed);
+        }
+        match class {
+            RequestClass::Mutation => Progress::new(ProgressPhase::Applying).with_total(total),
+            RequestClass::Read => Progress::new(ProgressPhase::Reading),
         }
     }
 
@@ -518,11 +557,140 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
     }
 }
 
+/// Which progress phase a request's work belongs to once the owner is serving.
+/// Derived from the frame's class; the not-yet-`Ready` case overrides it (see
+/// [`OwnerState::progress`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestClass {
+    Read,
+    Mutation,
+}
+
+/// The class of work a client frame asks for. Mirrors the mutation-vs-read split
+/// `dispatch` routes on (`dispatch_mutation` vs `dispatch_read`), so a phase tag
+/// can never claim `applying` for a frame that takes no writer lock.
+fn request_class(frame: &ClientFrame) -> RequestClass {
+    match frame {
+        ClientFrame::Set { .. }
+        | ClientFrame::New { .. }
+        | ClientFrame::Edit { .. }
+        | ClientFrame::Move { .. }
+        | ClientFrame::Delete { .. }
+        | ClientFrame::RewriteWikilink { .. }
+        | ClientFrame::Apply { .. } => RequestClass::Mutation,
+        ClientFrame::Ping { .. }
+        | ClientFrame::Probe
+        | ClientFrame::Find { .. }
+        | ClientFrame::Count { .. }
+        | ClientFrame::Get { .. }
+        | ClientFrame::Describe { .. }
+        | ClientFrame::Validate { .. }
+        | ClientFrame::Repair { .. }
+        | ClientFrame::Audit { .. } => RequestClass::Read,
+    }
+}
+
+/// The total-units milestone a frame declares up front, where one is free to
+/// read off the request. Only `apply` has one: its plan states its operation
+/// count before any work begins. Every other verb's unit count is knowable only
+/// as the work proceeds, and counting it would cost more than the progress is
+/// worth, so they report the phase alone.
+fn progress_total(frame: &ClientFrame) -> Option<u64> {
+    match frame {
+        ClientFrame::Apply { params } => Some(params.plan.operations.len() as u64),
+        _ => None,
+    }
+}
+
+/// Write one frame as a line. The single encode+write+flush both the heartbeat
+/// and the terminal reply go through, so the two can never frame differently.
+async fn write_frame(wr: &mut OwnedWriteHalf, frame: &OwnerFrame) -> anyhow::Result<()> {
+    let mut buf = serde_json::to_vec(frame)?;
+    buf.push(b'\n');
+    wr.write_all(&buf).await?;
+    wr.flush().await?;
+    Ok(())
+}
+
+/// The in-flight progress emitter (NRN-512): while a request's work runs, this
+/// writes an [`OwnerFrame::Progress`] at least every [`PROGRESS_HEARTBEAT`] so
+/// the client's inter-frame silence budget keeps resetting.
+///
+/// ONE emitter covers every phase — warming, reading, applying — because the
+/// phase is read from owner state at each beat rather than fixed at start. It
+/// shares the connection's write half under a mutex with the terminal reply, and
+/// [`stop`](Heartbeat::stop) AWAITS the beat task's exit before the terminal
+/// frame is written, so the protocol's "progress frames THEN exactly one
+/// terminal frame" ordering holds without the client needing to tolerate a
+/// trailing beat.
+///
+/// A failed heartbeat write (the client vanished) ends the heartbeat and nothing
+/// else: it never signals the request's work, which runs to completion
+/// regardless — see [`handle_connection`]'s disconnect contract.
+struct Heartbeat {
+    cancel: Arc<tokio::sync::Notify>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Heartbeat {
+    fn start(
+        writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+        state: Arc<OwnerState>,
+        class: RequestClass,
+        total: Option<u64>,
+    ) -> Self {
+        let cancel = Arc::new(tokio::sync::Notify::new());
+        let beat_cancel = Arc::clone(&cancel);
+        let handle = tokio::spawn(async move {
+            loop {
+                // `notify_one` STORES a permit, so a cancel landing while this
+                // task is mid-write is not lost: the next `notified()` returns
+                // from the stored permit and the loop exits.
+                tokio::select! {
+                    _ = tokio::time::sleep(PROGRESS_HEARTBEAT) => {}
+                    _ = beat_cancel.notified() => break,
+                }
+                let frame = OwnerFrame::Progress {
+                    progress: state.progress(class, total),
+                };
+                let mut wr = writer.lock().await;
+                if write_frame(&mut wr, &frame).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Self { cancel, handle }
+    }
+
+    /// Stop beating and WAIT for the beat task to be gone. Awaiting (rather than
+    /// aborting) is what guarantees no progress frame can be interleaved after
+    /// the terminal frame.
+    async fn stop(self) {
+        self.cancel.notify_one();
+        let _ = self.handle.await;
+    }
+}
+
 /// Serve frames on one connection until EOF (the client may ping-until-ready
 /// then probe on one connection). Each frame counts as activity, resetting the
 /// idle TTL.
+///
+/// # A client disconnect never cancels the work (decided contract)
+///
+/// Cancellation is out of the model. Once a frame has been read, its work runs
+/// to completion — the dispatch below is AWAITED before the connection is
+/// touched again, and the heartbeat writes are the only thing a vanished client
+/// can affect (they simply stop). A client that disconnects mid-mutation
+/// therefore gets no reply, while the mutation still lands under the applier's
+/// per-file atomicity; the caller resolves the resulting uncertainty by reading
+/// the vault (ADR 0011), never by the owner having half-applied a plan. Adding
+/// abort-on-disconnect would convert a post-send-uncertain outcome into a
+/// partially-applied vault, which is strictly worse.
 async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow::Result<()> {
-    let (rd, mut wr) = stream.into_split();
+    let (rd, wr) = stream.into_split();
+    // Shared with the heartbeat task: both write frames onto this one half, and
+    // the mutex is what serializes them into well-formed lines.
+    let writer = Arc::new(tokio::sync::Mutex::new(wr));
     let mut reader = BufReader::new(rd);
     let mut line = String::new();
 
@@ -553,7 +721,20 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
         // idle TTL (a ~30s reap-latency bug, NRN-391). Deriving the flag FROM
         // dispatch closes that window: one read decides both.
         let (response, warmup_reject) = match serde_json::from_str::<ClientFrame>(trimmed) {
-            Ok(frame) => dispatch(&state, frame).await,
+            Ok(frame) => {
+                // Progress frames flow for the whole time this request's work is
+                // in flight, and stop — awaited — before the terminal frame is
+                // written below.
+                let heartbeat = Heartbeat::start(
+                    Arc::clone(&writer),
+                    Arc::clone(&state),
+                    request_class(&frame),
+                    progress_total(&frame),
+                );
+                let outcome = dispatch(&state, frame).await;
+                heartbeat.stop().await;
+                outcome
+            }
             Err(err) => (
                 OwnerFrame::Error {
                     message: format!("malformed control frame: {err}"),
@@ -569,10 +750,9 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
         }
         state.in_flight.fetch_sub(1, Ordering::SeqCst);
 
-        let mut buf = serde_json::to_vec(&response)?;
-        buf.push(b'\n');
-        wr.write_all(&buf).await?;
-        wr.flush().await?;
+        // The one terminal frame. The heartbeat is already stopped and joined,
+        // so nothing can follow this on the wire for this request.
+        write_frame(&mut *writer.lock().await, &response).await?;
 
         if warmup_reject {
             // The client has now received the warm-up error (the write+flush
@@ -605,6 +785,20 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
 /// snapshot-then-dispatch split would NOT be caught by CI — it would resurface
 /// as the rare 30s-TTL lingering-owner flake this fix closed.
 async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> (OwnerFrame, bool) {
+    // A request needing the warm context WAITS for warm-up to settle rather than
+    // being answered "vault not ready" (NRN-512). The heartbeat is already
+    // running, so the wait is visible to the client as `warming` progress frames
+    // on the one frame stream — which is what collapses the client's separate
+    // pre-Ready tolerance path into the ordinary request loop. `ping` is exempt:
+    // it is the O(1) liveness probe and must answer instantly at any state,
+    // reporting `cold`/`opening` truthfully.
+    //
+    // Warm-up always settles — into Ready, a recorded warm-up user error, or a
+    // fatal exit-to-heal — so this is bounded by the build, never open-ended;
+    // shutdown releases it too, so a reap mid-warm-up cannot wedge the drain.
+    if needs_warm_context(&frame) {
+        await_warm_up_settled(state).await;
+    }
     // A warm-up that failed on a USER error answers EVERY frame with that error
     // as a Rejected — the user-error path (an invalid config, NRN-360, or a
     // missing/non-directory vault root, NRN-414). The owner is healthy (not
@@ -1216,8 +1410,37 @@ fn read_markdown_source(cache: &norn_core::cache::Cache, report: &mut norn_wire:
     }
 }
 
-/// The warm slot when serving is Ready, else `None` (the client pings-until-ready
-/// before a read; an early read is reported, not a fault — see [`not_ready`]).
+/// Whether this frame needs the warm context, and so waits for warm-up to
+/// settle instead of being answered early. Everything except `ping`, which is
+/// the O(1) liveness probe and must answer at any serving state.
+fn needs_warm_context(frame: &ClientFrame) -> bool {
+    !matches!(frame, ClientFrame::Ping { .. })
+}
+
+/// How often the warm-up wait re-checks. Small relative to a build so the wait
+/// adds no perceptible latency once warm-up lands.
+const WARM_UP_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Park until warm-up has SETTLED into one of its terminal states: `Ready`, a
+/// recorded warm-up user error, or a fatal exit-to-heal. Shutdown also releases
+/// the wait, so a reap landing mid-warm-up cannot pin a request open past the
+/// drain budget. The caller then answers from whichever state it settled into —
+/// including [`not_ready`] for the fatal/shutdown cases, which are the only ways
+/// out that leave no warm slot.
+async fn await_warm_up_settled(state: &Arc<OwnerState>) {
+    while state.serving() != ServingState::Ready
+        && state.warmup_error().is_none()
+        && !state.fatal.load(Ordering::SeqCst)
+        && !state.is_shutdown()
+    {
+        tokio::time::sleep(WARM_UP_POLL_INTERVAL).await;
+    }
+}
+
+/// The warm slot when serving is Ready, else `None`. Reached only after
+/// [`await_warm_up_settled`], so `None` here means warm-up settled WITHOUT a
+/// slot — a fatal exit-to-heal or a shutdown mid-warm-up — not merely "early"
+/// (see [`not_ready`]).
 fn ready_slot(state: &Arc<OwnerState>) -> Option<Arc<VaultCacheSlot>> {
     if state.serving() != ServingState::Ready {
         return None;
@@ -1414,6 +1637,74 @@ mod tests {
             !state.is_shutdown(),
             "recording a config error must not itself latch shutdown"
         );
+    }
+
+    /// NRN-512: the phase is derived from OWNER STATE first. Any request in
+    /// flight on a not-yet-`Ready` owner is queued behind warm-up, so it reports
+    /// `warming` whatever its own class — that is what makes warm-up progress
+    /// and request progress one emitter instead of two mechanisms. Only once the
+    /// owner is serving does the request's class pick `applying` vs `reading`.
+    #[test]
+    fn the_progress_phase_is_warming_until_the_owner_serves() {
+        let state = Arc::new(OwnerState::new(None, None));
+
+        // Default state is Cold: even a mutation reports `warming`, because the
+        // work actually in flight is the build it is waiting on.
+        for class in [RequestClass::Read, RequestClass::Mutation] {
+            assert_eq!(
+                state.progress(class, Some(9)).phase,
+                ProgressPhase::Warming,
+                "a {class:?} request on a cold owner is queued behind warm-up"
+            );
+        }
+        // The warming milestone counts documents parsed by THIS owner's build,
+        // so a fresh state reports zero rather than the process odometer.
+        assert_eq!(state.progress(RequestClass::Read, None).done, Some(0));
+
+        state.set_serving(ServingState::Ready);
+        let reading = state.progress(RequestClass::Read, None);
+        assert_eq!(reading.phase, ProgressPhase::Reading);
+        assert_eq!(
+            (reading.done, reading.total),
+            (None, None),
+            "a read has no free unit to count — the phase alone is the proof of life"
+        );
+
+        let applying = state.progress(RequestClass::Mutation, Some(9));
+        assert_eq!(applying.phase, ProgressPhase::Applying);
+        assert_eq!(
+            applying.total,
+            Some(9),
+            "an apply's plan states its operation count up front"
+        );
+    }
+
+    /// The `applying` total is free only where the request already declares it:
+    /// an `apply` carries its plan's operation count, every other verb declares
+    /// no total and reports none rather than paying to compute one.
+    #[test]
+    fn only_apply_declares_a_total_up_front() {
+        let plan = norn_wire::MigrationPlan {
+            schema_version: norn_wire::MIGRATION_PLAN_SCHEMA_VERSION,
+            ..Default::default()
+        };
+        assert_eq!(
+            progress_total(&ClientFrame::Apply {
+                params: norn_wire::ApplyParams {
+                    plan,
+                    ..Default::default()
+                },
+            }),
+            Some(0),
+            "an empty plan still declares its (zero) op count"
+        );
+        assert_eq!(
+            progress_total(&ClientFrame::Set {
+                params: Default::default(),
+            }),
+            None
+        );
+        assert_eq!(progress_total(&ClientFrame::Probe), None);
     }
 
     /// NRN-400 (review): the retention sweep (`prune_events` +
