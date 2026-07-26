@@ -79,11 +79,7 @@ mod tests {
     use super::*;
 
     fn text(phase: ProgressPhase, done: Option<u64>, total: Option<u64>) -> String {
-        progress_text(&Progress {
-            phase,
-            done,
-            total,
-        })
+        progress_text(&Progress { phase, done, total })
     }
 
     #[test]

@@ -859,7 +859,7 @@ mod tests {
             let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
             let mut writer = stream;
             let mut line = String::new();
-            let mut write = |frame: &OwnerFrame, w: &mut UnixStream| -> bool {
+            let write = |frame: &OwnerFrame, w: &mut UnixStream| -> bool {
                 let mut buf = serde_json::to_vec(frame).unwrap();
                 buf.push(b'\n');
                 w.write_all(&buf).is_ok() && w.flush().is_ok()

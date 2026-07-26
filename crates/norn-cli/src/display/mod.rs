@@ -33,7 +33,6 @@ mod sink;
 pub use conversation::Conversation;
 pub use diagnostic::Diagnostic;
 pub use emit::{emit, emit_mutation};
-pub use progress::stderr_progress_sink;
 pub use format::{Format, FormatChoice, FormatSpec};
 pub use output::{
     ApplyMutationView, AuditView, CountView, DeleteMutationView, DescribeView, EditMutationView,
@@ -41,6 +40,7 @@ pub use output::{
     SetMutationView, ValidateView, VaultListView,
 };
 pub use presenter::{Presenter, HINT, PROGRAM};
+pub use progress::stderr_progress_sink;
 pub use sink::Sink;
 
 /// One `norn: <msg>` diagnostic headline, written verbatim to `w`. The one
