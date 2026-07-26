@@ -275,6 +275,8 @@ impl WriterQueue {
     /// plane). Owner-facing: the summoned owner reports `{ busy, sequence }` in
     /// a scoped pong so a client can tell a healthy busy writer (sequence
     /// advancing) from a hung one (sequence stalled past the stall budget).
+    /// Callerless since the owner's pong dropped `writer_progress` (NRN-512);
+    /// retained as the control-plane seam the status port (NRN-519) reads.
     pub fn progress_snapshot(&self) -> WriterProgress {
         self.inner.progress.snapshot()
     }

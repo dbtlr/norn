@@ -10,13 +10,18 @@
 //!   connect and observe `cold`/`opening`); the one-shot full build runs on a
 //!   blocking thread, moving the serving state `cold → opening → ready`.
 //! - **Control plane** (ADR 0013). A `ping` returns the vault's serving state
-//!   plus `writer_progress { busy, sequence }` without touching the vault
-//!   filesystem. There is no Direct fallback (0013's 2026-07-17 amendment): no
-//!   pong means the client summons; a stalled busy writer is an owner-health
-//!   event.
+//!   without touching the vault filesystem. There is no Direct fallback (0013's
+//!   2026-07-17 amendment): no pong means the client summons; an owner that
+//!   emits no frame for a whole silence budget is an owner-health event.
 //! - **Routed read.** A `probe` runs the trivial document-count read through the
 //!   slot's warm `serve_read` on a blocking thread — the stand-in exercised
 //!   before the read verbs land next task.
+//! - **Framed progress.** Every request answers with zero-or-more
+//!   [`OwnerFrame::Progress`] frames and then exactly one terminal frame. One
+//!   emitter ([`Heartbeat`]) paces them at [`PROGRESS_HEARTBEAT`] for the whole
+//!   time a request's work is in flight, whatever the phase — warming, reading,
+//!   applying — so the client's inter-frame silence budget is never tripped by
+//!   healthy long work.
 //! - **Idle-TTL self-reap.** After `idle_ttl` with no request in flight, the
 //!   owner shuts down: unbinds the socket and deletes the db. Bounds orphan
 //!   lifetime to ~one TTL; the flock makes any orphan detectable.
@@ -35,8 +40,12 @@ use norn_core::grammar::FieldRejection;
 use norn_core::mutate::MutationExecution;
 use norn_core::standards::VaultConfig;
 use norn_core::telemetry::{Clock, EventSink, IdGen};
-use norn_wire::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
+use norn_wire::{
+    ClientFrame, OwnerFrame, Progress, ProgressPhase, ServingState, CONTROL_PROTOCOL,
+    PROGRESS_HEARTBEAT,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
 
 use crate::lifecycle;
@@ -152,6 +161,28 @@ impl OwnerState {
         }
     }
 
+    /// The progress observation to report right now for an in-flight request of
+    /// `class`. The phase is derived from OWNER STATE, not from the request
+    /// alone: any request landing on a not-yet-`Ready` owner is queued behind
+    /// warm-up, so that is what it reports — which is how warm-up progress and
+    /// request progress become one emitter rather than two mechanisms.
+    ///
+    /// Milestones are attached only where the owner already has the number in
+    /// hand: `applying` carries the plan's operation count when the request is
+    /// an `apply`. `warming` and `reading` have no unit the build or the query
+    /// counts for its own reasons, so they report the phase alone — and a frame
+    /// with no units is still proof of life, which is the load-bearing part.
+    /// (Milestones a build could publish as it goes are NRN-527's question.)
+    fn progress(&self, class: RequestClass, total: Option<u64>) -> Progress {
+        if self.serving() != ServingState::Ready {
+            return Progress::new(ProgressPhase::Warming);
+        }
+        match class {
+            RequestClass::Mutation => Progress::new(ProgressPhase::Applying).with_total(total),
+            RequestClass::Read => Progress::new(ProgressPhase::Reading),
+        }
+    }
+
     /// The durable telemetry events dir, `Some` only for a registered vault.
     fn events_dir(&self) -> Option<Utf8PathBuf> {
         self.events_dir.clone()
@@ -214,19 +245,6 @@ impl OwnerState {
     /// error and then idle-reaps cleanly (exit 0).
     fn set_warmup_error(&self, message: String) {
         *self.warmup_error.lock().unwrap_or_else(|p| p.into_inner()) = Some(message);
-    }
-
-    fn writer_progress(&self) -> WriterProgress {
-        match self.slot() {
-            Some(slot) => {
-                let p = slot.writer_progress();
-                WriterProgress {
-                    busy: p.busy,
-                    sequence: p.sequence,
-                }
-            }
-            None => WriterProgress::default(),
-        }
     }
 
     /// Trip exit-to-heal: mark fatal and latch shutdown. Any cache error routes
@@ -518,11 +536,239 @@ async fn serve(config: OwnerConfig, db_path: Utf8PathBuf) -> anyhow::Result<i32>
     }
 }
 
+/// Which progress phase a request's work belongs to once the owner is serving.
+/// Derived from the frame's class; the not-yet-`Ready` case overrides it (see
+/// [`OwnerState::progress`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestClass {
+    Read,
+    Mutation,
+}
+
+/// The class of work a client frame asks for. Mirrors the mutation-vs-read split
+/// `dispatch` routes on (`dispatch_mutation` vs `dispatch_read`), so a phase tag
+/// can never claim `applying` for a frame that takes no writer lock.
+fn request_class(frame: &ClientFrame) -> RequestClass {
+    match frame {
+        ClientFrame::Set { .. }
+        | ClientFrame::New { .. }
+        | ClientFrame::Edit { .. }
+        | ClientFrame::Move { .. }
+        | ClientFrame::Delete { .. }
+        | ClientFrame::RewriteWikilink { .. }
+        | ClientFrame::Apply { .. } => RequestClass::Mutation,
+        ClientFrame::Ping { .. }
+        | ClientFrame::Probe
+        | ClientFrame::Find { .. }
+        | ClientFrame::Count { .. }
+        | ClientFrame::Get { .. }
+        | ClientFrame::Describe { .. }
+        | ClientFrame::Validate { .. }
+        | ClientFrame::Repair { .. }
+        | ClientFrame::Audit { .. } => RequestClass::Read,
+    }
+}
+
+/// The total-units milestone a frame declares up front, where one is free to
+/// read off the request. Only `apply` has one: its plan states its operation
+/// count before any work begins. Every other verb's unit count is knowable only
+/// as the work proceeds, and counting it would cost more than the progress is
+/// worth, so they report the phase alone.
+fn progress_total(frame: &ClientFrame) -> Option<u64> {
+    match frame {
+        ClientFrame::Apply { params } => Some(params.plan.operations.len() as u64),
+        _ => None,
+    }
+}
+
+/// Write one frame as a line. The single encode+write+flush both the heartbeat
+/// and the terminal reply go through, so the two can never frame differently.
+async fn write_frame(wr: &mut OwnedWriteHalf, frame: &OwnerFrame) -> anyhow::Result<()> {
+    let mut buf = serde_json::to_vec(frame)?;
+    buf.push(b'\n');
+    wr.write_all(&buf).await?;
+    wr.flush().await?;
+    Ok(())
+}
+
+/// Write the request's ONE terminal frame — unless the connection's wire is
+/// already broken (NRN-512 delta). A heartbeat write that hit its bound is
+/// CANCELLED mid-`write_all` (see [`Heartbeat::start_paced`]'s elapsed arm):
+/// how many bytes of that frame already reached the kernel buffer is unknown,
+/// so appending the terminal frame here would concatenate onto a possibly
+/// partial line, producing one line the client's decoder cannot parse — the
+/// regression this guards against.
+///
+/// Once `wire_broken` is latched there is nothing safe left to write: SHUT
+/// DOWN the write half instead. What the client then reads depends on what
+/// was already on the wire — a clean EOF (`OwnerGone`), or a truncated final
+/// line that fails to decode (`Protocol`); both poison the session, and both
+/// are for a mutation the same ADR 0011 post-send uncertainty it already
+/// resolves by reading the vault. The guarantee is narrower and real: a torn
+/// beat is never MERGED with a terminal report, so junk can never be
+/// mis-decoded as an answer.
+async fn write_terminal_frame(
+    writer: &Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+    wire_broken: &Arc<AtomicBool>,
+    frame: &OwnerFrame,
+) -> anyhow::Result<()> {
+    let mut wr = writer.lock().await;
+    if wire_broken.load(Ordering::SeqCst) {
+        let _ = wr.shutdown().await;
+        return Ok(());
+    }
+    write_frame(&mut wr, frame).await
+}
+
+/// The in-flight progress emitter (NRN-512): while a request's work runs, this
+/// writes an [`OwnerFrame::Progress`] at least every [`PROGRESS_HEARTBEAT`] so
+/// the client's inter-frame silence budget keeps resetting.
+///
+/// ONE emitter covers every phase — warming, reading, applying — because the
+/// phase is read from owner state at each beat rather than fixed at start. It
+/// shares the connection's write half under a mutex with the terminal reply, and
+/// [`stop`](Heartbeat::stop) AWAITS the beat task's exit before the terminal
+/// frame is written, so the protocol's "progress frames THEN exactly one
+/// terminal frame" ordering holds without the client needing to tolerate a
+/// trailing beat.
+///
+/// A failed heartbeat write (the client vanished) ends the heartbeat and nothing
+/// else: it never signals the request's work, which runs to completion
+/// regardless — see [`handle_connection`]'s disconnect contract.
+struct Heartbeat {
+    cancel: Arc<tokio::sync::Notify>,
+    /// `None` once [`stop`](Heartbeat::stop) has taken the join handle to await
+    /// it. An `Option` so `stop` can consume the handle while [`Drop`] still has
+    /// one to abort on the path `stop` never reaches.
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Heartbeat {
+    fn start(
+        writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+        wire_broken: Arc<AtomicBool>,
+        state: Arc<OwnerState>,
+        class: RequestClass,
+        total: Option<u64>,
+    ) -> Self {
+        Self::start_paced(writer, wire_broken, state, class, total, PROGRESS_HEARTBEAT)
+    }
+
+    /// [`start`](Heartbeat::start) with an explicit beat interval. Production
+    /// always beats at [`PROGRESS_HEARTBEAT`]; the parameter exists so the
+    /// liveness properties below (a write that cannot land ends the loop; a drop
+    /// aborts it) are testable in milliseconds rather than seconds. The write
+    /// bound is derived from the interval, so the relation holds at any pace.
+    fn start_paced(
+        writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
+        wire_broken: Arc<AtomicBool>,
+        state: Arc<OwnerState>,
+        class: RequestClass,
+        total: Option<u64>,
+        interval: Duration,
+    ) -> Self {
+        let cancel = Arc::new(tokio::sync::Notify::new());
+        let beat_cancel = Arc::clone(&cancel);
+        let handle = tokio::spawn(async move {
+            loop {
+                // `notify_one` STORES a permit, so a cancel landing while this
+                // task is mid-write is not lost: the next `notified()` returns
+                // from the stored permit and the loop exits.
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = beat_cancel.notified() => break,
+                }
+                let frame = OwnerFrame::Progress {
+                    progress: state.progress(class, total),
+                };
+                let mut wr = writer.lock().await;
+                // The write is BOUNDED. An undeliverable heartbeat is worthless
+                // in itself, and an unbounded one is actively harmful: `stop`
+                // awaits this task, and it is awaited BEFORE the request
+                // releases `in_flight`, so a beat parked forever inside
+                // `write_all` — a peer that stopped reading and let the socket
+                // buffer fill — would leave the owner unreapable, holding its
+                // flock and its db for as long as that peer lives. Three
+                // intervals is generous for one short line onto a socket
+                // somebody is reading; past that the client is not consuming, so
+                // there is nothing to report to.
+                match tokio::time::timeout(interval * 3, write_frame(&mut wr, &frame)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => break,
+                    Err(_) => {
+                        // The elapsed arm: `write_frame`'s future was DROPPED
+                        // mid-`write_all`, not returned to us as an error, so
+                        // some prefix of this frame's bytes may already be on
+                        // the wire with no way to know how much. Latch the
+                        // connection as broken so the dispatch path never
+                        // appends the terminal frame onto that unknown prefix
+                        // (NRN-512 regression) — see [`write_terminal_frame`].
+                        wire_broken.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            cancel,
+            handle: Some(handle),
+        }
+    }
+
+    /// Stop beating and WAIT for the beat task to be gone. Awaiting (rather than
+    /// aborting) is what guarantees no progress frame can be interleaved after
+    /// the terminal frame.
+    async fn stop(mut self) {
+        self.cancel.notify_one();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for Heartbeat {
+    /// The belt to [`stop`](Heartbeat::stop)'s braces: a heartbeat that goes out
+    /// of scope WITHOUT being stopped — an unwind between start and stop — would
+    /// otherwise leave a detached task beating on this connection for as long as
+    /// the process lives, which is exactly the silence budget the frames exist to
+    /// satisfy turned into a lie about work nobody is doing.
+    ///
+    /// The ordinary path is untouched: `stop` takes the handle before this runs,
+    /// so there is nothing left to abort and the "beat task is gone before the
+    /// terminal frame" ordering is still established by the await, never here.
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
 /// Serve frames on one connection until EOF (the client may ping-until-ready
 /// then probe on one connection). Each frame counts as activity, resetting the
 /// idle TTL.
+///
+/// # A client disconnect never cancels the work (decided contract)
+///
+/// Cancellation is out of the model. Once a frame has been read, its work runs
+/// to completion — the dispatch below is AWAITED before the connection is
+/// touched again, and the heartbeat writes are the only thing a vanished client
+/// can affect (they simply stop). A client that disconnects mid-mutation
+/// therefore gets no reply, while the mutation still lands under the applier's
+/// per-file atomicity; the caller resolves the resulting uncertainty by reading
+/// the vault (ADR 0011), never by the owner having half-applied a plan. Adding
+/// abort-on-disconnect would convert a post-send-uncertain outcome into a
+/// partially-applied vault, which is strictly worse.
 async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow::Result<()> {
-    let (rd, mut wr) = stream.into_split();
+    let (rd, wr) = stream.into_split();
+    // Shared with the heartbeat task: both write frames onto this one half, and
+    // the mutex is what serializes them into well-formed lines.
+    let writer = Arc::new(tokio::sync::Mutex::new(wr));
+    // Latched by a beat whose write hit its bound mid-frame (NRN-512 delta):
+    // once true, the wire may already carry a partial frame, so nothing more
+    // may be written onto it — see [`write_terminal_frame`]. Connection-scoped
+    // (not per-request), because a beat spans the SAME writer this loop reuses
+    // across requests.
+    let wire_broken = Arc::new(AtomicBool::new(false));
     let mut reader = BufReader::new(rd);
     let mut line = String::new();
 
@@ -553,7 +799,33 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
         // idle TTL (a ~30s reap-latency bug, NRN-391). Deriving the flag FROM
         // dispatch closes that window: one read decides both.
         let (response, warmup_reject) = match serde_json::from_str::<ClientFrame>(trimmed) {
-            Ok(frame) => dispatch(&state, frame).await,
+            Ok(frame) => {
+                // Progress frames flow for the whole time this request's work is
+                // in flight, and stop — awaited — before the terminal frame is
+                // written below.
+                //
+                // `ping` gets NO heartbeat: it is answered from owner state
+                // without touching the vault, so it returns orders of magnitude
+                // inside the client's silence budget and a beat task per
+                // readiness ping is pure waste. It also makes the pong path
+                // structurally progress-free rather than accidentally so — the
+                // readiness wait reports warming from the pong's own serving
+                // state, not from frames the ping raced.
+                let heartbeat = (!is_liveness_ping(&frame)).then(|| {
+                    Heartbeat::start(
+                        Arc::clone(&writer),
+                        Arc::clone(&wire_broken),
+                        Arc::clone(&state),
+                        request_class(&frame),
+                        progress_total(&frame),
+                    )
+                });
+                let outcome = dispatch(&state, frame).await;
+                if let Some(heartbeat) = heartbeat {
+                    heartbeat.stop().await;
+                }
+                outcome
+            }
             Err(err) => (
                 OwnerFrame::Error {
                     message: format!("malformed control frame: {err}"),
@@ -569,10 +841,20 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
         }
         state.in_flight.fetch_sub(1, Ordering::SeqCst);
 
-        let mut buf = serde_json::to_vec(&response)?;
-        buf.push(b'\n');
-        wr.write_all(&buf).await?;
-        wr.flush().await?;
+        // The one terminal frame — unless a beat already broke the wire (see
+        // `write_terminal_frame`), in which case the write half is shut down
+        // instead and the connection ends here rather than serving a partial
+        // request's answer on a wire that already carries unknown bytes.
+        write_terminal_frame(&writer, &wire_broken, &response).await?;
+        if wire_broken.load(Ordering::SeqCst) {
+            // A torn wire still honors the warm-up eager reap below: without
+            // it, a stale-error owner whose client also stopped reading would
+            // linger the full idle TTL answering the same dead error.
+            if warmup_reject {
+                state.request_shutdown();
+            }
+            break;
+        }
 
         if warmup_reject {
             // The client has now received the warm-up error (the write+flush
@@ -605,6 +887,20 @@ async fn handle_connection(stream: UnixStream, state: Arc<OwnerState>) -> anyhow
 /// snapshot-then-dispatch split would NOT be caught by CI — it would resurface
 /// as the rare 30s-TTL lingering-owner flake this fix closed.
 async fn dispatch(state: &Arc<OwnerState>, frame: ClientFrame) -> (OwnerFrame, bool) {
+    // A request needing the warm context WAITS for warm-up to settle rather than
+    // being answered "vault not ready" (NRN-512). The heartbeat is already
+    // running, so the wait is visible to the client as `warming` progress frames
+    // on the one frame stream — which is what collapses the client's separate
+    // pre-Ready tolerance path into the ordinary request loop. `ping` is exempt:
+    // it is the O(1) liveness probe and must answer instantly at any state,
+    // reporting `cold`/`opening` truthfully.
+    //
+    // Warm-up always settles — into Ready, a recorded warm-up user error, or a
+    // fatal exit-to-heal — so this is bounded by the build, never open-ended;
+    // shutdown releases it too, so a reap mid-warm-up cannot wedge the drain.
+    if needs_warm_context(&frame) {
+        await_warm_up_settled(state).await;
+    }
     // A warm-up that failed on a USER error answers EVERY frame with that error
     // as a Rejected — the user-error path (an invalid config, NRN-360, or a
     // missing/non-directory vault root, NRN-414). The owner is healthy (not
@@ -647,7 +943,6 @@ async fn dispatch_frame(state: &Arc<OwnerState>, frame: ClientFrame) -> OwnerFra
                 build: state.build.clone(),
                 pid: std::process::id(),
                 serving: state.serving(),
-                writer_progress: state.writer_progress(),
             }
         }
         ClientFrame::Probe => {
@@ -1216,8 +1511,46 @@ fn read_markdown_source(cache: &norn_core::cache::Cache, report: &mut norn_wire:
     }
 }
 
-/// The warm slot when serving is Ready, else `None` (the client pings-until-ready
-/// before a read; an early read is reported, not a fault — see [`not_ready`]).
+/// Whether this frame is the O(1) liveness probe: answered from owner state
+/// alone, at any serving state, without touching the vault. Two properties key
+/// off it — a ping never waits for warm-up ([`needs_warm_context`]) and never
+/// starts a progress heartbeat ([`handle_connection`]) — because both follow
+/// from the same fact about what a ping costs.
+fn is_liveness_ping(frame: &ClientFrame) -> bool {
+    matches!(frame, ClientFrame::Ping { .. })
+}
+
+/// Whether this frame needs the warm context, and so waits for warm-up to
+/// settle instead of being answered early. Everything except the liveness ping,
+/// which must answer at any serving state.
+fn needs_warm_context(frame: &ClientFrame) -> bool {
+    !is_liveness_ping(frame)
+}
+
+/// How often the warm-up wait re-checks. Small relative to a build so the wait
+/// adds no perceptible latency once warm-up lands.
+const WARM_UP_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Park until warm-up has SETTLED into one of its terminal states: `Ready`, a
+/// recorded warm-up user error, or a fatal exit-to-heal. Shutdown also releases
+/// the wait, so a reap landing mid-warm-up cannot pin a request open past the
+/// drain budget. The caller then answers from whichever state it settled into —
+/// including [`not_ready`] for the fatal/shutdown cases, which are the only ways
+/// out that leave no warm slot.
+async fn await_warm_up_settled(state: &Arc<OwnerState>) {
+    while state.serving() != ServingState::Ready
+        && state.warmup_error().is_none()
+        && !state.fatal.load(Ordering::SeqCst)
+        && !state.is_shutdown()
+    {
+        tokio::time::sleep(WARM_UP_POLL_INTERVAL).await;
+    }
+}
+
+/// The warm slot when serving is Ready, else `None`. Reached only after
+/// [`await_warm_up_settled`], so `None` here means warm-up settled WITHOUT a
+/// slot — a fatal exit-to-heal or a shutdown mid-warm-up — not merely "early"
+/// (see [`not_ready`]).
 fn ready_slot(state: &Arc<OwnerState>) -> Option<Arc<VaultCacheSlot>> {
     if state.serving() != ServingState::Ready {
         return None;
@@ -1225,7 +1558,11 @@ fn ready_slot(state: &Arc<OwnerState>) -> Option<Arc<VaultCacheSlot>> {
     state.slot()
 }
 
-/// The "vault not ready" report a read gets before warm-up finishes.
+/// The answer for a request that reached the slot gate with no warm slot to
+/// serve it. NOT "you asked too early": every frame that needs the warm context
+/// waits for [`await_warm_up_settled`] first, so this is only reachable when
+/// warm-up settled WITHOUT producing a slot — a fatal exit-to-heal, or a
+/// shutdown that landed mid-warm-up.
 fn not_ready() -> OwnerFrame {
     OwnerFrame::Error {
         message: "vault not ready".to_string(),
@@ -1414,6 +1751,240 @@ mod tests {
             !state.is_shutdown(),
             "recording a config error must not itself latch shutdown"
         );
+    }
+
+    /// NRN-512: the phase is derived from OWNER STATE first. Any request in
+    /// flight on a not-yet-`Ready` owner is queued behind warm-up, so it reports
+    /// `warming` whatever its own class — that is what makes warm-up progress
+    /// and request progress one emitter instead of two mechanisms. Only once the
+    /// owner is serving does the request's class pick `applying` vs `reading`.
+    #[test]
+    fn the_progress_phase_is_warming_until_the_owner_serves() {
+        let state = Arc::new(OwnerState::new(None, None));
+
+        // Default state is Cold: even a mutation reports `warming`, because the
+        // work actually in flight is the build it is waiting on.
+        for class in [RequestClass::Read, RequestClass::Mutation] {
+            assert_eq!(
+                state.progress(class, Some(9)).phase,
+                ProgressPhase::Warming,
+                "a {class:?} request on a cold owner is queued behind warm-up"
+            );
+        }
+        // `warming` carries NO units: the build publishes no count the owner
+        // already holds, and a fabricated one would be a manifest lie. The frame
+        // itself is the fact being reported.
+        let warming = state.progress(RequestClass::Read, None);
+        assert_eq!((warming.done, warming.total), (None, None));
+
+        state.set_serving(ServingState::Ready);
+        let reading = state.progress(RequestClass::Read, None);
+        assert_eq!(reading.phase, ProgressPhase::Reading);
+        assert_eq!(
+            (reading.done, reading.total),
+            (None, None),
+            "a read has no free unit to count — the phase alone is the proof of life"
+        );
+
+        let applying = state.progress(RequestClass::Mutation, Some(9));
+        assert_eq!(applying.phase, ProgressPhase::Applying);
+        assert_eq!(
+            applying.total,
+            Some(9),
+            "an apply's plan states its operation count up front"
+        );
+    }
+
+    /// The `applying` total is free only where the request already declares it:
+    /// an `apply` carries its plan's operation count, every other verb declares
+    /// no total and reports none rather than paying to compute one.
+    #[test]
+    fn only_apply_declares_a_total_up_front() {
+        let plan = norn_wire::MigrationPlan {
+            schema_version: norn_wire::MIGRATION_PLAN_SCHEMA_VERSION,
+            ..Default::default()
+        };
+        assert_eq!(
+            progress_total(&ClientFrame::Apply {
+                params: norn_wire::ApplyParams {
+                    plan,
+                    ..Default::default()
+                },
+            }),
+            Some(0),
+            "an empty plan still declares its (zero) op count"
+        );
+        assert_eq!(
+            progress_total(&ClientFrame::Set {
+                params: Default::default(),
+            }),
+            None
+        );
+        assert_eq!(progress_total(&ClientFrame::Probe), None);
+    }
+
+    /// A peer that is GONE must end the beat loop: the write fails outright and
+    /// there is nothing left to report to.
+    #[test]
+    fn a_beat_that_cannot_be_delivered_ends_its_own_loop() {
+        block_on(async {
+            let (peer, owner_side) = UnixStream::pair().unwrap();
+            drop(peer); // the client vanished before the first beat
+            let (_rd, wr) = owner_side.into_split();
+            let interval = Duration::from_millis(20);
+            let beat = Heartbeat::start_paced(
+                Arc::new(tokio::sync::Mutex::new(wr)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(OwnerState::new(None, None)),
+                RequestClass::Read,
+                None,
+                interval,
+            );
+
+            // One beat, one bounded write attempt, then out. Well inside the
+            // interval + write bound; a loop that ignored the failure would
+            // still be beating here.
+            tokio::time::sleep(interval * 6).await;
+            assert!(
+                beat.handle
+                    .as_ref()
+                    .expect("stop has not run yet")
+                    .is_finished(),
+                "an undeliverable beat must end the loop, not retry forever"
+            );
+            beat.stop().await;
+        });
+    }
+
+    /// A peer that is PRESENT but has stopped reading is the dangerous shape:
+    /// the socket buffer fills and the write neither fails nor completes. The
+    /// bound is what saves the owner — `stop` awaits this task, and it is awaited
+    /// before the request releases `in_flight`, so a beat parked forever inside
+    /// `write_all` leaves the owner unreapable, holding its flock and its db for
+    /// as long as that peer lives.
+    ///
+    /// NRN-512 delta (the regression): the write future that hit the bound was
+    /// CANCELLED mid-frame, so an unknown prefix of that frame's bytes may
+    /// already be stuck in the peer's stalled receive buffer. Appending the
+    /// terminal frame after that — the pre-fix behavior — would produce one
+    /// concatenated line the client's decoder cannot parse. The fix latches
+    /// `wire_broken` on this exact arm and routes the terminal write through
+    /// [`write_terminal_frame`], which must shut the write half down instead:
+    /// this test drains the stalled peer's whole receive buffer and asserts
+    /// what comes after is EOF, never more bytes.
+    #[test]
+    fn a_beat_whose_write_cannot_complete_ends_within_its_bound() {
+        block_on(async {
+            // The peer is kept ALIVE and never read from, so writes block rather
+            // than fail.
+            let (peer, owner_side) = UnixStream::pair().unwrap();
+            let (_rd, wr) = owner_side.into_split();
+            let writer = Arc::new(tokio::sync::Mutex::new(wr));
+            // Fill the socket buffer first: after this, any further write pends
+            // indefinitely instead of returning.
+            {
+                let mut wr = writer.lock().await;
+                let junk = vec![b'x'; 4 << 20];
+                let _ = tokio::time::timeout(Duration::from_millis(300), wr.write_all(&junk)).await;
+            }
+
+            let wire_broken = Arc::new(AtomicBool::new(false));
+            let interval = Duration::from_millis(20);
+            let beat = Heartbeat::start_paced(
+                Arc::clone(&writer),
+                Arc::clone(&wire_broken),
+                Arc::new(OwnerState::new(None, None)),
+                RequestClass::Read,
+                None,
+                interval,
+            );
+
+            // One interval to the first beat, three more for its write bound.
+            tokio::time::sleep(interval * 10).await;
+            assert!(
+                beat.handle
+                    .as_ref()
+                    .expect("stop has not run yet")
+                    .is_finished(),
+                "a beat that cannot complete its write must give up, not park forever"
+            );
+            beat.stop().await;
+            assert!(
+                wire_broken.load(Ordering::SeqCst),
+                "a beat that gave up on its bound must latch the connection as broken"
+            );
+
+            // The dispatch path's terminal write, guarded by the now-latched
+            // flag: it must NOT write the (sentinel) terminal frame, and must
+            // shut the write half down instead.
+            let sentinel = OwnerFrame::Error {
+                message: "sentinel-terminal-frame-must-not-appear".to_string(),
+            };
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                write_terminal_frame(&writer, &wire_broken, &sentinel),
+            )
+            .await
+            .expect("a broken-wire terminal write must return, never pend against the full buffer")
+            .expect("a broken-wire terminal write is a clean no-op, not an error");
+
+            // Drain everything the stalled peer ever received — the junk that
+            // made it through before the buffer filled — and confirm two
+            // things: the sentinel text is nowhere in it (no terminal frame was
+            // appended), and the stream ends in EOF (the write half really was
+            // shut down), never in more bytes to read.
+            let mut peer = peer;
+            let mut drained = Vec::new();
+            let mut buf = [0u8; 65536];
+            loop {
+                use tokio::io::AsyncReadExt;
+                match tokio::time::timeout(Duration::from_millis(500), peer.read(&mut buf)).await {
+                    Ok(Ok(0)) => break, // EOF: the write half was shut down
+                    Ok(Ok(n)) => drained.extend_from_slice(&buf[..n]),
+                    Ok(Err(e)) => panic!("unexpected read error while draining: {e}"),
+                    Err(_) => panic!(
+                        "no EOF within the drain budget — the write half was never shut down"
+                    ),
+                }
+            }
+            let drained_text = String::from_utf8_lossy(&drained);
+            assert!(
+                !drained_text.contains("sentinel-terminal-frame-must-not-appear"),
+                "the terminal frame must never be written onto a broken wire, got: {drained_text}"
+            );
+        });
+    }
+
+    /// Dropping a heartbeat WITHOUT stopping it — the unwind path — must leave
+    /// nothing beating. Without the abort, a detached task keeps writing progress
+    /// onto a live connection for the life of the process, which is the client's
+    /// silence budget being satisfied by a lie.
+    #[test]
+    fn dropping_a_heartbeat_leaves_nothing_beating() {
+        block_on(async {
+            let (peer, owner_side) = UnixStream::pair().unwrap();
+            let (_rd, wr) = owner_side.into_split();
+            let interval = Duration::from_millis(20);
+            {
+                let _beat = Heartbeat::start_paced(
+                    Arc::new(tokio::sync::Mutex::new(wr)),
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(OwnerState::new(None, None)),
+                    RequestClass::Read,
+                    None,
+                    interval,
+                );
+                // Dropped here, before its first beat could ever be written.
+            }
+
+            let mut reader = BufReader::new(peer);
+            let mut line = String::new();
+            let read = tokio::time::timeout(interval * 6, reader.read_line(&mut line)).await;
+            assert!(
+                read.is_err() || line.is_empty(),
+                "an aborted beat must write nothing, got {line:?}"
+            );
+        });
     }
 
     /// NRN-400 (review): the retention sweep (`prune_events` +

@@ -29,9 +29,14 @@ pub enum ClientError {
     /// never bound, or died on startup — e.g. lost the flock race AND the winner
     /// also vanished). ADR 0017: no owner means summon; there is no Direct path.
     OwnerUnavailable { socket: PathBuf },
-    /// The owner is reachable but unhealthy: no pong within the stall budget, or
-    /// a busy writer whose progress sequence stalled past it (ADR 0013's
-    /// 2026-07-17 amendment — surfaced as an owner-health event, never a reroute).
+    /// The owner is reachable but unhealthy: it emitted NO frame — not a
+    /// progress heartbeat, not a terminal reply — for a whole stall budget while
+    /// a request was in flight (ADR 0013's 2026-07-17 amendment — surfaced as an
+    /// owner-health event, never a reroute).
+    ///
+    /// The owner is never told the client gave up, so its answer may still
+    /// arrive: the session that saw this is poisoned and reconnects before its
+    /// next request rather than reading a late frame as that request's answer.
     OwnerHealth(String),
     /// The owner went away at the connection level — the socket exchange failed
     /// with a connection-level error (EOF / BrokenPipe / ConnectionReset /

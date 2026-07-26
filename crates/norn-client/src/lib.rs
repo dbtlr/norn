@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 pub use addr::{build_fingerprint, config_identity, runtime_dir_from_env, socket_path};
 pub use error::ClientError;
-pub use session::{OwnerSession, Pong, STALL_BUDGET};
+pub use session::{OwnerSession, Pong, ProgressSink, STALL_BUDGET};
 pub use summon::OWNER_MODE_ARG;
 
 // Re-export the resolver vocabulary so a caller wires the CLI's `--vault` / `-C`

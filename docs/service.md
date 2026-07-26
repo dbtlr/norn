@@ -43,7 +43,7 @@ The daemon listens at the same well-known path the CLI's routing probe targets: 
 
 Every accepted connection starts with one newline-delimited JSON control frame before anything else happens:
 
-- **`ping`** → the daemon answers one `pong` (protocol version, daemon version, pid, uptime) and closes. The ordinary host-global routing ping is an O(1) liveness probe that touches no vault and takes no map lock. A status ping carrying `vault_root` additionally performs one bounded context-map lookup and coherent progress snapshot; it does not open the vault or touch its filesystem.
+- **`ping`** → the daemon answers one `pong` (protocol version, daemon version, pid, uptime) and closes. The ordinary host-global routing ping is an O(1) liveness probe that touches no vault and takes no map lock. A status ping carrying `vault_root` additionally performs one bounded context-map lookup and reports that vault's `serving` state; it does not open the vault or touch its filesystem.
 - **`hello`** → names the vault this connection is for (`vault_root`, a path). The daemon derives the vault's identity itself (never trusting a client-supplied hash), resolves or opens its warm context, and answers `ready`. From that point the rest of the connection is a normal MCP session — the daemon hands the (possibly already-pipelined) remaining bytes straight to the MCP server for that vault.
 - Anything else, or a protocol-version mismatch, gets a one-line `error` frame and the connection closes.
 
@@ -64,7 +64,7 @@ norn service start       # load an installed-but-stopped daemon
 norn service stop        # unload the daemon (an honest stop — see below)
 norn service restart     # kill and rerun the loaded daemon
 norn service status      # host launchd state + a live control-ping
-norn service status --vault PATH  # also report one vault's serving/writer state
+norn service status --vault PATH  # also report one vault's serving state
 ```
 
 Every verb accepts `--format records|json` (default `records`); `json` always emits a machine-readable object, even on failure. `norn service` is macOS-only today — on any other host every verb refuses with:
@@ -108,7 +108,7 @@ The three lifecycle verbs act **only on an installed unit** and follow one rule:
 
 `status` reports what it knows rather than failing: a `launchctl` probe failure renders as `launchd state unavailable` (carrying the probe's error text) instead of aborting, and if the live control socket still answers, the running version/build/uptime are shown regardless — a daemon that answers the socket never reads as dead just because `launchctl` hiccuped. `status`'s exit code is a health-gate signal distinct from the acting verbs: it is `0` for every *known* state (running, stopped, not installed) and `1` only when the launchd state itself is unknown, so `norn service status || alert` fires on genuinely unknown supervision state, not on a healthy stopped daemon.
 
-Plain `norn service status` stays host-level. Add `--vault PATH` when diagnosing one vault: the client canonicalizes the path and asks the daemon for that vault's `serving` state (`cold`, `opening`, or `ready`) plus `writer_progress` (`busy` and an opaque monotonic `sequence`). A cold status observation does not open the vault. The sequence is not a timestamp or work count; compare it with a later observation only. It belongs to that vault for the daemon lifetime, so evicting and later reopening a warm context does not reset it. A busy writer whose sequence advances is making progress, while stall timing/classification is owned by the client wait policy rather than this status command.
+Plain `norn service status` stays host-level. Add `--vault PATH` when diagnosing one vault: the client canonicalizes the path and asks the daemon for that vault's `serving` state (`cold`, `opening`, or `ready`). A cold status observation does not open the vault. Liveness and stall classification for actual work are owned by the client's wait policy against the request's own framed progress (see [Reads](#reads)), not by anything this status snapshot samples.
 
 A real run against a daemon that predates a local rebuild:
 
@@ -150,7 +150,6 @@ serve: loaded, running (pid 73414)
   uptime 3m12s
   vault  /Users/example/vaults/atlas
   serving ready
-  writer  idle · sequence 17
   socket ~/.cache/norn/run/norn.sock
   plist  ~/Library/LaunchAgents/com.dbtlr.norn.serve.plist
   log    ~/.cache/norn/log/serve.log
@@ -162,16 +161,12 @@ In JSON, those values are grouped under an additive `vault` object:
 {
   "vault": {
     "root": "/Users/example/vaults/atlas",
-    "serving": "ready",
-    "writer_progress": {
-      "busy": false,
-      "sequence": 17
-    }
+    "serving": "ready"
   }
 }
 ```
 
-If the daemon does not answer with scoped state (for example, it is stopped or is an older build), `serving` and `writer_progress` are `null` and the text report renders them as unavailable. The canonical root is still shown so the diagnostic scope is explicit.
+If the daemon does not answer with scoped state (for example, it is stopped or is an older build), `serving` is `null` and the text report renders it as unavailable. The canonical root is still shown so the diagnostic scope is explicit.
 
 The second line is the running-vs-on-disk reconciliation, and it renders differently depending on what's out of sync:
 
@@ -204,13 +199,13 @@ A few shapes are deliberately excluded from routing, by design, regardless of wh
 
 ### Reads
 
-A routed call has **no overall call timeout**. While its request socket is waiting for a response, the client heartbeats the vault-scoped control plane and interprets `writer_progress` on its own monotonic clock:
+A routed call has **no overall call timeout**. Each request is a stream on its own connection: while the daemon is working, it reports in-flight progress at least once a second, and then sends exactly one final answer. The client measures **silence between messages**, not total call time:
 
-- A responsive idle writer is healthy. Its sequence does not need to change.
-- A busy writer whose sequence advances is making progress, so the client waits indefinitely. A long chunked operation may outlive five seconds in total as long as it keeps publishing progress.
-- No compatible scoped pong for five seconds, or a busy writer whose sequence is unchanged for five seconds, classifies the service as stalled. This is the one service-level stall budget; sequence changes reset it. An indivisible writer step that publishes no transition inside the budget is therefore classified as stalled even if it is merely slow.
+- Any message resets the budget — an in-flight progress report counts exactly as much as the final answer. A long operation that keeps reporting is waited on however long the work takes.
+- Five seconds with no message of any kind classifies the service as stalled. This is the one service-level stall budget.
+- The verdict is keyed on a message *arriving*, never on what it says. A slow indivisible step is no longer classified as stalled for failing to publish a transition — it only has to keep reporting that it is alive.
 
-Non-writer tool-body progress is deliberately outside this signal. If scoped pongs stay healthy and the writer stays idle, the client continues waiting even though the tool body itself has no separate progress stamp.
+The cost of that is stated plainly: there is deliberately no "is it advancing?" check, so a daemon that keeps reporting but never finishes is waited on indefinitely. Interrupting the client is the escape. Progress reporting covers the whole time a request's work is in flight, whatever it is doing — including a request that arrives while the vault is still warming, which waits behind the warm-up and is then answered rather than failing.
 
 A read (`count`/`find`/`get`/`repair --plan`) still falls back to Direct on any daemon-side failure because it is safe to retry. Ordinary transport failures stay silent unless `--verbose`; a heartbeat-classified stall is always actionable and prints:
 
