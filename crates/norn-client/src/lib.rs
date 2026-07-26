@@ -58,21 +58,27 @@ pub const EPHEMERAL_TTL_ENV: &str = "NORN_EPHEMERAL_TTL_SECS";
 pub const DEFAULT_EPHEMERAL_TTL: Duration = Duration::from_secs(120);
 
 /// The ephemeral idle TTL, honoring [`EPHEMERAL_TTL_ENV`] when it parses to a
-/// non-negative integer, else [`DEFAULT_EPHEMERAL_TTL`].
+/// positive integer, else [`DEFAULT_EPHEMERAL_TTL`].
 ///
 /// Env-var semantics (POSIX-by-default, ADR 0020): an *empty* or *unset*
 /// variable means "unset" → the default. An *invalid* value (non-numeric,
-/// negative, or overflowing `u64`) is a **fail-safe to the default**, never a
-/// hard error: this is a resource/performance tuning knob (it bounds only an
-/// idle owner's lifetime, never touches vault correctness), and aborting a
-/// command because an advanced knob is mistyped would be worse than falling
-/// back to the sound default. The fallback is deliberately silent — the knob is
-/// off the daily path and the default is always safe.
+/// negative, zero, or overflowing `u64`) is a **fail-safe to the default**,
+/// never a hard error: this is a resource/performance tuning knob (it bounds
+/// only an idle owner's lifetime, never touches vault correctness), and
+/// aborting a command because an advanced knob is mistyped would be worse
+/// than falling back to the sound default. The fallback is deliberately
+/// silent — the knob is off the daily path and the default is always safe.
+/// `0` is rejected rather than honored as "reap immediately": an owner
+/// summoned with a zero idle TTL reaps at its very first idle tick
+/// (currently 250ms) mid-warm-up, and the client's resummon-on-gone retry
+/// spawns a fresh owner that reaps the same way — a livelock, not a fast
+/// reap, so `0` falls back to the default exactly like any other malformed
+/// value.
 pub fn ephemeral_idle_ttl() -> Duration {
     match std::env::var(EPHEMERAL_TTL_ENV) {
         Ok(raw) => match raw.trim().parse::<u64>() {
-            Ok(secs) => Duration::from_secs(secs),
-            Err(_) => DEFAULT_EPHEMERAL_TTL,
+            Ok(secs) if secs > 0 => Duration::from_secs(secs),
+            _ => DEFAULT_EPHEMERAL_TTL,
         },
         Err(_) => DEFAULT_EPHEMERAL_TTL,
     }
@@ -277,6 +283,25 @@ mod tests {
         // flake it.
         if std::env::var(EPHEMERAL_TTL_ENV).is_err() {
             assert_eq!(ephemeral_idle_ttl(), Duration::from_secs(120));
+        }
+    }
+
+    #[test]
+    fn ephemeral_ttl_zero_falls_back_to_default() {
+        // Only meaningful when the env is unset before this test sets it;
+        // guard so a caller's env can't flake it, matching the sibling
+        // default-without-env test above.
+        if std::env::var(EPHEMERAL_TTL_ENV).is_err() {
+            std::env::set_var(EPHEMERAL_TTL_ENV, "0");
+            let ttl = ephemeral_idle_ttl();
+            std::env::remove_var(EPHEMERAL_TTL_ENV);
+            assert_eq!(
+                ttl,
+                Duration::from_secs(120),
+                "a 0-second override must fail-safe to the default, not arm a livelock \
+                 (an owner with ttl=0 reaps at its first idle tick mid-warm-up, and the \
+                 client's resummon-on-gone retry would spawn another that does the same)"
+            );
         }
     }
 

@@ -11,27 +11,11 @@
 
 mod common;
 
-use std::path::PathBuf;
 use std::time::Duration;
 
-use norn_client::{config_identity, open, socket_path, ClientError, SummonConfig};
+use common::base_config;
+use norn_client::{config_identity, open, socket_path, ClientError};
 use norn_wire::ServingState;
-
-fn base_config(vault_root: PathBuf, runtime_dir: PathBuf, ttl: Duration) -> SummonConfig {
-    SummonConfig {
-        vault_root,
-        runtime_dir,
-        // A fixed test fingerprint keeps the socket name stable regardless of
-        // the test-binary path; isolation across concurrent tests comes from the
-        // per-test TempDir runtime dir, not the fingerprint.
-        fingerprint: "testfingerprnt0".to_string(),
-        idle_ttl: ttl,
-        owner_exe: common::norn_bin(),
-        connect_budget: Duration::from_secs(15),
-        config_override: None,
-        events_dir: None,
-    }
-}
 
 #[test]
 fn summon_builds_serves_then_idle_reaps_deleting_db_and_socket() {
