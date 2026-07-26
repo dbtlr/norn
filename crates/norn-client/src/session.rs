@@ -1217,8 +1217,7 @@ mod tests {
         assert!(
             observed
                 .iter()
-                .all(|p| p.phase == ProgressPhase::Warming
-                    && (p.done, p.total) == (None, None)),
+                .all(|p| p.phase == ProgressPhase::Warming && (p.done, p.total) == (None, None)),
             "a warming observation is the phase alone: {observed:?}"
         );
         assert_eq!(
