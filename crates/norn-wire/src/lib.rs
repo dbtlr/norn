@@ -40,7 +40,10 @@ mod read;
 mod report;
 
 pub use audit::{AuditEvent, AuditParams, AuditReport};
-pub use control::{ClientFrame, OwnerFrame, ServingState, WriterProgress, CONTROL_PROTOCOL};
+pub use control::{
+    ClientFrame, OwnerFrame, Progress, ProgressPhase, ServingState, WriterProgress,
+    CONTROL_PROTOCOL, PROGRESS_HEARTBEAT,
+};
 pub use filter::FilterParams;
 pub use finding::{Finding, Note, Severity};
 pub use mutate::{

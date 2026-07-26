@@ -11,9 +11,22 @@
 //! ADR 0013's control-plane contract carries forward inside the owner: a `Pong`
 //! reports the vault's [`ServingState`] (`cold | opening | ready`) plus its
 //! [`WriterProgress`] `{ busy, sequence }`. Per the 2026-07-17 amendment there
-//! is no Direct fallback — a client that gets no pong summons an owner; a busy
-//! writer whose sequence has stalled past the owner's stall budget is an
-//! owner-health event, never a reroute.
+//! is no Direct fallback — a client that gets no pong summons an owner; an owner
+//! that goes silent past the client's stall budget is an owner-health event,
+//! never a reroute.
+//!
+//! # The framed request protocol
+//!
+//! **One request is a stream of zero-or-more [`OwnerFrame::Progress`] frames
+//! followed by exactly one terminal frame** ([`OwnerFrame::is_terminal`] names
+//! the split). The owner emits a progress frame at least every
+//! [`PROGRESS_HEARTBEAT`] while a request's work is in flight; the client treats
+//! any frame as proof of life and only INTER-FRAME silence past its stall budget
+//! as a hung owner. That is what lets a mutation run longer than the budget
+//! without its own client abandoning it into ADR 0011's no-safe-retry
+//! uncertainty, while a genuinely wedged owner still gets the stall verdict.
+
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +68,74 @@ pub enum ServingState {
 pub struct WriterProgress {
     pub busy: bool,
     pub sequence: u64,
+}
+
+/// How often the owner emits an [`OwnerFrame::Progress`] frame while a request's
+/// work is in flight — the heartbeat FLOOR, not a schedule: milestone-driven
+/// frames may arrive sooner.
+///
+/// It is named here, beside the frame it paces, because both sides depend on the
+/// same relation: the client's stall budget must be a comfortable multiple of
+/// this, so ordinary scheduling jitter on a busy owner can never be mistaken for
+/// silence. `norn-wire` holds no logic — this is a shared constant of the
+/// protocol, exactly like [`CONTROL_PROTOCOL`].
+pub const PROGRESS_HEARTBEAT: Duration = Duration::from_secs(1);
+
+/// What kind of work an owner is reporting progress for.
+///
+/// A typed tag, not prose: a client decides what to render (or whether to render
+/// at all) from the variant, never by matching on a message (invariant 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProgressPhase {
+    /// The one-shot warm-up build is in flight; the request is queued behind it.
+    /// This is the phase a request lands in on a `cold`/`opening` owner.
+    Warming,
+    /// A read is running against the warm cache.
+    Reading,
+    /// A mutation is running under the owner's single-writer lock.
+    Applying,
+}
+
+/// One in-flight progress observation: the [`ProgressPhase`] plus optional
+/// milestone units.
+///
+/// `done` / `total` are OPTIONAL because a milestone is reported only where the
+/// owner can count one without doing extra work — progress must never cost more
+/// than the work it describes. Absent units still carry the phase, which is the
+/// load-bearing part: a frame arrived, so the owner is alive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Progress {
+    pub phase: ProgressPhase,
+    /// Units completed so far, when the owner counts them cheaply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done: Option<u64>,
+    /// Units expected in total, when known up front.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+}
+
+impl Progress {
+    /// A unit-less observation: the phase alone.
+    pub fn new(phase: ProgressPhase) -> Self {
+        Self {
+            phase,
+            done: None,
+            total: None,
+        }
+    }
+
+    /// Attach the completed-units milestone.
+    pub fn with_done(mut self, done: u64) -> Self {
+        self.done = Some(done);
+        self
+    }
+
+    /// Attach the expected-total milestone.
+    pub fn with_total(mut self, total: Option<u64>) -> Self {
+        self.total = total;
+        self
+    }
 }
 
 /// Client -> owner. One JSON object per line.
@@ -120,9 +201,18 @@ pub enum ClientFrame {
 }
 
 /// Owner -> client. One JSON object per line.
+///
+/// One request yields zero-or-more [`Progress`](OwnerFrame::Progress) frames and
+/// then exactly one TERMINAL frame — every other variant here. See
+/// [`is_terminal`](OwnerFrame::is_terminal) and the module docs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum OwnerFrame {
+    /// A non-terminal in-flight observation: the request is still running and
+    /// the owner is alive. Zero or more of these precede the terminal frame; a
+    /// client that renders nothing still consumes them, because consuming one is
+    /// what resets its silence budget.
+    Progress { progress: Progress },
     /// Proof of life plus the vault's serving/progress state (answer to `Ping`).
     Pong {
         protocol: u32,
@@ -201,6 +291,16 @@ pub enum OwnerFrame {
     Error { message: String },
 }
 
+impl OwnerFrame {
+    /// Whether this frame ENDS its request. Exactly one terminal frame closes
+    /// every request; [`Progress`](OwnerFrame::Progress) is the only
+    /// non-terminal variant, so a new frame kind is terminal by default and a
+    /// client's frame loop cannot forget to return it.
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self, OwnerFrame::Progress { .. })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +349,77 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ServingState::Opening).unwrap(),
             r#""opening""#
+        );
+    }
+
+    /// NRN-512: a unit-less progress frame is the phase alone — absent
+    /// milestones stay off the wire and round-trip back as absent.
+    #[test]
+    fn progress_omits_absent_milestones_and_round_trips() {
+        let frame = OwnerFrame::Progress {
+            progress: Progress::new(ProgressPhase::Warming),
+        };
+        let line = serde_json::to_string(&frame).unwrap();
+        assert_eq!(line, r#"{"op":"progress","progress":{"phase":"warming"}}"#);
+        assert_eq!(serde_json::from_str::<OwnerFrame>(&line).unwrap(), frame);
+
+        let with_units = OwnerFrame::Progress {
+            progress: Progress::new(ProgressPhase::Applying)
+                .with_done(3)
+                .with_total(Some(12)),
+        };
+        let line = serde_json::to_string(&with_units).unwrap();
+        assert_eq!(
+            line,
+            r#"{"op":"progress","progress":{"phase":"applying","done":3,"total":12}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<OwnerFrame>(&line).unwrap(),
+            with_units
+        );
+    }
+
+    /// The protocol's load-bearing split (NRN-512): `Progress` is the ONLY
+    /// non-terminal frame, so a client loop that returns on `is_terminal`
+    /// returns on every answer shape — including a `Rejected` or an `Error`.
+    #[test]
+    fn progress_is_the_only_non_terminal_frame() {
+        assert!(!OwnerFrame::Progress {
+            progress: Progress::new(ProgressPhase::Reading),
+        }
+        .is_terminal());
+
+        for terminal in [
+            OwnerFrame::Probe { document_count: 0 },
+            OwnerFrame::Rejected {
+                message: "nope".into(),
+                hints: Vec::new(),
+            },
+            OwnerFrame::Error {
+                message: "boom".into(),
+            },
+        ] {
+            assert!(terminal.is_terminal(), "{terminal:?} must end its request");
+        }
+    }
+
+    #[test]
+    fn progress_phase_is_lowercase_on_the_wire() {
+        assert_eq!(
+            serde_json::to_string(&ProgressPhase::Applying).unwrap(),
+            r#""applying""#
+        );
+    }
+
+    /// The heartbeat floor must stay a comfortable multiple below the client's
+    /// stall budget, or ordinary jitter reads as silence. The budget itself
+    /// lives in `norn-client`; this pins the wire half of the relation so a
+    /// future edit to the heartbeat cannot quietly close the gap.
+    #[test]
+    fn the_heartbeat_floor_leaves_room_under_a_multi_second_budget() {
+        assert!(
+            PROGRESS_HEARTBEAT <= std::time::Duration::from_secs(2),
+            "a heartbeat this slow leaves no jitter margin under a 5s budget"
         );
     }
 }
