@@ -178,8 +178,13 @@ pub(crate) fn overlay_changed_paths(
         }
         baseline.files.push(file);
         if let Some(document) = document {
-            // Emitted document paths come from `affected`, so every freshly
-            // parsed document is already in scope.
+            // The emitted document's path is its NORMALIZED form, which can
+            // differ from the caller's spelling in `affected` (e.g. `./probe.md`
+            // vs. the emitted `probe.md`). `resolve_links_within` scopes by
+            // `document.path`, so the rescope set must carry that normalized
+            // form too, or the freshly parsed document's own links never get
+            // re-resolved.
+            rescope.insert(document.path.clone());
             baseline.documents.push(document);
         }
     }
@@ -873,6 +878,70 @@ mod tests {
         assert_eq!(
             matching_files, 1,
             "one physical file must overlay exactly one VaultFile too"
+        );
+    }
+
+    #[test]
+    fn overlay_changed_paths_resolves_new_documents_own_links_under_a_non_normalized_spelling() {
+        // A create's changed-path spelling need not already be normalized (a
+        // mutation-path caller can pass `./probe.md`). The freshly parsed
+        // document's OWN path is emitted in normalized form (`probe.md`), which
+        // must still land in the rescope set — otherwise `resolve_links_within`
+        // (which scopes by `document.path`) never re-derives the new document's
+        // own outgoing links, and they publish `Unresolved` with no
+        // `unresolved_reason` instead of resolving.
+        let (_tmp, root) = vault();
+        write(&root, "hub.md", "# Hub\n\nLinks to [[probe]].\n");
+        write(&root, "other.md", "# Other\n");
+        let mut baseline = build_index(&root).unwrap();
+
+        write(
+            &root,
+            "probe.md",
+            "# Probe\n\nLinks to [[other]] and [[hub]].\n",
+        );
+        let changed = vec![Utf8PathBuf::from("./probe.md")];
+        overlay_changed_paths(&mut baseline, &root, &changed, &IndexOptions::default());
+
+        let probe = baseline
+            .documents
+            .iter()
+            .find(|document| document.path == "probe.md")
+            .unwrap_or_else(|| {
+                panic!(
+                    "probe.md missing from overlaid documents: {:?}",
+                    baseline
+                        .documents
+                        .iter()
+                        .map(|d| d.path.as_str())
+                        .collect::<Vec<_>>()
+                )
+            });
+
+        let other_link = probe
+            .links
+            .iter()
+            .find(|link| link.target == "other")
+            .expect("probe.md should have a link targeting other");
+        assert_eq!(
+            other_link.status,
+            LinkStatus::Resolved,
+            "probe.md's own [[other]] link must resolve; got {:?} (reason {:?})",
+            other_link.status,
+            other_link.unresolved_reason
+        );
+
+        let hub_link = probe
+            .links
+            .iter()
+            .find(|link| link.target == "hub")
+            .expect("probe.md should have a link targeting hub");
+        assert_eq!(
+            hub_link.status,
+            LinkStatus::Resolved,
+            "probe.md's own [[hub]] link must resolve; got {:?} (reason {:?})",
+            hub_link.status,
+            hub_link.unresolved_reason
         );
     }
 }
