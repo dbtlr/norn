@@ -91,6 +91,11 @@ pub enum ProgressPhase {
 /// owner can count one without doing extra work — progress must never cost more
 /// than the work it describes. Absent units still carry the phase, which is the
 /// load-bearing part: a frame arrived, so the owner is alive.
+///
+/// No owner path sets `done` today: every phase reports the phase alone, or —
+/// for an `apply` — the total the plan already declared up front, with no
+/// running count against it. `done` and the renderer branches that would draw
+/// it are the protocol slot NRN-528's per-op odometer fills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Progress {
     pub phase: ProgressPhase,
@@ -135,7 +140,7 @@ impl Progress {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ClientFrame {
     /// Liveness + serving-state probe. O(1) on the owner — it touches no vault
-    /// filesystem, just reports the serving state and a progress snapshot.
+    /// filesystem, just reports the serving state.
     Ping { protocol: u32 },
     /// The trivial routed read exercised end-to-end before the read verbs land
     /// (NRN-345): count the vault's documents through the owner's warm
