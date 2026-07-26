@@ -1,9 +1,21 @@
 //! Connecting to a summoned owner and speaking the norn-wire control plane.
 //!
-//! Synchronous: a CLI invocation is one short-lived process. The socket carries
-//! a per-request read timeout equal to the stall budget so a hung owner surfaces
-//! as an [`ClientError::OwnerHealth`] (ADR 0013's 2026-07-17 amendment — never a
-//! Direct fallback). There is NO in-process cache open anywhere here.
+//! Synchronous: a CLI invocation is one short-lived process. There is NO
+//! in-process cache open anywhere here.
+//!
+//! # One frame loop, one silence budget
+//!
+//! A request is one write followed by [`request`](OwnerSession::request)'s frame
+//! loop: every [`OwnerFrame::Progress`] is handed to the session's
+//! [`ProgressSink`] and the loop reads on; the single terminal frame ends the
+//! request. [`STALL_BUDGET`] is the INTER-FRAME silence budget — it is the
+//! socket's per-read deadline, so any frame restarts it. A long mutation that
+//! heartbeats therefore never trips it, while a wedged owner that emits nothing
+//! surfaces as [`ClientError::OwnerHealth`] at the budget (ADR 0013's
+//! 2026-07-17 amendment — never a Direct fallback).
+//!
+//! There is exactly ONE frame loop: waiting for a warming owner reads the same
+//! frames through the same loop as any other request.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -13,28 +25,57 @@ use std::time::{Duration, Instant};
 use norn_wire::{
     ApplyParams, ApplyReport, AuditParams, AuditReport, ClientFrame, CountParams, CountReport,
     DeleteParams, DescribeParams, DescribeReport, EditParams, EditReport, FindParams, FindReport,
-    GetParams, GetReport, MoveParams, NewParams, NewReport, OwnerFrame, RepairParams, RepairReport,
-    RewriteWikilinkParams, ServingState, SetParams, SetReport, ValidateParams, ValidateReport,
-    WriterProgress, CONTROL_PROTOCOL,
+    GetParams, GetReport, MoveParams, NewParams, NewReport, OwnerFrame, Progress, RepairParams,
+    RepairReport, RewriteWikilinkParams, ServingState, SetParams, SetReport, ValidateParams,
+    ValidateReport, WriterProgress, CONTROL_PROTOCOL,
 };
 
 use crate::error::ClientError;
 use crate::SummonConfig;
 
-/// The service stall budget (ADR 0013): the read deadline for a control-plane
-/// exchange. Not a call timeout — a healthy busy writer answers pings instantly
-/// while its long work runs; only silence past this budget is "hung".
+/// The service stall budget (ADR 0013): the maximum SILENCE the client tolerates
+/// between two frames of one request. Not a call timeout — a healthy owner
+/// heartbeats (`norn_wire::PROGRESS_HEARTBEAT`) while its long work runs, and
+/// every frame restarts the budget, so only an owner emitting nothing at all is
+/// "hung".
 pub const STALL_BUDGET: Duration = Duration::from_secs(5);
+
+/// Where a session hands the in-flight [`Progress`] frames it reads.
+///
+/// The client never renders: it reports typed facts and a display layer decides
+/// what (if anything) a user sees (invariant 4). The default sink discards, so
+/// progress frames are consumed — and the silence budget reset — whether or not
+/// any surface draws them.
+pub trait ProgressSink: Send {
+    /// One in-flight observation arrived.
+    fn progress(&mut self, progress: &Progress);
+    /// The request ended. Called once per request that emitted at least one
+    /// observation, so a sink drawing a transient line knows when to erase it.
+    fn finished(&mut self) {}
+}
+
+/// The default sink: consume and drop. A surface that wants progress installs
+/// its own via [`OwnerSession::set_progress_sink`].
+struct DiscardProgress;
+
+impl ProgressSink for DiscardProgress {
+    fn progress(&mut self, _progress: &Progress) {}
+}
 
 /// A live, proven connection to a summoned owner.
 pub struct OwnerSession {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
     socket: PathBuf,
-    /// The sequence-stall budget applied to a BUSY writer (ADR 0013). A field
-    /// (not the [`STALL_BUDGET`] const) so tests can shrink it to drive the
-    /// busy-stall path fast; production keeps the default.
+    /// The inter-frame silence budget. A field (not the [`STALL_BUDGET`] const)
+    /// so tests can shrink it to drive the stall path fast; production keeps the
+    /// default. Kept in lockstep with the socket's read timeout — see
+    /// [`apply_stall_budget`](OwnerSession::apply_stall_budget).
     stall_budget: Duration,
+    /// Where in-flight [`Progress`] frames go. Never `None`: an uninstalled sink
+    /// is [`DiscardProgress`], so the frame loop has no "is anyone listening"
+    /// branch and consuming a frame is unconditional.
+    progress: Box<dyn ProgressSink>,
     /// The config this session was summoned with, retained so the session can
     /// self-heal (re-summon-or-connect) when the owner goes away before Ready is
     /// first observed — the linux-backlog race (see [`crate::open`]). `None` for
@@ -72,8 +113,17 @@ impl OwnerSession {
             writer,
             socket,
             stall_budget: STALL_BUDGET,
+            progress: Box::new(DiscardProgress),
             config,
         })
+    }
+
+    /// Install the sink the frame loop hands in-flight [`Progress`] frames to,
+    /// replacing the discarding default. The session still consumes every
+    /// progress frame either way — a sink only decides whether anything is done
+    /// with one.
+    pub fn set_progress_sink(&mut self, sink: Box<dyn ProgressSink>) {
+        self.progress = sink;
     }
 
     /// Re-establish the connection: re-run summon-or-connect (which re-validates
@@ -93,7 +143,22 @@ impl OwnerSession {
         self.reader = fresh.reader;
         self.writer = fresh.writer;
         self.socket = fresh.socket;
+        // The fresh stream carries the DEFAULT read timeout; re-apply this
+        // session's budget so a shrunk (test) budget survives a reconnect and
+        // the socket deadline never drifts from `stall_budget`.
+        self.apply_stall_budget()?;
         Ok(())
+    }
+
+    /// Push [`stall_budget`](Self::stall_budget) onto the socket as its per-read
+    /// deadline. The two are one value: the socket timeout is what MAKES the
+    /// budget inter-frame, because it restarts on every `read` — so they are set
+    /// together and never separately.
+    fn apply_stall_budget(&mut self) -> Result<(), ClientError> {
+        self.reader
+            .get_ref()
+            .set_read_timeout(Some(self.stall_budget))
+            .map_err(ClientError::Io)
     }
 
     /// Re-establish a live, ready connection after the held owner went away — the
@@ -109,11 +174,14 @@ impl OwnerSession {
         Ok(())
     }
 
-    /// Test-only: shrink the busy-writer sequence-stall budget so the busy-stall
-    /// path is drivable without a multi-second wait.
+    /// Test-only: shrink the inter-frame silence budget so the stall path is
+    /// drivable without a multi-second wait. Sets the socket deadline with it —
+    /// the budget IS the socket's per-read timeout.
     #[cfg(test)]
     pub(crate) fn set_stall_budget(&mut self, budget: Duration) {
         self.stall_budget = budget;
+        self.apply_stall_budget()
+            .expect("setting a read timeout on a live test socket cannot fail");
     }
 
     /// The socket this session is bound to.
@@ -294,21 +362,19 @@ impl OwnerSession {
     }
 
     /// Ping until the owner reports [`ServingState::Ready`], honoring ADR 0013's
-    /// liveness contract and 0017's accepted warm-up cost:
+    /// liveness contract and 0017's accepted warm-up cost.
     ///
-    /// - **A prompt pong is proof of life.** A truly hung owner (no pong at all)
-    ///   is caught by the socket read timeout inside [`ping`](Self::ping), which
-    ///   surfaces as [`ClientError::OwnerHealth`]. So as long as pongs keep
-    ///   arriving, the owner is alive.
-    /// - **Warm-up is healthy, however long it takes.** A `cold`/`opening` owner
-    ///   that is NOT busy is running the one-shot full build — warm-up is ~linear
-    ///   in vault size (0017's accepted cost) and, crucially, happens BEFORE the
-    ///   writer queue exists, so `writer_progress` is default the whole time.
-    ///   Keying a stall on sequence advancement here would mis-declare every
-    ///   warm-up longer than the budget as hung. We do NOT: a non-busy warming
-    ///   owner is waited on indefinitely (bounded only by `max_wait`).
-    /// - **Only a busy writer whose sequence stalls is hung** (0013). The
-    ///   sequence-stall budget applies solely while `busy == true`.
+    /// **This is not a second liveness mechanism.** Each ping runs through the
+    /// one frame loop ([`request`](Self::request)), so the inter-frame silence
+    /// budget is the whole hung-owner verdict here as everywhere: a warming
+    /// owner keeps answering, and one that says nothing for a budget surfaces as
+    /// [`ClientError::OwnerHealth`] from inside [`ping`](Self::ping). Warm-up is
+    /// healthy however long it takes (~linear in vault size, 0017's accepted
+    /// cost) — this loop only bounds the wait by `max_wait`.
+    ///
+    /// [`WriterProgress`] rides the pong as a control-plane fact, but NO health
+    /// verdict is derived from it: an owner reports progress by emitting frames,
+    /// not by advancing a counter a poller inspects.
     ///
     /// Before Ready is first observed, an owner that goes away at the connection
     /// level ([`ClientError::OwnerGone`]) — the linux drain-window backlog race
@@ -318,8 +384,6 @@ impl OwnerSession {
     /// hard error (post-send uncertainty is a separate contract).
     pub fn wait_until_ready(&mut self, max_wait: Duration) -> Result<Pong, ClientError> {
         let start = Instant::now();
-        let mut last_seq: Option<u64> = None;
-        let mut busy_since: Option<Instant> = None;
         loop {
             let pong = match self.ping() {
                 Ok(pong) => pong,
@@ -331,35 +395,12 @@ impl OwnerSession {
                         return Err(e);
                     }
                     self.reconnect()?;
-                    last_seq = None;
-                    busy_since = None;
                     continue;
                 }
                 Err(e) => return Err(e),
             };
             if pong.serving == ServingState::Ready {
                 return Ok(pong);
-            }
-            if pong.writer_progress.busy {
-                // A busy writer must keep advancing its sequence; a stall past
-                // the budget is the one "hung" signal (ADR 0013).
-                let seq = pong.writer_progress.sequence;
-                if Some(seq) != last_seq {
-                    last_seq = Some(seq);
-                    busy_since = Some(Instant::now());
-                }
-                if busy_since.is_some_and(|t| t.elapsed() > self.stall_budget) {
-                    return Err(ClientError::OwnerHealth(
-                        "owner writer busy but its progress sequence stalled past the budget"
-                            .to_string(),
-                    ));
-                }
-            } else {
-                // Not ready, not busy: warm-up in flight (the writer queue does
-                // not exist yet). The prompt pong is liveness; reset the busy
-                // stall tracking and keep waiting.
-                last_seq = None;
-                busy_since = None;
             }
             if start.elapsed() > max_wait {
                 return Err(ClientError::OwnerHealth(
@@ -370,6 +411,20 @@ impl OwnerSession {
         }
     }
 
+    /// Send one frame and read the request's stream to its terminal frame.
+    ///
+    /// The ONE frame loop (NRN-512). Every [`OwnerFrame::Progress`] is handed to
+    /// the progress sink and the loop reads again; the terminal frame returns.
+    /// The socket's read deadline is [`stall_budget`](Self::stall_budget), and a
+    /// read deadline restarts per `read` call — which is precisely what makes
+    /// the budget INTER-FRAME rather than a whole-call timeout. A mutation that
+    /// runs for a minute but heartbeats every second is healthy; an owner that
+    /// says nothing for a whole budget is hung.
+    ///
+    /// Post-send failure shapes are unchanged (ADR 0011): EOF mid-stream is
+    /// [`ClientError::OwnerGone`] — the request WAS written, so a mutation may
+    /// have applied and no caller may blind-retry it — and a silence timeout is
+    /// [`ClientError::OwnerHealth`].
     fn request(&mut self, frame: &ClientFrame) -> Result<OwnerFrame, ClientError> {
         let mut line = serde_json::to_vec(frame)
             .map_err(|e| ClientError::Protocol(format!("failed to encode frame: {e}")))?;
@@ -382,19 +437,36 @@ impl OwnerSession {
         self.writer.write_all(&line).map_err(classify_io_pre_send)?;
         self.writer.flush().map_err(classify_io_pre_send)?;
 
+        let mut observed_progress = false;
         let mut resp = String::new();
-        match self.reader.read_line(&mut resp) {
-            // EOF before a reply == the owner exited mid-exchange (the drain-window
-            // shape) — a resummon signal, not a hang.
-            Ok(0) => Err(ClientError::OwnerGone(
-                "owner closed the connection before replying".to_string(),
-            )),
-            Ok(_) => serde_json::from_str(resp.trim())
-                .map_err(|e| ClientError::Protocol(format!("undecodable owner frame: {e}"))),
-            Err(e) if is_timeout(&e) => Err(ClientError::OwnerHealth(
-                "no reply from owner within the stall budget".to_string(),
-            )),
-            Err(e) => Err(classify_io(e)),
+        loop {
+            resp.clear();
+            let outcome = match self.reader.read_line(&mut resp) {
+                // EOF before the terminal frame == the owner exited mid-exchange
+                // (the drain-window shape) — a resummon signal, not a hang.
+                Ok(0) => Err(ClientError::OwnerGone(
+                    "owner closed the connection before replying".to_string(),
+                )),
+                Ok(_) => serde_json::from_str::<OwnerFrame>(resp.trim())
+                    .map_err(|e| ClientError::Protocol(format!("undecodable owner frame: {e}"))),
+                // Silence past the budget with no frame of any kind: hung.
+                Err(e) if is_timeout(&e) => Err(ClientError::OwnerHealth(
+                    "no frame from owner within the stall budget".to_string(),
+                )),
+                Err(e) => Err(classify_io(e)),
+            };
+            match outcome {
+                Ok(OwnerFrame::Progress { progress }) => {
+                    observed_progress = true;
+                    self.progress.progress(&progress);
+                }
+                other => {
+                    if observed_progress {
+                        self.progress.finished();
+                    }
+                    return other;
+                }
+            }
         }
     }
 }
@@ -717,45 +789,245 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// A BUSY writer whose sequence never advances IS hung past the budget.
+    /// A busy writer stays healthy as long as it keeps answering — the health
+    /// verdict is keyed on FRAMES, not on the pong's progress sequence (NRN-512
+    /// replaced the sequence-advancement heuristic with the inter-frame silence
+    /// budget). A frozen sequence with prompt pongs is not a stall.
     #[test]
-    fn busy_writer_with_stalled_sequence_is_owner_health() {
+    fn busy_writer_with_a_frozen_sequence_still_reaches_ready() {
         let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("stalled.sock");
-        let handle = fake_owner(socket.clone(), |_| pong(ServingState::Opening, true, 7));
-
-        let mut session = connected_session(&socket);
-        session.set_stall_budget(Duration::from_millis(50));
-        let err = session
-            .wait_until_ready(Duration::from_secs(5))
-            .expect_err("a busy writer with a stalled sequence must be owner-health");
-        assert!(matches!(err, ClientError::OwnerHealth(_)), "got {err:?}");
-
-        drop(session);
-        handle.join().unwrap();
-    }
-
-    /// A busy writer that keeps ADVANCING its sequence is healthy and reaches
-    /// ready even across many budget windows.
-    #[test]
-    fn busy_writer_advancing_sequence_reaches_ready() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("advancing.sock");
-        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let c = std::sync::Arc::clone(&counter);
-        let handle = fake_owner(socket.clone(), move |started| {
-            let seq = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let socket = dir.path().join("frozen-seq.sock");
+        // Busy, sequence pinned at 7 the whole time — well past the 50ms budget
+        // below — then ready. Under the old sequence-stall rule this was an
+        // owner-health error; under the frame protocol the prompt pongs ARE the
+        // proof of life.
+        let handle = fake_owner(socket.clone(), |started| {
             if started.elapsed() < Duration::from_millis(150) {
-                pong(ServingState::Opening, true, seq) // busy but advancing
+                pong(ServingState::Opening, true, 7)
             } else {
-                pong(ServingState::Ready, false, seq)
+                pong(ServingState::Ready, true, 7)
             }
         });
 
         let mut session = connected_session(&socket);
         session.set_stall_budget(Duration::from_millis(50));
-        let got = session.wait_until_ready(Duration::from_secs(5)).unwrap();
+        let got = session
+            .wait_until_ready(Duration::from_secs(5))
+            .expect("an owner that keeps answering is alive, frozen sequence or not");
         assert_eq!(got.serving, ServingState::Ready);
+
+        drop(session);
+        handle.join().unwrap();
+    }
+
+    /// A recording sink: keeps every observation the frame loop handed it plus
+    /// the finish count, so a test can assert both that progress was consumed
+    /// and that the request was closed out exactly once.
+    #[derive(Clone, Default)]
+    struct RecordingSink(std::sync::Arc<std::sync::Mutex<(Vec<Progress>, usize)>>);
+
+    impl RecordingSink {
+        fn observations(&self) -> Vec<Progress> {
+            self.0.lock().unwrap().0.clone()
+        }
+        fn finishes(&self) -> usize {
+            self.0.lock().unwrap().1
+        }
+    }
+
+    impl ProgressSink for RecordingSink {
+        fn progress(&mut self, progress: &Progress) {
+            self.0.lock().unwrap().0.push(*progress);
+        }
+        fn finished(&mut self) {
+            self.0.lock().unwrap().1 += 1;
+        }
+    }
+
+    /// A fake owner that answers one client frame with `heartbeats` progress
+    /// frames spaced `every` apart, then `terminal`. Models a long request that
+    /// keeps its client informed.
+    fn heartbeating_owner(
+        socket: std::path::PathBuf,
+        heartbeats: usize,
+        every: Duration,
+        terminal: OwnerFrame,
+    ) -> std::thread::JoinHandle<()> {
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut line = String::new();
+            let mut write = |frame: &OwnerFrame, w: &mut UnixStream| -> bool {
+                let mut buf = serde_json::to_vec(frame).unwrap();
+                buf.push(b'\n');
+                w.write_all(&buf).is_ok() && w.flush().is_ok()
+            };
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                for i in 0..heartbeats {
+                    std::thread::sleep(every);
+                    let frame = OwnerFrame::Progress {
+                        progress: Progress::new(norn_wire::ProgressPhase::Applying)
+                            .with_done(i as u64 + 1)
+                            .with_total(Some(heartbeats as u64)),
+                    };
+                    if !write(&frame, &mut writer) {
+                        return;
+                    }
+                }
+                if !write(&terminal, &mut writer) {
+                    return;
+                }
+            }
+        })
+    }
+
+    /// THE regression (NRN-512): a mutation whose total wall time far exceeds
+    /// the silence budget must SURVIVE when heartbeats flow. Before the framed
+    /// protocol, the flat per-request read deadline abandoned it post-send —
+    /// straight into ADR 0011's no-safe-retry uncertainty — even though the
+    /// owner was healthy and still working.
+    #[test]
+    fn a_mutation_outliving_the_silence_budget_survives_on_heartbeats() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("long-mutation.sock");
+        // 6 heartbeats × 30ms ≈ 180ms of work against a 50ms budget: more than
+        // three whole budgets, with no gap ever reaching one.
+        let handle = heartbeating_owner(
+            socket.clone(),
+            6,
+            Duration::from_millis(30),
+            OwnerFrame::Probe { document_count: 42 },
+        );
+
+        let mut session = connected_session(&socket);
+        session.set_stall_budget(Duration::from_millis(50));
+        let sink = RecordingSink::default();
+        session.set_progress_sink(Box::new(sink.clone()));
+
+        let count = session
+            .probe()
+            .expect("heartbeats must hold the request open past the silence budget");
+        assert_eq!(count, 42);
+
+        let observed = sink.observations();
+        assert_eq!(observed.len(), 6, "every progress frame reaches the sink");
+        assert_eq!(observed[0].done, Some(1));
+        assert_eq!(observed[5].total, Some(6));
+        assert_eq!(sink.finishes(), 1, "the request closes the sink out once");
+
+        drop(session);
+        handle.join().unwrap();
+    }
+
+    /// The other half of the contract: an owner that emits NOTHING — no
+    /// progress, no terminal — is genuinely wedged and still earns the stall
+    /// verdict at the budget. Heartbeats buy tolerance; silence does not.
+    #[test]
+    fn a_silent_owner_is_owner_health_at_the_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("wedged.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            // Consume the request and then say nothing at all, holding the
+            // connection open (never EOF) — the wedged-owner shape.
+            let _ = reader.read_line(&mut line);
+            std::thread::sleep(Duration::from_millis(400));
+        });
+
+        let mut session = connected_session(&socket);
+        session.set_stall_budget(Duration::from_millis(50));
+        let started = Instant::now();
+        let err = session
+            .probe()
+            .expect_err("an owner emitting no frames at all is hung");
+        assert!(matches!(err, ClientError::OwnerHealth(_)), "got {err:?}");
+        assert!(
+            started.elapsed() < Duration::from_millis(350),
+            "the verdict must land at the budget, not at the owner's own timeout"
+        );
+
+        drop(session);
+        handle.join().unwrap();
+    }
+
+    /// Warm-up progress rides the SAME frames as any other in-flight work
+    /// (NRN-512's one-emitter rule): a request landing on a warming owner is
+    /// answered with `warming` progress frames and then its terminal frame,
+    /// through the one frame loop — no pre-Ready special path.
+    #[test]
+    fn warm_up_progress_rides_the_same_frames() {
+        use norn_wire::ProgressPhase;
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("warming.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            for done in 1..=3u64 {
+                std::thread::sleep(Duration::from_millis(30));
+                let frame = OwnerFrame::Progress {
+                    progress: Progress::new(ProgressPhase::Warming).with_done(done * 100),
+                };
+                let mut buf = serde_json::to_vec(&frame).unwrap();
+                buf.push(b'\n');
+                writer.write_all(&buf).unwrap();
+                writer.flush().unwrap();
+            }
+            let mut buf = serde_json::to_vec(&OwnerFrame::Probe {
+                document_count: 300,
+            })
+            .unwrap();
+            buf.push(b'\n');
+            writer.write_all(&buf).unwrap();
+            writer.flush().unwrap();
+        });
+
+        let mut session = connected_session(&socket);
+        session.set_stall_budget(Duration::from_millis(50));
+        let sink = RecordingSink::default();
+        session.set_progress_sink(Box::new(sink.clone()));
+
+        assert_eq!(session.probe().expect("a warming owner is not hung"), 300);
+        let observed = sink.observations();
+        assert_eq!(observed.len(), 3);
+        assert!(
+            observed.iter().all(|p| p.phase == ProgressPhase::Warming),
+            "warm-up progress is tagged `warming`: {observed:?}"
+        );
+        assert_eq!(observed[2].done, Some(300), "milestones ride the frame");
+
+        drop(session);
+        handle.join().unwrap();
+    }
+
+    /// A request that emitted no progress must not call `finished` — a sink
+    /// drawing a transient line has nothing to erase, so an unconditional
+    /// finish would make every fast request flicker.
+    #[test]
+    fn a_progress_free_request_never_finishes_the_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("instant.sock");
+        let handle = fake_owner(socket.clone(), |_| OwnerFrame::Probe { document_count: 7 });
+
+        let mut session = connected_session(&socket);
+        let sink = RecordingSink::default();
+        session.set_progress_sink(Box::new(sink.clone()));
+        assert_eq!(session.probe().unwrap(), 7);
+        assert!(sink.observations().is_empty());
+        assert_eq!(sink.finishes(), 0);
 
         drop(session);
         handle.join().unwrap();
