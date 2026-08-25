@@ -39,7 +39,8 @@ When in doubt, pass `-C <path>`.
 Once the vault root is picked, orient before querying or writing anything. Do not guess the folder layout, rule names, or Standards pack.
 
 ```bash
-norn describe --format json    # the orient-first move
+norn describe --format json                          # local vault in the process cwd
+norn -C /path/to/vault describe --format json        # known vault path
 ```
 
 `describe` returns `folders` (every directory currently holding a document), `path_rules` (each rule's `match.path` glob plus inherited `frontmatter_defaults`), `creatable_rules` (rules usable with `norn new --as <rule>`), `inbox`, and `schema` (the full `validate` configuration). Add `--data` or `--stats` for totals, field distributions, and date bounds over the `find` filter surface. `--by field1,field2` selects exact distribution fields. `--limit N` caps value buckets per field (default 20; `0` has no cap). This command is read-only.

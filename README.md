@@ -88,14 +88,14 @@ For a deeper walkthrough including scoped rules and a first repair plan, see [do
 | Move a document | `norn move <src> <dst>` | [move](docs/commands/move.md) |
 | Delete a document | `norn delete <doc>` | [delete](docs/commands/delete.md) |
 
-Commands accept `--format json|jsonl` (stable contracts) plus format-specific human-readable options (`records`, `text`, `paths`). JSON and JSONL contracts are stable across point releases; human-readable formats may evolve.
+Commands list their supported formats in `--help`. Machine-readable JSON and JSONL contracts are stable across point releases; human-readable formats such as `records`, `text`, and `paths` may evolve.
 
 ## For agents and automation
 
 Norn is designed to be a first-class tool for coding agents:
 
 - **Stable contracts.** JSON for one-shot dispatch, JSONL for streaming queues, and a schema-versioned migration plan (`schema_version: 2`).
-- **Plan/apply boundary.** Mutation is always two steps: produce a plan artifact, then apply it. Apply rejects mismatched vault roots, stale document hashes, and unsupported schema versions.
+- **Review before write.** Direct mutation commands preview by default and require confirmation or `--yes` to write. Batch repair produces a MigrationPlan artifact for a separate `norn apply` step. Apply rejects mismatched vault roots, stale document hashes, and unsupported schema versions.
 - **Filterable triage.** `--code`, `--severity`, `--field`, `--rule`, `--path`, `--target`, `--reason` apply to both raw output and `--summary`, so an agent can size a queue before reading it.
 - **Vault targeting.** Use `-C <path>` (or `--cwd <path>`) to point `norn` at a specific vault root, or omit it to run against the current directory.
 

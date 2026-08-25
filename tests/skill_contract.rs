@@ -35,6 +35,10 @@ fn norn_skill_uses_the_standard_package_path() {
         !skill.contains("a finding has no path"),
         "the skill must not claim that JSONL validation findings omit their path"
     );
+    assert!(
+        skill.contains("norn -C /path/to/vault describe --format json"),
+        "the orient-first example must preserve a known vault path"
+    );
 }
 
 #[test]
