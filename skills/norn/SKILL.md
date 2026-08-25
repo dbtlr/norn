@@ -1,7 +1,7 @@
 ---
 name: norn
-description: Use when inspecting, querying, validating, or mutating Markdown vaults with the `norn` CLI. Provides deterministic graph, link, frontmatter, query, and validation/repair workflows.
-version: 1.4.1
+description: "Use when the user names `norn`, or when a Markdown vault has `.norn/config.yaml` in the current directory or a known vault path. Teaches safe Markdown document queries, frontmatter and link inspection, validation, configuration, schema-aware changes, and repair with the `norn` CLI."
+version: 1.5.0
 author: Drew Butler <hi@dbtlr.com>
 license: MIT
 ---
@@ -12,6 +12,8 @@ A deterministic Markdown vault CLI. Use it to query, validate, and mutate a vaul
 
 ## When to use norn
 
+Load this skill when the user names `norn`. Also load it when the current directory or a known vault path contains `.norn/config.yaml`.
+
 Use `norn` when you need to:
 
 - Query a vault's documents by frontmatter, body text, path, or link relationship — and project exactly the fields you want.
@@ -20,7 +22,7 @@ Use `norn` when you need to:
 - Validate a vault against configured rules (`required_frontmatter`, `field_types`, `allowed_values`, path scoping) and audit unresolved or ambiguous links.
 - Produce an inspectable `MigrationPlan` and apply it explicitly.
 
-Do not use `norn` for full-text relevance or semantic search — `find --text` is exact, case-insensitive substring matching, not ranked retrieval.
+Do not load this skill for an ordinary Markdown-file edit outside a configured vault unless the user names `norn`. Do not use `norn` for full-text relevance or semantic search. `find --text` is exact, case-insensitive substring matching, not ranked retrieval.
 
 ## Vault root targeting
 
@@ -34,13 +36,14 @@ When in doubt, pass `-C <path>`.
 
 ## Discover the vault before creating or mutating
 
-Once the vault root is picked, orient before querying or writing anything — don't guess at folder layout, rule names, or the frontmatter schema.
+Once the vault root is picked, orient before querying or writing anything. Do not guess the folder layout, rule names, or Standards pack.
 
 ```bash
-norn describe --format json    # the orient-first move
+norn describe --format json                          # local vault in the process cwd
+norn -C /path/to/vault describe --format json        # known vault path
 ```
 
-`describe` returns `folders` (every directory currently holding a document), `path_rules` (each rule's `match.path` glob plus the `frontmatter_defaults` a document there inherits), `creatable_rules` (rules usable with `norn new --as <rule>`: `name`, `target` template, `required_vars`, `frontmatter_defaults`, optional `body` scaffold), `inbox` (the `inbox.path` fallback target for `norn new --title "…"` with no path/`--as`, or `null`), and `schema` (the full `validate` config verbatim — every rule's `required_frontmatter`, `field_types`, `allowed_values`). Add `--data`/`--stats` for a contents-summary (`total`, per-field value distributions, date bounds) over the same filter surface `find`/`count` share — `--by field1,field2` names exact fields (bypassing the auto identity-skip that drops near-unique fields like `title`), and `--limit N` caps shown value-buckets per field (default 20, `0` = no cap). Read-only; never writes.
+`describe` returns `folders` (every directory currently holding a document), `path_rules` (each rule's `match.path` glob plus inherited `frontmatter_defaults`), `creatable_rules` (rules usable with `norn new --as <rule>`), `inbox`, and `schema` (the full `validate` configuration). Add `--data` or `--stats` for totals, field distributions, and date bounds over the `find` filter surface. `--by field1,field2` selects exact distribution fields. `--limit N` caps value buckets per field (default 20; `0` has no cap). This command is read-only.
 
 No `.norn/config.yaml` yet? `norn init` scaffolds one with commented example rules (refuses to overwrite an existing config unless `--force`). Once it exists:
 
@@ -53,9 +56,56 @@ norn config migrate    # upgrade an older config to the current schema version
 
 `config show`/`validate` are read-only; `config edit`/`migrate` write to `.norn/config.yaml` itself (not vault documents). `describe` reads that config back as `path_rules`/`creatable_rules`/`inbox`/`schema` — after editing rules, re-run `describe` to confirm what an agent now sees.
 
+### Define a Standards pack
+
+`.norn/config.yaml` declares the vault's Standards pack. This example shows the main file shape:
+
+```yaml
+files:
+  ignore:
+    - "target/**"
+
+validate:
+  ignore:
+    - "archive/**"
+  rules:
+    - name: task
+      target: "tasks/TASK-{{seq}}.md"
+      required_frontmatter: [title, status]
+      field_types:
+        title: text
+        status: string
+      allowed_values:
+        status: [backlog, active, done]
+      frontmatter_defaults:
+        title: "{{title}}"
+        status: backlog
+
+    - name: note
+      match:
+        path: "notes/**/*.md"
+      required_frontmatter: [title]
+
+repair:
+  rules:
+    - name: normalize-task-status
+      match:
+        code: value-not-allowed
+        rule: task
+        field: status
+        actual_value: todo
+      set_frontmatter:
+        field: status
+        value: backlog
+```
+
+`files.ignore` removes matching paths from the graph. `validate.ignore` keeps paths in the graph but exempts them from validation. A validation rule combines its `match` selectors, then applies constraints such as `required_frontmatter`, `forbidden_frontmatter`, `field_types`, `allowed_values`, `allowed_paths`, and `field_references`. A creatable rule uses `target` instead of `match.path`; norn derives its path matcher from the target. It can also supply `frontmatter_defaults` and a body scaffold for `norn new --as <rule>`.
+
+After a configuration edit, run `norn config validate`. Then run `norn describe --format json` to inspect the effective rules.
+
 ## Query and read — the everyday surface
 
-`find` selects a *set* of documents by predicate; `get` selects *named* documents by identity. They share one output contract: the same `--col` vocabulary, the same formats, the same sort/paging. Learn it once.
+`find` selects a *set* of documents by predicate; `get` selects *named* documents by identity. They share the same `--col` vocabulary and sort/paging rules. Their output formats overlap, but their defaults differ.
 
 ### find
 
@@ -80,7 +130,7 @@ norn get "My Note"                            # resolve by stem (case-insensitiv
 norn get a.md b.md --col title,status         # several docs, narrowed
 norn get notes/my-note.md --col .incoming_links
 norn get notes/my-note.md --all-cols --format json
-norn get notes/my-note.md --format markdown   # rebuild the doc as Markdown (get-only)
+norn get notes/my-note.md --format markdown   # exact source file; exactly one selected doc
 norn get notes/my-note.md --section "Task Description" --section "Annotations" --format json
                                                # named sections' content, repeat per heading (get-only)
 ```
@@ -111,13 +161,13 @@ norn count --path 'notes/**/*.md' --by type
 
 ### Output formats
 
-`find`/`get` auto-detect by destination: TTY → `records`, pipe → `paths`. Override with `--format`.
+`find` auto-detects by destination: TTY produces `records`, and a pipe produces `paths`. `get` defaults to `records` for both. Override either command with `--format`.
 
 - `records` — human-legible blocks. **Never parse it; not a stable contract.**
 - `paths` — one vault-relative path per line. Stable.
 - `json` — `find` emits one object: `{ total, returned, starts_at, documents[] }`. `get` emits a bare array of records (no wrapper). Stable, versioned.
 - `jsonl` — one object per line, no wrapper. Stable; for streaming/early-close consumers.
-- `markdown` — `get`-only, one document, rebuilt as Markdown.
+- `markdown` — `get`-only, exactly one selected document, returned as the exact source file.
 
 Use `json` for one-shot dispatch, `jsonl` for queues. `paths`/`json`/`jsonl` never emit color.
 
@@ -195,7 +245,7 @@ norn new --as task --title "Fix the cache" --var workspace=norn --yes
 norn new --title "Quick capture" --yes                   # inbox fallback (inbox.path required)
 ```
 
-`new` operates in three modes: (A) explicit path — supply the vault-relative path directly; (B) rule-targeted (`--as <rule>`) — derives the path from the named rule's `target` template, applies the rule's `frontmatter_defaults`, and seeds the body from its `body` scaffold; (C) inbox fallback — no path and no `--as`, routes to `inbox.path/<title|slugify>.md`. Template placeholders: `{{title}}`, `{{date}}`, `{{now}}`, `{{path.X}}`, `{{var.KEY}}` (filled by `--var KEY=VALUE`), `{{seq}}` (auto-incrementing id — see below). `--field` overrides always win. Refuses (exit 2) when a required `{{var.KEY}}` is missing, `--title` is absent where the template needs it, the rule is unknown or non-creatable, or the inbox is unconfigured for Mode C. Also refuses if the path exists (unless `--force`) or a parent dir is missing (unless `-p`). After writing, `validate` runs against the new doc; findings surface as report warnings.
+`new` operates in three modes: (A) explicit path — supply the vault-relative path directly; (B) rule-targeted (`--as <rule>`) — derives the path from the named rule's `target` template, applies the rule's `frontmatter_defaults`, and seeds the body from its `body` scaffold; (C) inbox fallback — no path and no `--as`, routes to `inbox.path/<title|slugify>.md`. Template placeholders include `{{title}}`, `{{date}}`, `{{time}}`, `{{date:fmt}}`, `{{time:fmt}}`, `{{now}}`, `{{path.X}}`, `{{var.KEY}}` (filled by `--var KEY=VALUE`), and `{{seq}}` (auto-incrementing id; see below). `--field` overrides always win. Refuses (exit 2) when a required `{{var.KEY}}` is missing, `--title` is absent where the template needs it, the rule is unknown or non-creatable, or the inbox is unconfigured for Mode C. Also refuses if the path exists (unless `--force`) or a parent dir is missing (unless `-p`). After writing, `validate` runs against the new doc; findings surface as report warnings.
 
 #### `{{seq}}` — auto-incrementing ids, no hand-rolled next-id logic
 
@@ -241,7 +291,7 @@ norn -C /path/to/vault validate --code 'link-*' --format jsonl
 norn -C /path/to/vault validate --severity error --path 'notes/**' --format json
 ```
 
-`--summary` returns grouped counts; run it before reading raw findings. Filters combine AND across types, OR within a type; `--code` and `--path` take globs. Formats: `records`, `jsonl` (pipe default — a finding has no path), `json` (`{ total, findings[] }`), `paths` (unique source paths). Exit code reflects **whole-vault** error-severity diagnostics — it does not change with `--code`/`--severity`/`--path`, and most finding codes default to `warning` severity. Don't gate a pipeline on exit code alone; check `--summary` totals or the returned findings instead.
+`--summary` returns grouped counts; run it before reading raw findings. Filters combine AND across types, OR within a type; `--code` and `--path` take globs. Formats: `records`, `jsonl` (one finding per line and the pipe default), `json` (`{ total, findings[] }`), and `paths` (unique source paths). Exit code reflects **whole-vault** error-severity diagnostics — it does not change with `--code`/`--severity`/`--path`, and most finding codes default to `warning` severity. Don't gate a pipeline on exit code alone; check `--summary` totals or the returned findings instead.
 
 Stable finding codes (18): `read-failed`, `frontmatter-unclosed`, `frontmatter-parse-failed`, `frontmatter-json-conversion-failed`, `link-target-missing`, `link-anchor-missing`, `link-block-missing`, `link-ambiguous`, `frontmatter-required-field-missing`, `frontmatter-forbidden-field`, `field-type-invalid`, `frontmatter-exceeds-max-length`, `value-not-allowed`, `document-misrouted`, `frontmatter-reference-type`, `frontmatter-alias-malformed`, `frontmatter-alias-shadowed-by-stem`, `frontmatter-alias-duplicate-across-docs`. See [validation.md](https://github.com/dbtlr/norn/tree/main/docs/validation.md) for severity and source per code. Renames are CHANGELOG breaking changes.
 
@@ -254,7 +304,7 @@ norn -C /vault validate --summary --format json
 # 2. plan (read-only; never writes)
 norn -C /vault repair --plan --code value-not-allowed --field status --out plan.json
 
-# 3. review plan.json — read summary.planned_changes and the skipped section
+# 3. review plan.json — read operations, preconditions, and skipped findings
 
 # 4. dry-run the apply (checks preconditions, writes nothing)
 norn -C /vault apply plan.json --dry-run --format json
@@ -266,15 +316,15 @@ norn -C /vault apply plan.json --yes --format json
 norn -C /vault validate --summary --format json
 ```
 
-Single-line pipeline (skips the artifact file): `norn -C /vault repair --plan --format json | norn -C /vault apply - --yes`. `norn apply -` and bare `norn apply` both read the plan from stdin.
+Single-line pipeline (skips the artifact file): `norn -C /vault repair --plan --format json | norn -C /vault apply - --yes`. Only `norn apply -` reads the plan from stdin. A bare `norn apply` is invalid because the `<PLAN>` argument is required.
 
-`apply` is the batch write surface. It verifies the plan's vault root, re-reads each source doc and checks its recorded hash, and verifies each `expected_old_value` before writing — any precondition failure aborts the whole batch before any partial write. Re-plan rather than retrying; there is no `--force`. (There is no `--verify` flag — re-validate with a separate `norn validate` call as in step 6.)
+`apply` is the batch write surface. Before operations run, it checks the plan schema and vault root, resolves `create_document` paths, and evaluates owner-set preconditions. Each operation class then checks its document hash, expected value, or edit anchor before its writes. A plan-level or pre-write refusal leaves the vault unchanged. A later operation failure can leave an earlier operation applied, which returns a partial failure. Re-plan rather than retrying. There is no `--force` or `--verify` flag. Run `norn validate` separately, as in step 6.
 
 ### Repair plan shape
 
-`repair --plan` formats: `report` (human, TTY default), `json` (full `MigrationPlan`, the only format `apply` consumes; pipe default), `paths` (affected paths). Supported findings become `PlannedChange`s (path, field, new value, document hash). Skipped findings carry a stable reason code: `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, `precondition-failed`. Filter with `--skip-reason <PATTERN>` (globs).
+`repair --plan` formats are `report` (human and TTY default), `json` (the full `MigrationPlan` and pipe default), and `paths` (affected paths). MigrationPlan schema v2 has top-level `schema_version`, `vault_root`, optional `preconditions`, `operations`, and `skipped` fields. Each operation has `kind` and `fields`, with optional `id`, `requires`, and `footnote` fields. Skipped findings carry `finding_code`, `path`, and a stable `reason`. Filter them with `--skip-reason <PATTERN>`.
 
-Repair-action kinds in a plan: `set_frontmatter`, `remove_frontmatter`, `add_frontmatter`, `move_document`, `rewrite_link`, `replace_body` (emitted only by `set --body-from-stdin`), `create_document` (emitted only by `new`). Closest-match `rewrite_link` proposals are confidence-banded (`high` = slug-identity, safe; `medium` = small edit distance, review). Use `--confidence high` to keep only high-confidence proposals. Ties skip with `ambiguous-target`; never auto-pick them.
+Supported plan operation kinds are `move_folder`, `rewrite_wikilink`, `move_document`, `delete_document`, `set_frontmatter`, `add_frontmatter`, `remove_frontmatter`, `rewrite_link`, `replace_body`, `create_document`, `str_replace`, `replace_section`, `append_to_section`, `delete_section`, `insert_before_heading`, and `insert_after_heading`. Closest-match `rewrite_link` proposals are confidence-banded (`high` = slug identity; `medium` = small edit distance). Use `--confidence high` to keep only high-confidence proposals. Ties skip with `ambiguous-target`; never auto-pick them.
 
 ## Audit trail
 
@@ -296,9 +346,17 @@ Output is a **flattened norn-native projection**: hot fields `trace`, `status`, 
 
 **MCP (`vault.audit`):** the tool carries the identical filter surface and returns `{ events: [...] }`.
 
-## User vault doctrine lives in .norn/config.yaml
+## The Standards pack lives in .norn/config.yaml
 
-Don't hardcode a vault's rule names, field shapes, or status vocabularies into prompts — read them from `<vault-root>/.norn/config.yaml`. It declares `files.ignore`, `validate.ignore`, `validate.required_frontmatter`, `validate.rules`, and `repair.rules`. No config → defaults apply. The two `ignore` keys are a two-tier model: `files.ignore` removes a document from the graph entirely (not indexed, not queryable, not a link target), while `validate.ignore` keeps it fully indexed and queryable (`find`/`get`/`count` still see it, links still resolve) and only exempts it from `validate` findings — including a pass for malformed or absent frontmatter. Inspect it with `norn config show`. `field_types` entries with a bounded type (`string`, `date`, `datetime`, `wikilink`, `wikilink_or_list`, `list_of_strings`) or an explicit `indexed: true` get shredded into a derived index (`index.auto`, default on) that `find`/`count` route through automatically — no query-side flag needed, it's purely a config-time performance lever.
+Do not hardcode a vault's rule names, field shapes, or status values into prompts. Read them from `<vault-root>/.norn/config.yaml`. No config means that defaults apply. Inspect the effective configuration with `norn config show`. `field_types` entries with a bounded type (`string`, `date`, `datetime`, `wikilink`, `wikilink_or_list`, `list_of_strings`) or `indexed: true` enter the derived index when `index.auto` is enabled (the default). `find` and `count` use that index automatically.
+
+## Command coverage
+
+The normal agent workflow uses `norn describe`, `norn find`, `norn count`, `norn get`, `norn validate`, `norn repair`, `norn apply`, `norn set`, `norn edit`, `norn new`, `norn move`, `norn delete`, `norn rewrite-wikilink`, and `norn audit`.
+
+Configuration and recovery use `norn init`, `norn config`, and `norn cache`. `norn mcp` exposes the same vault operations over stdio when the agent cannot use the vault filesystem directly.
+
+`norn completions`, `norn self-update`, `norn serve`, and `norn service` administer the user's shell, binary, or host daemon. They are outside a normal vault task. Do not invoke them unless the user explicitly asks for that administration.
 
 ## Common pitfalls
 

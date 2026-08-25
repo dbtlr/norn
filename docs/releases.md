@@ -39,7 +39,7 @@ For a release bump (from a clean working tree on `main`):
 1. Update workspace version in `Cargo.toml`.
 2. Run `cargo check` to refresh `Cargo.lock`.
 3. Run `mise exec -- just verify`.
-4. Re-check the user-facing docs against the current CLI: skim `docs/commands/*.md` and the bundled `integrations/agent-skill/SKILL.md` for new, removed, or renamed flags/commands, and bump the SKILL's `version:` if it changed. These are hand-maintained and overlap the binary by design (see the docs information-architecture decision), so they only stay accurate if a release checks them — the SKILL once drifted a full minor+patch behind the CLI.
+4. Re-check the user-facing docs against the current CLI: skim `docs/commands/*.md` and `skills/norn/SKILL.md` for new, removed, or renamed flags and commands. Run `cargo test --test skill_contract`, and bump the skill's `version:` when its contract changes. These files overlap the binary by design, so the release check keeps them accurate.
 5. Update `CHANGELOG.md`: rename `## Unreleased` to `## vX.Y.Z - YYYY-MM-DD`.
 6. Commit `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`.
 7. Tag: `git tag -a vX.Y.Z -m "norn vX.Y.Z"`.

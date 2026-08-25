@@ -221,7 +221,7 @@ index:
 
 ## repair.rules
 
-Declarative deterministic repair rules. `norn repair --plan` matches findings against `repair.rules` and converts matched findings into executable changes; unmatched findings appear in `skipped_findings` with `skip_reason: no_rule_matched`.
+Declarative deterministic repair rules. `norn repair --plan` matches findings against `repair.rules` and converts matched findings into executable operations. Unmatched findings appear in the MigrationPlan `skipped` array with `reason: no-rule-matched`.
 
 Each rule has a `match` predicate and exactly one action (`set_frontmatter`, `remove_frontmatter`, `add_frontmatter`, or `move_document`).
 
@@ -299,7 +299,7 @@ Either form supports placeholder substitution:
 - `{filename}` — the source file's filename including extension.
 - `{frontmatter.<field>}` — a scalar value from the source file's frontmatter.
 
-If substitution fails (missing field, non-scalar value), the finding is skipped with `skip_reason: precondition_failed`.
+If substitution fails because a field is missing or is not scalar, the finding appears in the MigrationPlan `skipped` array with `reason: precondition-failed`.
 
 Apply automatically rewrites backlinks alongside the move:
 

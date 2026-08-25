@@ -211,7 +211,7 @@ Exit codes: 0 success or dry-run, 1 user-cancelled or runtime failure, 2 pre-fli
     #[command(
         disable_help_flag = true,
         about = "Apply a MigrationPlan — execute move, delete, rewrite, and frontmatter ops from a plan file",
-        long_about = "Apply a MigrationPlan: execute the move, delete, rewrite, and frontmatter operations recorded in a plan file (or stdin `-`).\n\n`apply` is the execute half of norn's plan-then-apply doctrine — it consumes ANY MigrationPlan (the artifact `norn repair --plan` emits, or a hand-authored one) and writes the changes, checking every precondition before touching a file. It is the one command that writes from a plan; nothing else does.\n\nExit codes: 0 success or dry-run, 1 partial-apply failure, 2 pre-flight refusal."
+        long_about = "Apply a MigrationPlan: execute the move, delete, rewrite, and frontmatter operations recorded in a plan file (or stdin `-`).\n\n`apply` is the execute half of norn's plan-then-apply doctrine — it consumes ANY MigrationPlan (the artifact `norn repair --plan` emits, or a hand-authored one) and writes the changes. Plan-level preconditions are checked before any operation. Operation preconditions are checked as each operation class runs, so a later failure can leave earlier changes applied. It is the one command that writes from a plan; nothing else does.\n\nExit codes: 0 success or dry-run, 1 partial-apply failure, 2 pre-flight refusal."
     )]
     Apply(ApplyArgs),
     #[command(

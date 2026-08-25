@@ -21,3 +21,7 @@ norn's documentation lives on four surfaces, each written for a different reader
 - Per-command pages are self-sufficient: purpose → worked examples → options → output/apply-model → recipes → see-also. They ship Starlight-ready (`title` + `description` frontmatter, relative links, plain CommonMark) so the README's relative links swing to norn.run URLs later with no rewrite of the pages themselves.
 - The SKILL stays a full offline agent manual; its escape hatch is norn.run links plus the deep `--help`.
 - The release checklist must re-check the SKILL and the per-command docs against the current CLI on every release. The SKILL drifted a full minor + patch behind the CLI (v0.36.0/v0.36.1) precisely because no such step existed — see *the SKILL-update-and-dogfood-loading note (internal design doc)*.
+
+## Amendment — 2026-08-25: standard skill package installation
+
+The public skill package now lives at `skills/norn`. Standard skill tooling installs it into an agent's skill directory. This supersedes only the earlier CLI-installation clause. The four self-sufficient documentation surfaces and their ownership remain unchanged.
