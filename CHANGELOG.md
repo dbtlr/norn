@@ -10,6 +10,10 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Changed
+
+- Refreshed all semver-compatible Rust dependencies. This updates the test-only `h2` crate from 0.4.14 to 0.4.19 and resolves RUSTSEC-2026-0258.
+
 ## v0.48.2 - 2026-07-24
 
 **Release theme:** routed writes survive big cache rebuilds — the stall watchdog now sees real progress during long refreshes instead of abandoning healthy writes.
