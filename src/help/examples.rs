@@ -107,7 +107,7 @@ pub fn examples_for(cmd_path: &str) -> Vec<(String, String)> {
                 "write a MigrationPlan to file",
             ),
             (
-                "norn repair --plan --format json | norn apply -",
+                "norn repair --plan --format json | norn apply - --yes",
                 "generate a plan and apply it through apply",
             ),
             (
@@ -303,11 +303,11 @@ pub fn conceptual_sections_for(cmd_path: &str) -> Vec<(String, String)> {
         ],
         "norn repair" => &[(
             "The plan/apply boundary",
-            "Repair runs in two halves. `norn repair --plan` reads validate findings and emits a MigrationPlan JSON artifact describing every change it would make. Planning never writes to vault documents. `norn apply` consumes that artifact and writes the changes; preconditions are checked before any file is touched.\n\nPlanning classifies each finding as supported or skipped. Supported findings produce a `PlannedChange` — the path, the field, the new value, and the source document's hash recorded at plan time. Skipped findings carry a reason code (stable kebab-case string): `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, or `precondition-failed`. Filter skipped findings with `--skip-reason <PATTERN>`; glob patterns accepted.\n\nA planned change:\n\n{\n  \"path\": \"notes/welcome.md\",\n  \"field\": \"kind\",\n  \"new_value\": \"note\",\n  \"document_hash\": \"a3f2…\"\n}\n\nA skipped finding records the reason (the `reason` value is the kebab-case skip-reason code; `finding_code` is the underlying validate code):\n\n{\n  \"finding_code\": \"link-ambiguous\",\n  \"path\": \"drafts/x.md\",\n  \"reason\": \"ambiguous-target\"\n}\n\nThe summary's `skipped` section uses a `by_reason` map: `{ \"ambiguous-target\": 3, \"no-rule-matched\": 12 }`. Zero-count buckets are omitted.\n\nOutput formats: `--format report` (human summary, TTY default), `--format json` (full MigrationPlan envelope, pipe default), `--format paths` (one affected path per line, deduplicated).\n\nThe plan captures a vault snapshot. Each change records the document's hash at plan time; apply refuses to write if that hash has changed. Re-run `--plan` after editing files between plan and apply.\n\nTriage filters here are the same as on `validate` — pass `--severity error` to plan only error-level findings. Filters that excluded a finding from validate also exclude it from plan.",
+            "Repair runs in two halves. `norn repair --plan` reads validation findings and emits a MigrationPlan. Planning never writes to vault documents. `norn apply` consumes that artifact.\n\nMigrationPlan schema v2 has top-level `schema_version`, `vault_root`, `preconditions`, `operations`, and `skipped` fields. Each operation has a `kind` and a `fields` object. It can also have an `id`, `requires`, or a `footnote`.\n\nA repair-generated operation:\n\n{\n  \"kind\": \"set_frontmatter\",\n  \"fields\": {\n    \"path\": \"notes/welcome.md\",\n    \"field\": \"kind\",\n    \"new_value\": \"note\",\n    \"document_hash\": \"a3f2…\"\n  }\n}\n\nA skipped finding records the validation code and a stable reason code:\n\n{\n  \"finding_code\": \"link-ambiguous\",\n  \"path\": \"drafts/x.md\",\n  \"reason\": \"ambiguous-target\"\n}\n\nSkip reasons are `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, and `precondition-failed`. Filter them with `--skip-reason <PATTERN>`.\n\nOutput formats are `report` (human summary and TTY default), `json` (the full MigrationPlan and pipe default), and `paths` (deduplicated affected paths).\n\nTriage filters are the same as on `validate`. A filter that excludes a finding from validation also excludes it from the plan.",
         )],
         "norn apply" => &[(
             "How apply writes",
-            "Apply walks the MigrationPlan in this order:\n\n1. Load the plan JSON and verify its schema version.\n2. Confirm the plan's recorded vault root matches the effective cwd.\n3. Re-read each source document and verify its hash matches what the plan recorded; abort if any file changed since plan time.\n4. Verify each `expected_old_value` matches the current field value; abort on mismatch.\n5. Write the new frontmatter, preserving the Markdown body.\n6. Re-run validate when `--verify` is set.\n\nPass `--dry-run` to walk steps 1–4 without writing.",
+            "Apply processes a MigrationPlan in this order:\n\n1. Load the plan and validate its schema version and vault root.\n2. Expand high-level operations.\n3. Resolve every `create_document` path, including `{{seq}}` templates.\n4. Evaluate all owner-set preconditions under the mutation lock.\n5. Check each operation's document hash, expected value, or edit anchor.\n6. Write the operations in plan order.\n\nPass `--dry-run` to do the same preflight without writes. Use `norn validate` after apply to check the vault. Validation is a separate command.",
         )],
         _ => &[],
     };
@@ -390,14 +390,15 @@ mod tests {
     }
 
     #[test]
-    fn repair_section_mentions_supported_and_skipped() {
+    fn repair_section_teaches_migration_plan_v2_fields() {
         let sections = conceptual_sections_for("norn repair");
         let (_, body) = sections
             .iter()
             .find(|(h, _)| h == "The plan/apply boundary")
             .expect("boundary section present");
-        assert!(body.contains("supported"));
-        assert!(body.contains("skipped"));
+        for field in ["schema_version", "preconditions", "operations", "skipped"] {
+            assert!(body.contains(field), "repair section must name {field}");
+        }
     }
 
     #[test]

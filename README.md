@@ -94,12 +94,12 @@ Commands accept `--format json|jsonl` (stable contracts) plus format-specific hu
 
 Norn is designed to be a first-class tool for coding agents:
 
-- **Stable contracts.** JSON for one-shot dispatch, JSONL for streaming queues, and a schema-versioned repair plan (`schema_version: 9`).
+- **Stable contracts.** JSON for one-shot dispatch, JSONL for streaming queues, and a schema-versioned migration plan (`schema_version: 2`).
 - **Plan/apply boundary.** Mutation is always two steps: produce a plan artifact, then apply it. Apply rejects mismatched vault roots, stale document hashes, and unsupported schema versions.
 - **Filterable triage.** `--code`, `--severity`, `--field`, `--rule`, `--path`, `--target`, `--reason` apply to both raw output and `--summary`, so an agent can size a queue before reading it.
 - **Vault targeting.** Use `-C <path>` (or `--cwd <path>`) to point `norn` at a specific vault root, or omit it to run against the current directory.
 
-For the agent-facing contract, start at [docs/agent-workflows.md](docs/agent-workflows.md). To install the agent skill into your coding agent of choice, see [integrations/agent-skill/README.md](integrations/agent-skill/README.md).
+For the agent-facing contract, start at [docs/agent-workflows.md](docs/agent-workflows.md). To install the `norn` skill, see [skills/norn/README.md](skills/norn/README.md).
 
 ## MCP server
 

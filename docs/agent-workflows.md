@@ -11,26 +11,27 @@ description: Stable JSON and JSONL contracts, agent loop patterns, and common ha
 
 | Contract | Surface | Stability |
 |---|---|---|
-| JSON output | `--format json` on every command | Stable across point releases; breaking changes called out in CHANGELOG. |
-| JSONL output | `--format jsonl` on every command | Same. |
+| JSON output | `--format json` on commands that list it | Stable across point releases; breaking changes called out in CHANGELOG. |
+| JSONL output | `--format jsonl` on commands that list it | Same. |
 | Paths output | `--format paths` on commands that emit per-row paths | Stable; one unique vault-relative path per row. |
 | Migration plan schema | `repair --plan` JSON artifact (`MigrationPlan`) | Schema-versioned (`schema_version` field). Apply rejects mismatched versions. |
 | Apply report schema | `apply` JSON output (`ApplyReport`) | Stable across the matching plan schema version. |
 | Finding codes | `norn validate` output `code` field | Stable; renames are breaking changes called out in CHANGELOG. |
 
-Default human-readable rendering (`records` on most commands, `report` for `repair --plan`) is for humans and may evolve between point releases. Agents should always pass an explicit `--format json` or `--format jsonl`.
+Default human-readable rendering (`records` on most commands, `report` for `repair --plan`) is for humans and may evolve between point releases. Agents should pass an explicit machine-readable format that the command's `--help` lists. Format availability differs by command.
 
 ## Vault targeting
 
-An agent should detect the vault root before running any command. The two ways:
+An agent should detect the vault root before running any command. The three ways, in precedence order, are:
 
 1. **`-C <path>` (alias `--cwd`).** One-shot invocation against an arbitrary directory.
    ```bash
    norn -C /path/to/vault validate --summary --format json
    ```
-2. **Process cwd.** When `-C` is not set, `norn` runs against the current directory. Discovery of `.norn/config.yaml` is implicit.
+2. **`NORN_ROOT`.** When `-C` is not set, this environment variable selects the vault root.
+3. **Process cwd.** When neither is set, `norn` runs against the current directory. Discovery of `.norn/config.yaml` is implicit.
 
-`--cwd PATH` is the only vault-targeting mechanism. An agent operating on multiple vaults should pass `-C` per command.
+An agent operating on multiple vaults should pass `-C` per command.
 
 ## Recommended agent loop
 
@@ -38,8 +39,8 @@ For a typical drift-healing task:
 
 1. **Detect.** `norn validate --summary --format json` — get a finding shape before reading individuals.
 2. **Triage.** Filter by `--code`, `--field`, `--rule`, `--path` to scope the queue. Re-run `--summary` to confirm the filter's size.
-3. **Plan.** `norn repair --plan --out plan.json` (with the same filters). Read the plan's `changes` and `skipped_findings`.
-4. **Review.** Confirm `changes` are intended; surface `skipped_findings` to the human or follow `next_actions`.
+3. **Plan.** `norn repair --plan --out plan.json` (with the same filters). Read the plan's `preconditions`, `operations`, and `skipped` arrays.
+4. **Review.** Confirm the operations are intended. Resolve or surface skipped findings before applying.
 5. **Dry-run.** `norn apply plan.json --dry-run --format json` — confirms the plan is applyable without writing. (Or pipe directly: `norn repair --plan --format json | norn apply - --dry-run --format json`.)
 6. **Apply.** `norn apply plan.json --format json --yes` — writes. (`--format json` is output-shape-only; `--yes` is what gives consent to write — omit it and the same invocation is an implicit dry-run.) Every frontmatter write is re-parsed and checked against the intended value before apply reports success (the post-image verification gate); there is no separate `--verify` flag.
 7. **Verify.** Inspect the apply report's `operations` and `warnings`, then run `norn validate --summary --format json` again as the post-hoc check that the vault is now clean.
@@ -62,7 +63,7 @@ These commands never write to the vault. An agent can run them with confidence:
 - `norn repair --plan` (produces a `MigrationPlan` artifact; does not modify the vault)
 - `norn audit`
 
-`norn new`, `norn set`, `norn move`, `norn delete`, and `norn apply` are mutation commands; pass `--dry-run` to preview without writing. Only `norn apply`, `norn new`, `norn set`, `norn move`, and `norn delete` (without `--dry-run`) write to the vault. The migration plan is provided to `norn apply` via a positional file path, via `-`, or via stdin (the pipeline form `norn repair --plan --format json | norn apply -` composes plan generation and apply in one shot).
+The document mutation commands are `norn new`, `norn set`, `norn edit`, `norn move`, `norn delete`, `norn rewrite-wikilink`, and `norn apply`. Pass `--dry-run` to preview without writing. In a non-TTY agent session, pass `--yes` to apply. The migration plan is provided to `norn apply` through a required positional file path or through `-` for stdin. The pipeline form is `norn repair --plan --format json | norn apply - --yes`.
 
 ## Output sketches
 
@@ -89,16 +90,23 @@ These commands never write to the vault. An agent can run them with confidence:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "vault_root": "/abs/path/to/vault",
-  "source_filters": { "code": "value-not-allowed", "field": "status" },
-  "summary": {
-    "findings": 4,
-    "planned_changes": 3,
-    "skipped": { "by_reason": { "no-rule-matched": 1 }, "total": 1 }
-  },
-  "changes": [ /* ... */ ],
-  "skipped_findings": [ /* with skip_reason + reason_code */ ]
+  "preconditions": [],
+  "operations": [
+    {
+      "kind": "set_frontmatter",
+      "fields": {
+        "path": "tasks/triage.md",
+        "field": "status",
+        "new_value": "backlog",
+        "document_hash": "…"
+      }
+    }
+  ],
+  "skipped": [
+    { "finding_code": "value-not-allowed", "path": "tasks/other.md", "reason": "no-rule-matched" }
+  ]
 }
 ```
 
@@ -106,7 +114,7 @@ These commands never write to the vault. An agent can run them with confidence:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "trace_id": "…",
   "plan_hash": "…",
   "vault_root": "/abs/path/to/vault",
@@ -115,8 +123,10 @@ These commands never write to the vault. An agent can run them with confidence:
   "skipped": 0,
   "failed": 0,
   "remaining": 0,
+  "preconditions": [],
   "operations": [ { "op_id": "…", "kind": "set_frontmatter", "status": "applied", "summary": "…" } ],
-  "warnings": []
+  "warnings": [],
+  "outcome": "applied"
 }
 ```
 
@@ -179,7 +189,7 @@ See [MCP server](mcp-server.md) for the 14-tool catalog, the document-placement 
 
 ## Skill installation
 
-For per-harness install instructions (Claude Code, Codex, Open Code, OpenClaw, Hermes, PI), see [integrations/agent-skill/README.md](../integrations/agent-skill/README.md). The skill body itself is harness-independent and lives at [integrations/agent-skill/SKILL.md](../integrations/agent-skill/SKILL.md).
+Install the harness-independent `norn` skill with the skills CLI or by copying it to the harness path. See [Install the norn skill](../skills/norn/README.md). The skill body lives at [skills/norn/SKILL.md](../skills/norn/SKILL.md).
 
 ## See also
 

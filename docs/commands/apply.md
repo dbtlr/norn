@@ -5,7 +5,7 @@ description: Apply a MigrationPlan — execute move, delete, rewrite, and frontm
 
 # norn apply
 
-Apply a `MigrationPlan` — the artifact `norn repair --plan` produces, or a hand-authored one. `apply` is the command that writes a batch of planned changes; it checks every precondition before touching a file and aborts the whole batch if any check fails. It is the execute half of norn's plan-then-apply doctrine — the one command that writes from a plan.
+Apply a `MigrationPlan`, either from `norn repair --plan` or from a hand-authored file. `apply` checks plan-level preconditions before any operation runs. It checks operation preconditions before each operation class writes. A later operation failure can leave an earlier operation applied. `apply` is the only command that writes from a plan.
 
 ## Examples
 
@@ -16,7 +16,7 @@ norn apply plan.json --dry-run
 norn apply plan.json --yes
 # apply the plan
 
-norn repair --plan --format json | norn apply -
+norn repair --plan --format json | norn apply - --yes
 # generate and apply in one pipeline (- reads the plan from stdin)
 
 norn apply plan.json --out report.json
@@ -38,11 +38,11 @@ norn apply plan.json --out report.json
 
 ## Plan input
 
-The positional `<PLAN>` is a path to a JSON or YAML plan; `-` (or omitting it) reads from stdin. Input format auto-detects by extension; pass `--input-format yaml` for a YAML plan on stdin.
+The required `<PLAN>` argument is a path to a JSON or YAML plan. Use `-` to read from stdin. The input format follows the file extension. For a YAML plan on stdin, pass `--input-format yaml`.
 
 ## Plan operations
 
-Each plan `operation` has a `kind` and a `fields` object. Alongside the structural ops (`move_document`, `move_folder`, `delete_document`, `rewrite_link`, `create_document`, `replace_body`, `set_frontmatter` / `add_frontmatter` / `remove_frontmatter`), a plan may carry the **section/body edit ops** — the same vocabulary as [`norn edit`](edit.md): `str_replace`, `replace_section`, `append_to_section`, `delete_section`, `insert_before_heading`, `insert_after_heading`.
+Each plan operation has a `kind` and a `fields` object. Structural operations are `move_document`, `move_folder`, `delete_document`, `rewrite_link`, `rewrite_wikilink`, `create_document`, `replace_body`, `set_frontmatter`, `add_frontmatter`, and `remove_frontmatter`. A plan can also carry the body-edit operations from [`norn edit`](edit.md): `str_replace`, `replace_section`, `append_to_section`, `delete_section`, `insert_before_heading`, and `insert_after_heading`.
 
 Their `fields` are the edit anchor (`heading` + `content`, or `old` + `new`) plus `path` and `document_hash`. Unlike `norn edit` — which reads the body up front and stamps a whole-body `replace_body` — a plan edit op resolves **at apply time**: the applier re-reads the current body under the `document_hash` check and applies the edit through the same transform engine. This lets a section edit compose into one plan with other ops — e.g. a `set_frontmatter` (status change) and an `append_to_section` (history line) applied together. Multiple edit ops on the same document apply in plan order against the evolving body, sharing one `document_hash` precondition.
 

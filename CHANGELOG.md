@@ -10,6 +10,14 @@ once it ships v1.0. Pre-1.0 versions may include breaking changes in minor relea
 
 Entries here have landed on `main` but have not yet been cut into a tagged release. When a release is cut, this section is promoted to `## v0.X.0 - YYYY-MM-DD` and a fresh `## [Unreleased]` header is added above it.
 
+### Changed
+
+- **The `norn` skill now installs through the skills CLI.** Its package lives at `skills/norn`, so `npx skills add dbtlr/norn --skill norn` selects and installs the public skill without installing repository-maintenance skills. The trigger now covers explicit `norn` requests and configured Markdown vaults in the current directory or at a known `-C` path. The skill also teaches the current Standards pack shape, MigrationPlan schema v2, and every agent-facing command.
+
+### Fixed
+
+- **`norn repair --help` and `norn apply --help` now describe MigrationPlan schema v2.** The help no longer teaches the retired `PlannedChange` envelope or the removed `--verify` flag. It now covers owner-set preconditions, create-path resolution, operation preconditions, and separate post-apply validation.
+
 ## v0.48.2 - 2026-07-24
 
 **Release theme:** routed writes survive big cache rebuilds — the stall watchdog now sees real progress during long refreshes instead of abandoning healthy writes.

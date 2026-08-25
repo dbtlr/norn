@@ -16,7 +16,7 @@ norn repair
 norn repair --plan --out plan.json
 # write a MigrationPlan to a file
 
-norn repair --plan --format json | norn apply -
+norn repair --plan --format json | norn apply - --yes
 # generate a plan and apply it in one pipeline
 
 norn repair --plan --format paths
@@ -31,9 +31,9 @@ norn repair --plan --severity error
 
 ## The plan/apply boundary
 
-Repair runs in two halves. `norn repair --plan` reads validate findings and emits a `MigrationPlan` JSON artifact; planning never touches vault documents. [`norn apply`](apply.md) consumes that artifact and writes the changes, checking preconditions before any file is touched.
+Repair runs in two halves. `norn repair --plan` reads validate findings and emits a `MigrationPlan` JSON artifact; planning never touches vault documents. [`norn apply`](apply.md) consumes that artifact. Apply checks plan-level preconditions before any operation. It checks operation preconditions as each operation class runs, so a later failure can leave earlier changes applied.
 
-Each supported finding becomes a `PlannedChange` recording the path, field, new value, and the source document's hash at plan time — so apply can refuse to write if the file changed since planning. Re-run `--plan` after editing files between plan and apply.
+MigrationPlan schema v2 has top-level `schema_version`, `vault_root`, optional `preconditions`, `operations`, and `skipped` fields. Each operation has a `kind` and a `fields` object. It can also have an `id`, `requires`, or a `footnote`. Repair-generated operation fields include the document hash and expected value where that operation needs them. Re-run `--plan` after editing files between plan and apply.
 
 Skipped findings carry a stable reason code: `missing-default`, `link-decision-needed`, `no-rule-matched`, `alias-shadowed`, `graph-diagnostic`, `ambiguous-target`, `missing-hash`, `precondition-failed`. Filter them with `--skip-reason <PATTERN>` (globs accepted, repeatable).
 

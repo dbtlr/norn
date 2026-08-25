@@ -1,17 +1,44 @@
-# norn agent skill
+---
+title: "Install the norn skill"
+description: "Install the norn skill with the skills CLI, or copy it manually when that installer is unavailable."
+---
 
-A single harness-independent skill that teaches a coding agent how to drive the `norn` CLI safely. The skill body lives in [SKILL.md](SKILL.md). This README is the install-and-adapt guide.
+# Install the norn skill
 
-## Two install paths
+A single harness-independent skill teaches a coding agent how to operate the `norn` CLI safely. The skill body lives in [SKILL.md](SKILL.md).
 
-The coding-agent ecosystem has standardized on `.agents/skills/` for every harness except Claude Code, which uses `.claude/skills/`. That gives us exactly two install paths regardless of which agent you use:
+## Install with the skills CLI
+
+Install the `norn` skill into the current project:
+
+```bash
+npx skills add dbtlr/norn --skill norn
+```
+
+Install it in the global skill scope:
+
+```bash
+npx skills add dbtlr/norn --skill norn -g
+```
+
+For a global, non-interactive Codex installation:
+
+```bash
+npx skills add dbtlr/norn --skill norn -g -a codex -y
+```
+
+The explicit `--skill norn` option prevents the installer from selecting repository-maintenance skills that are not part of the public package.
+
+## Install manually
+
+Use a manual installation when the skills CLI is unavailable. Coding agents use two common paths:
 
 | Harness | Install path |
 |---|---|
 | Claude Code | `.claude/skills/norn/SKILL.md` |
 | Everything else (Codex, Open Code, OpenClaw, Hermes, PI, ...) | `.agents/skills/norn/SKILL.md` |
 
-The skill body in `SKILL.md` is identical for both. Only the install location and (optionally) the frontmatter quirks differ.
+Copy the same [SKILL.md](SKILL.md) file to either path. Only the install location and optional frontmatter extensions differ.
 
 ## Claude Code
 
@@ -74,11 +101,11 @@ metadata:
 
 No frontmatter additions needed. PI reads `name` and `description` from the bundled frontmatter.
 
-## Adding a new harness
+## Add a new harness
 
-If you're using a coding agent not listed above, install to `<workspace-root>/.agents/skills/norn/SKILL.md` first and see whether it picks up the skill. Most harnesses do.
+For a coding agent not listed above, first install to `<workspace-root>/.agents/skills/norn/SKILL.md`. Most harnesses discover that path.
 
-If your harness needs a frontmatter quirk to discover or trigger the skill, please open a PR adding a subsection under "All other coding agents" rather than introducing a new install path. We deliberately keep this to two paths total — Claude Code, and everything else.
+If the harness needs a frontmatter extension, add a subsection under "All other coding agents". Do not introduce another install path.
 
 ## Verifying the install
 
@@ -86,11 +113,11 @@ After installing, ask your agent something like:
 
 > Inspect the vault at ./my-notes with norn and tell me how many documents are missing a title field.
 
-A well-installed skill should produce a `norn -C ./my-notes validate --summary --format json` invocation, parse the JSON, and answer with the count from `fields.title`.
+A correct installation produces a `norn -C ./my-notes validate --summary --format json` invocation. The agent parses the JSON and reports the `fields.title` count.
 
 If the skill doesn't trigger, check that:
 
-1. The file lives at the exact install path above (case-sensitive on Linux).
+1. The file is at the exact install path above (case-sensitive on Linux).
 2. The frontmatter is valid YAML with `---` delimiters on their own lines.
 3. The agent has been restarted or had its skill cache refreshed.
 4. The `norn` binary is on the agent's `PATH` (most harnesses inherit the user's `PATH`).

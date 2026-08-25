@@ -5,7 +5,7 @@ description: "Architectural decision establishing that norn's documentation surf
 
 # 0001 — Documentation information architecture — four self-sufficient surfaces
 
-norn's documentation lives on four surfaces, each written for a different reader in a different context: the CLI's own `--help` (deliberately deeper than clap defaults, with a `-h` short / `--help` long split), the bundled agent **SKILL.md** (installed by the CLI into a user's repo with no access to norn's source on disk), the **per-command docs** under `docs/commands/` (linked directly as Markdown from the README today, becoming the first draft of an Astro/Starlight site at norn.run), and the **README** front door.
+norn's documentation lives on four surfaces, each written for a different reader in a different context: the CLI's own `--help` (deliberately deeper than clap defaults, with a `-h` short / `--help` long split), the bundled **SKILL.md** (installed into an agent's skill directory with no access to norn's source on disk), the **per-command docs** under `docs/commands/` (linked directly as Markdown from the README today, becoming the first draft of an Astro/Starlight site at norn.run), and the **README** front door.
 
 **Decision:** each surface is written to be self-sufficient for its reader. Overlap between surfaces is deliberate and is *not* deduplicated. This is prose, not code — who is reading (human at a terminal, human on the web, an agent offline), with what tool, online or offline, changes what to say even about the same flag. Drift between surfaces is managed by a release-checklist step, not by architecture or generation.
 
