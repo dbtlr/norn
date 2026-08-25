@@ -52,6 +52,7 @@ fn linked_agent_workflow_teaches_current_write_contracts() {
         "skip_reason",
         "\"schema_version\": 1",
         "`--format jsonl` on every command",
+        "point releases",
     ] {
         assert!(
             !workflow.contains(retired),

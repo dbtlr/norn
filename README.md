@@ -88,7 +88,7 @@ For a deeper walkthrough including scoped rules and a first repair plan, see [do
 | Move a document | `norn move <src> <dst>` | [move](docs/commands/move.md) |
 | Delete a document | `norn delete <doc>` | [delete](docs/commands/delete.md) |
 
-Commands list their supported formats in `--help`. Machine-readable JSON and JSONL contracts are stable across point releases; human-readable formats such as `records`, `text`, and `paths` may evolve.
+Commands list their supported formats in `--help`. Machine-readable JSON and JSONL contracts are stable across patch releases; human-readable formats such as `records`, `text`, and `paths` may evolve.
 
 ## For agents and automation
 

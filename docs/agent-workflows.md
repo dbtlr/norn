@@ -11,14 +11,14 @@ description: Stable JSON and JSONL contracts, agent loop patterns, and common ha
 
 | Contract | Surface | Stability |
 |---|---|---|
-| JSON output | `--format json` on commands that list it | Stable across point releases; breaking changes called out in CHANGELOG. |
+| JSON output | `--format json` on commands that list it | Stable across patch releases; breaking changes called out in CHANGELOG. |
 | JSONL output | `--format jsonl` on commands that list it | Same. |
 | Paths output | `--format paths` on commands that emit per-row paths | Stable; one unique vault-relative path per row. |
 | Migration plan schema | `repair --plan` JSON artifact (`MigrationPlan`) | Schema-versioned (`schema_version` field). Apply rejects mismatched versions. |
 | Apply report schema | `apply` JSON output (`ApplyReport`) | Stable across the matching plan schema version. |
 | Finding codes | `norn validate` output `code` field | Stable; renames are breaking changes called out in CHANGELOG. |
 
-Default human-readable rendering (`records` on most commands, `report` for `repair --plan`) is for humans and may evolve between point releases. Agents should pass an explicit machine-readable format that the command's `--help` lists. Format availability differs by command.
+Default human-readable rendering (`records` on most commands, `report` for `repair --plan`) is for humans and may evolve between releases. Agents should pass an explicit machine-readable format that the command's `--help` lists. Format availability differs by command.
 
 ## Vault targeting
 
