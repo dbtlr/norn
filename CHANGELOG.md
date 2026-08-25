@@ -14,6 +14,8 @@ Entries here have landed on `main` but have not yet been cut into a tagged relea
 
 - **The `norn` skill now installs through the skills CLI.** Its package lives at `skills/norn`, so `npx skills add dbtlr/norn --skill norn` selects and installs the public skill without installing repository-maintenance skills. The trigger now covers explicit `norn` requests and configured Markdown vaults in the current directory or at a known `-C` path. The skill also teaches the current Standards pack shape, MigrationPlan schema v2, and every agent-facing command.
 
+- Refreshed all semver-compatible Rust dependencies. This updates the test-only `h2` crate from 0.4.14 to 0.4.19 and resolves RUSTSEC-2026-0258.
+
 ### Fixed
 
 - **`norn repair --help` and `norn apply --help` now describe MigrationPlan schema v2.** The help no longer teaches the retired `PlannedChange` envelope or the removed `--verify` flag. It now covers owner-set preconditions, create-path resolution, operation preconditions, and separate post-apply validation.
