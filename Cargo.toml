@@ -42,7 +42,7 @@ globset = "0.4"
 parking_lot = { version = "0.12", features = ["arc_lock"] }
 pulldown-cmark = "0.13"
 regex = "1.10"
-rmcp = { version = "2.1.0", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "3.2.0", features = ["server", "transport-io", "macros"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 schemars = "1.2.1"
 serde = { version = "1.0", features = ["derive"] }
@@ -76,7 +76,7 @@ clap_mangen = "0.3"
 [dev-dependencies]
 filetime = "0.2.29"
 mockito = "1.5"
-rmcp = { version = "2.1.0", features = ["client"] }
+rmcp = { version = "3.2.0", features = ["client"] }
 # Integration tests corrupt a specific cache table's b-tree root page to prove
 # the query-time rebuild-on-corruption seam (NRN-275); same version/features as
 # the runtime dependency, so the lockfile is unaffected.
